@@ -1,0 +1,34 @@
+{
+  "name": "progress-bot",
+  "version": "1.0.0",
+  "description": "Progress tracking Telegram bot with AI-powered daily reports",
+  "main": "src/index.ts",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "tail": "wrangler tail",
+    "test": "echo \"Tests coming in Phase 4\" && exit 0",
+    "type-check": "tsc --noEmit"
+  },
+  "keywords": [
+    "telegram",
+    "bot",
+    "progress",
+    "todoist",
+    "cloudflare",
+    "workers"
+  ],
+  "author": "Your Name",
+  "license": "MIT",
+  "dependencies": {
+    "grammy": "^1.22.0"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20240117.0",
+    "typescript": "^5.3.3",
+    "wrangler": "^3.25.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

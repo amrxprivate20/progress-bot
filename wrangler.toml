@@ -1,0 +1,55 @@
+# ============================================
+# Cloudflare Worker Configuration
+# ============================================
+
+name = "progress-bot"
+main = "src/index.ts"
+compatibility_date = "2024-01-01"
+
+# Account ID (replace with your Cloudflare account ID)
+# You can find this in your Cloudflare Dashboard
+# account_id = "064f0f079a1847bc56e1b2f6e021e00b"
+
+# Workers settings
+workers_dev = true
+
+# Custom domain (optional - configure after deployment)
+# routes = [
+#   { pattern = "progress.yourdomain.com/*", zone_name = "yourdomain.com" }
+# ]
+
+# Environment variables (for production)
+# Use 'wrangler secret put <NAME>' to set these securely
+# [vars]
+# SUPABASE_URL = "https://xxxxx.supabase.co"
+# Note: Don't put actual secrets here, use 'wrangler secret put' command
+
+# Build configuration
+[build]
+command = ""
+
+# Development configuration
+[env.development]
+vars = { ENVIRONMENT = "development" }
+
+# Production configuration
+[env.production]
+vars = { ENVIRONMENT = "production" }
+
+# Limits and settings
+#[limits]
+# CPU time limit (in milliseconds)
+#cpu_ms = 50
+
+# Observability settings
+[observability]
+enabled = true
+
+# Compatibility flags
+compatibility_flags = []
+
+# Preserve file names during build
+preserve_file_names = []
+
+# Node.js compatibility (for Grammy and other packages)
+node_compat = true

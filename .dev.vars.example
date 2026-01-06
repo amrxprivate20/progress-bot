@@ -1,0 +1,22 @@
+# ============================================
+# Environment Variables Template
+# ============================================
+# Copy this file to .dev.vars and fill in your actual values
+# NEVER commit .dev.vars to version control!
+
+# Supabase Configuration
+SUPABASE_URL=https://xxxxx.supabase.co
+SUPABASE_ANON_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.xxx
+
+# Telegram Configuration
+TELEGRAM_BOT_TOKEN=7237718018:AAEYT7PatDELEbKjE3U4AnVlhUSrWCSNWKY
+TELEGRAM_CHAT_ID=-1002194965669
+
+# Todoist Configuration
+TODOIST_API_TOKEN=e0da939344cf499a579a49760dd907e610ab1bd1
+
+# Instructions:
+# 1. Copy this file: cp .dev.vars.example .dev.vars
+# 2. Fill in your actual values
+# 3. Never commit .dev.vars to Git (it's in .gitignore)
+# 4. For production, use: wrangler secret put <VARIABLE_NAME>
