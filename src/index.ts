@@ -1,5 +1,6 @@
 // ============================================
 // Cloudflare Worker - Main Entry Point
+// FIXED: Await notification completion to prevent premature termination
 // ============================================
 
 import type { Env } from './types';
@@ -10,12 +11,8 @@ import { handleTodoistWebhook, sendTaskNotification } from './handlers/todoist';
 import { validateEnvironment } from './utils/validation';
 import { asyncHandler, formatErrorResponse, ValidationError } from './utils/errors';
 
-/**
- * Main worker request handler
- */
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
-    // Validate environment variables
     const envValidation = validateEnvironment(env);
     if (!envValidation.valid) {
       return new Response(
@@ -31,29 +28,35 @@ export default {
       );
     }
 
-    // Create database client and settings manager
     const db = createSupabaseClient(env);
     const settings = new SettingsManager(db);
-
-    // Parse URL
     const url = new URL(request.url);
     const path = url.pathname;
 
-    // Route handling
     try {
-      // Health check endpoint
       if (path === '/health' && request.method === 'GET') {
         return handleHealth(db);
       }
 
-      // Todoist webhook endpoint
       if (path === '/webhook/todoist' && request.method === 'POST') {
         return asyncHandler(async () => {
-          return await handleTodoistWebhookEndpoint(request, env, db, settings);
+          const rawBody = await request.text();
+          
+          // Log raw payload for debugging
+          console.log('📥 Raw Todoist webhook:', rawBody);
+          
+          const payload = JSON.parse(rawBody);
+          
+          console.log('📥 Parsed webhook:', {
+            event: payload.event_name,
+            task: payload.event_data?.content,
+            project: payload.event_data?.project_id,
+          });
+          
+          return await handleTodoistWebhookEndpoint(payload, env, db, settings);
         })(request, env, ctx);
       }
 
-      // Telegram webhook endpoint
       if (path === '/telegram/webhook' && request.method === 'POST') {
         const botToken = env.TELEGRAM_BOT_TOKEN;
         const bot = createBot(botToken, db, settings);
@@ -61,29 +64,24 @@ export default {
         return await handler(request);
       }
 
-      // Settings API endpoints
       if (path.startsWith('/api/settings')) {
         return asyncHandler(async () => {
           return await handleSettingsAPI(request, path, settings);
         })(request, env, ctx);
       }
 
-      // Root endpoint
       if (path === '/' && request.method === 'GET') {
         return new Response(
           JSON.stringify({
             name: 'Progress Bot API',
             version: '1.0.0',
             status: 'online',
+            timezone: 'Africa/Cairo (GMT+2)',
             endpoints: {
               health: 'GET /health',
               todoist_webhook: 'POST /webhook/todoist',
               telegram_webhook: 'POST /telegram/webhook',
-              settings: {
-                get: 'GET /api/settings/:key',
-                set: 'POST /api/settings',
-                list: 'GET /api/settings',
-              },
+              settings: 'GET/POST/DELETE /api/settings',
             },
           }),
           {
@@ -93,16 +91,9 @@ export default {
         );
       }
 
-      // 404 for unknown routes
       return new Response(
-        JSON.stringify({
-          success: false,
-          error: 'Not found',
-        }),
-        {
-          status: 404,
-          headers: { 'Content-Type': 'application/json' },
-        }
+        JSON.stringify({ success: false, error: 'Not found' }),
+        { status: 404, headers: { 'Content-Type': 'application/json' } }
       );
     } catch (error) {
       console.error('Request handling error:', error);
@@ -116,9 +107,6 @@ export default {
   },
 };
 
-/**
- * Health check handler
- */
 async function handleHealth(db: any): Promise<Response> {
   try {
     const isHealthy = await db.healthCheck();
@@ -128,6 +116,7 @@ async function handleHealth(db: any): Promise<Response> {
         status: 'ok',
         database: isHealthy ? 'connected' : 'disconnected',
         timestamp: new Date().toISOString(),
+        timezone: 'Africa/Cairo (GMT+2)',
       }),
       {
         status: isHealthy ? 200 : 503,
@@ -141,45 +130,38 @@ async function handleHealth(db: any): Promise<Response> {
         database: 'error',
         error: (error as Error).message,
       }),
-      {
-        status: 503,
-        headers: { 'Content-Type': 'application/json' },
-      }
+      { status: 503, headers: { 'Content-Type': 'application/json' } }
     );
   }
 }
 
-/**
- * Todoist webhook handler
- */
 async function handleTodoistWebhookEndpoint(
-  request: Request,
+  payload: any,
   env: Env,
   db: any,
   settings: SettingsManager
 ): Promise<Response> {
   try {
-    // Parse webhook payload
-    const payload = await request.json();
-
-    // Process webhook
     const result = await handleTodoistWebhook(payload, db, settings);
 
-    // Send Telegram notification if task was processed
+    // FIXED: Await notification completion before responding
     if (result.task) {
-      const chatId = env.TELEGRAM_CHAT_ID;
       const botToken = env.TELEGRAM_BOT_TOKEN;
-      const threadId = await settings.get(SETTINGS_KEYS.TELEGRAM_THREAD_ARABIC);
+      const chatId = env.TELEGRAM_CHAT_ID;
       
-      // Fire and forget (don't wait for notification)
-      sendTaskNotification(
-        result.task,
-        chatId,
-        botToken,
-        threadId || undefined
-      ).catch(err => {
-        console.error('Notification failed:', err);
-      });
+      console.log('📤 Sending notification to:', chatId);
+      
+      // Send notification and wait for completion
+      try {
+        await sendTaskNotification(
+          result.task,
+          chatId,
+          botToken
+        );
+        console.log('✅ Notification sent successfully');
+      } catch (err) {
+        console.error('❌ Notification failed:', err);
+      }
     }
 
     return new Response(
@@ -187,10 +169,7 @@ async function handleTodoistWebhookEndpoint(
         success: true,
         message: result.message,
       }),
-      {
-        status: 200,
-        headers: { 'Content-Type': 'application/json' },
-      }
+      { status: 200, headers: { 'Content-Type': 'application/json' } }
     );
   } catch (error) {
     console.error('Todoist webhook error:', error);
@@ -198,31 +177,19 @@ async function handleTodoistWebhookEndpoint(
   }
 }
 
-/**
- * Settings API handler
- */
 async function handleSettingsAPI(
   request: Request,
   path: string,
   settings: SettingsManager
 ): Promise<Response> {
-  // GET /api/settings - List all settings
   if (path === '/api/settings' && request.method === 'GET') {
     const allSettings = await settings.getAll();
-    
     return new Response(
-      JSON.stringify({
-        success: true,
-        data: allSettings,
-      }),
-      {
-        status: 200,
-        headers: { 'Content-Type': 'application/json' },
-      }
+      JSON.stringify({ success: true, data: allSettings }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } }
     );
   }
 
-  // GET /api/settings/:key - Get specific setting
   if (path.startsWith('/api/settings/') && request.method === 'GET') {
     const key = path.split('/').pop();
     if (!key) {
@@ -233,30 +200,17 @@ async function handleSettingsAPI(
     
     if (value === null) {
       return new Response(
-        JSON.stringify({
-          success: false,
-          error: 'Setting not found',
-        }),
-        {
-          status: 404,
-          headers: { 'Content-Type': 'application/json' },
-        }
+        JSON.stringify({ success: false, error: 'Setting not found' }),
+        { status: 404, headers: { 'Content-Type': 'application/json' } }
       );
     }
 
     return new Response(
-      JSON.stringify({
-        success: true,
-        data: { key, value },
-      }),
-      {
-        status: 200,
-        headers: { 'Content-Type': 'application/json' },
-      }
+      JSON.stringify({ success: true, data: { key, value } }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } }
     );
   }
 
-  // POST /api/settings - Set setting
   if (path === '/api/settings' && request.method === 'POST') {
     const body: any = await request.json();
     
@@ -267,18 +221,11 @@ async function handleSettingsAPI(
     await settings.set(body.key, body.value);
 
     return new Response(
-      JSON.stringify({
-        success: true,
-        message: 'Setting updated',
-      }),
-      {
-        status: 200,
-        headers: { 'Content-Type': 'application/json' },
-      }
+      JSON.stringify({ success: true, message: 'Setting updated' }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } }
     );
   }
 
-  // DELETE /api/settings/:key - Delete setting
   if (path.startsWith('/api/settings/') && request.method === 'DELETE') {
     const key = path.split('/').pop();
     if (!key) {
@@ -288,14 +235,8 @@ async function handleSettingsAPI(
     await settings.delete(key);
 
     return new Response(
-      JSON.stringify({
-        success: true,
-        message: 'Setting deleted',
-      }),
-      {
-        status: 200,
-        headers: { 'Content-Type': 'application/json' },
-      }
+      JSON.stringify({ success: true, message: 'Setting deleted' }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } }
     );
   }
 

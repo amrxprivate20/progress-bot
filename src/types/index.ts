@@ -137,12 +137,13 @@ export interface TodoistEventData {
   due?: {
     date: string;
     is_recurring: boolean;
-    string: string;
+    string: string; // e.g., "every day", "every Mon, Wed, Fri"
   };
   labels?: string[];
   checked: boolean;
-  completed_at?: string; // ISO string
-  added_at: string; // ISO string
+  parent_id?: string; // For subtasks
+  completed_at?: string;
+  added_at: string;
 }
 
 // ============================================
