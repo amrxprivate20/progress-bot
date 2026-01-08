@@ -45,9 +45,8 @@ export async function handleTodoistWebhook(
     };
   }
 
-  // Get completion time - try multiple fields in order of preference
-  let completedAtString = event.event_data.completed_at || 
-                         event.event_data.checked_at ||
+  // Get completion time - use completed_at or fallback to now
+  let completedAtString = event.event_data.completed_at ||
                          new Date().toISOString(); // Fallback to now
   
   console.log('⏰ Completion timestamp:', completedAtString);
@@ -79,11 +78,14 @@ export async function handleTodoistWebhook(
   // Extract category from labels
   let category = metadata.category;
   if (!category && event.event_data.labels && event.event_data.labels.length > 0) {
-    category = event.event_data.labels[0]
-      .replace(/[^\w\s]/gi, '')
-      .replace(/\s+/g, '_')
-      .trim()
-      .toLowerCase();
+    const firstLabel = event.event_data.labels[0];
+    if (firstLabel) {
+      category = firstLabel
+        .replace(/[^\w\s]/gi, '')
+        .replace(/\s+/g, '_')
+        .trim()
+        .toLowerCase();
+    }
   }
 
   const task: Task = {
@@ -102,20 +104,21 @@ export async function handleTodoistWebhook(
   };
 
   try {
-    let savedTask: Task;
-    
+    let savedTask: Task | undefined;
+
     if (isRecurring) {
       // For recurring tasks, create unique ID with timestamp
       const uniqueTaskId = `${event.event_data.id}_${completedAt.getTime()}`;
-      
+
       console.log('🔄 Recurring task - unique ID:', uniqueTaskId);
-      
-      savedTask = (await db.insert<Task>('tasks', {
+
+      const inserted = await db.insert<Task>('tasks', {
         ...task,
         task_id: uniqueTaskId,
         created_at: new Date().toISOString(),
-      }))[0];
-      
+      });
+      savedTask = inserted[0];
+
       // Update streak (uses Egypt timezone internally)
       await updateStreakFromDueDate(
         db,
@@ -126,11 +129,16 @@ export async function handleTodoistWebhook(
       );
     } else {
       console.log('📝 Non-recurring task');
-      
-      savedTask = (await db.insert<Task>('tasks', {
+
+      const inserted = await db.insert<Task>('tasks', {
         ...task,
         created_at: new Date().toISOString(),
-      }))[0];
+      });
+      savedTask = inserted[0];
+    }
+
+    if (!savedTask) {
+      throw new Error('Failed to save task - no data returned');
     }
 
     console.log('✅ Task saved successfully');
@@ -167,13 +175,13 @@ export function parseTaskMetadata(content: string): ParsedTaskMetadata {
 
   // Check for comma-separated format: [30m, 5 pages]
   const comboMatch = content.match(/\[([^\]]+),\s*([^\]]+)\]/);
-  if (comboMatch) {
+  if (comboMatch && comboMatch[1] && comboMatch[2]) {
     const part1 = comboMatch[1].trim();
     const part2 = comboMatch[2].trim();
-    
+
     // Parse first part (usually duration)
     const durationMatch1 = part1.match(/^(\d+(?:\.\d+)?)(m|h|min|mins|hour|hours)$/i);
-    if (durationMatch1) {
+    if (durationMatch1 && durationMatch1[1] && durationMatch1[2]) {
       const value = parseFloat(durationMatch1[1]);
       const unit = durationMatch1[2].toLowerCase();
       
@@ -183,10 +191,10 @@ export function parseTaskMetadata(content: string): ParsedTaskMetadata {
         metadata.duration_minutes = Math.round(value);
       }
     }
-    
+
     // Parse second part (usually quantity)
     const quantityMatch2 = part2.match(/^(\d+(?:\.\d+)?)\s+([a-z]+)$/i);
-    if (quantityMatch2) {
+    if (quantityMatch2 && quantityMatch2[1] && quantityMatch2[2]) {
       metadata.quantity = parseFloat(quantityMatch2[1]);
       metadata.quantity_unit = quantityMatch2[2];
     }
@@ -197,7 +205,7 @@ export function parseTaskMetadata(content: string): ParsedTaskMetadata {
   // Single bracket formats
   // Try duration: [30m] or [2h]
   const durationMatch = content.match(/\[(\d+(?:\.\d+)?)(m|h|min|mins|hour|hours)\]/i);
-  if (durationMatch) {
+  if (durationMatch && durationMatch[1] && durationMatch[2]) {
     const value = parseFloat(durationMatch[1]);
     const unit = durationMatch[2].toLowerCase();
     
@@ -210,7 +218,7 @@ export function parseTaskMetadata(content: string): ParsedTaskMetadata {
 
   // Try quantity: [5 pages] or [25 reps]
   const quantityMatch = content.match(/\[(\d+(?:\.\d+)?)\s+([a-z]+)\]/i);
-  if (quantityMatch && !durationMatch) {
+  if (quantityMatch && quantityMatch[1] && quantityMatch[2] && !durationMatch) {
     metadata.quantity = parseFloat(quantityMatch[1]);
     metadata.quantity_unit = quantityMatch[2];
   }

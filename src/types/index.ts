@@ -104,10 +104,16 @@ export interface Setting {
 export interface ConversationState {
   id?: string;
   chat_id: string;
-  state_type: string;
-  state_data: any; // JSON data
-  expires_at: Date;
-  created_at?: Date;
+  conversation_type: string;
+  current_step: number;
+  total_steps: number;
+  data: {
+    questions?: string[];
+    answers?: Record<string, string>;
+    reportContext?: any;
+  };
+  expires_at: Date | string;
+  created_at?: Date | string;
 }
 
 // ============================================
@@ -164,12 +170,14 @@ export interface ParsedTaskMetadata {
 // ============================================
 
 export interface ReportData {
-  date: Date;
+  date: string;
   tasks: Task[];
-  weeklyGoals?: WeeklyGoals;
-  dailyChallenge?: DailyChallenge;
-  memory: Memory[];
-  previousReports: DailyReport[]; // Last 7 days
+  streaks: Streak[];
+  weeklyGoals: WeeklyGoals | null;
+  dailyChallenge: DailyChallenge | null;
+  memory: Record<string, string>;
+  previousReports: DailyReport[];
+  strategicGoals: string;
 }
 
 export interface ReportPreview {
@@ -180,6 +188,9 @@ export interface ReportPreview {
   total_time_minutes: number;
   success_rate: number;
   categories: { [key: string]: number };
+  top_categories: Array<{ name: string; count: number; time?: number }>;
+  streak_updates: Array<{ task: string; current: number; best: number }>;
+  formatted_text: string;
 }
 
 // ============================================

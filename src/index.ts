@@ -5,7 +5,7 @@
 
 import type { Env } from './types';
 import { createSupabaseClient } from './database/client';
-import { SettingsManager, SETTINGS_KEYS } from './database/settings';
+import { SettingsManager } from './database/settings';
 import { createBot, createTelegramWebhookHandler } from './bot/grammy';
 import { handleTodoistWebhook, sendTaskNotification } from './handlers/todoist';
 import { validateEnvironment } from './utils/validation';

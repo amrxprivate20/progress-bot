@@ -3,9 +3,12 @@
 // ============================================
 
 import { Bot, Context, webhookCallback } from 'grammy';
-import type { Env } from '../types';
 import type { SupabaseClient } from '../database/client';
 import type { SettingsManager } from '../database/settings';
+import { createReportGenerator } from '../services/report-generator';
+import { createAIClient } from '../services/ai-client';
+import { createConversationManager } from '../services/conversation-manager';
+import { createMemoryManager } from '../services/memory-manager';
 
 /**
  * Extended context with custom properties
@@ -101,12 +104,29 @@ function registerCommands(bot: Bot<BotContext>) {
   bot.command('progress', async (ctx) => {
     try {
       await ctx.reply('🔄 جاري إعداد ملخص اليوم...');
-      
-      // This will be implemented in Phase 2
-      await ctx.reply(
-        '⚠️ هذه الميزة ستكون متاحة في المرحلة 2\n' +
-        'Progress report generation coming in Phase 2!'
-      );
+
+      // Create services
+      const reportGen = createReportGenerator(ctx.db, ctx.settings);
+      const conversationMgr = createConversationManager(ctx.db);
+
+      // Check if user has active conversation
+      const chatId = ctx.chat?.id.toString() || '';
+      const hasConversation = await conversationMgr.hasActiveConversation(chatId);
+
+      if (hasConversation) {
+        await ctx.reply(
+          '⚠️ لديك محادثة نشطة بالفعل.\n' +
+          'استخدم /cancel لإلغائها أولاً.'
+        );
+        return;
+      }
+
+      // Generate preview
+      const preview = await reportGen.generatePreview();
+
+      // Send preview
+      await sendLongMessage(ctx, preview.formatted_text);
+
     } catch (error) {
       console.error('Progress command error:', error);
       await ctx.reply('❌ حدث خطأ أثناء إعداد الملخص. حاول مرة أخرى.');
@@ -115,52 +135,135 @@ function registerCommands(bot: Bot<BotContext>) {
 
   // Confirm command
   bot.command('confirm', async (ctx) => {
-    await ctx.reply(
-      '⚠️ هذه الميزة ستكون متاحة في المرحلة 2\n' +
-      'Report confirmation will be available in Phase 2!'
-    );
+    try {
+      await ctx.reply('🔄 جاري بدء التحليل الكامل...');
+
+      const chatId = ctx.chat?.id.toString() || '';
+      const conversationMgr = createConversationManager(ctx.db);
+
+      // Check if there's an active Q&A conversation
+      const hasConversation = await conversationMgr.hasActiveConversation(chatId);
+      if (hasConversation) {
+        await ctx.reply(
+          '⚠️ لديك محادثة نشطة بالفعل.\n' +
+          'استخدم /cancel لإلغائها أولاً.'
+        );
+        return;
+      }
+
+      // Get API keys from settings
+      const openRouterKey = await ctx.settings.get('openrouter_api_key');
+      const aiModel = await ctx.settings.get('ai_model') || 'anthropic/claude-sonnet-4';
+
+      if (!openRouterKey) {
+        await ctx.reply('❌ OpenRouter API key غير مضبوط في الإعدادات');
+        return;
+      }
+
+      // Create services
+      const reportGen = createReportGenerator(ctx.db, ctx.settings);
+      const aiClient = createAIClient(openRouterKey, aiModel);
+      // Memory manager will be used for memory updates later
+      createMemoryManager(ctx.db, aiClient);
+
+      // Collect report data
+      await ctx.reply('📊 جاري جمع البيانات...');
+      const reportData = await reportGen.collectReportData();
+
+      if (reportData.tasks.length === 0) {
+        await ctx.reply('⚠️ لا توجد مهام لهذا اليوم');
+        return;
+      }
+
+      // Generate questions using AI
+      await ctx.reply('💭 جاري تحضير بعض الأسئلة التوضيحية...');
+      const questions = await aiClient.generateQuestions({
+        tasks: reportData.tasks,
+        weeklyGoals: reportData.weeklyGoals?.goals_text || null,
+        dailyChallenge: reportData.dailyChallenge?.challenge_text || null,
+      });
+
+      if (questions.length > 0) {
+        // Start Q&A conversation
+        await conversationMgr.startQAConversation(chatId, questions, reportData);
+
+        await ctx.reply(
+          `📝 لدي ${questions.length} أسئلة توضيحية لفهم تجربتك اليوم بشكل أفضل.\n\n` +
+          'سأرسل سؤال واحد في كل مرة. أجب بحرية!'
+        );
+
+        // Send first question
+        const firstQuestion = await conversationMgr.getCurrentQuestion(chatId);
+        if (firstQuestion) {
+          await ctx.reply(`❓ ${firstQuestion}`);
+        }
+      } else {
+        // No questions, proceed directly with analysis
+        await ctx.reply('🤖 جاري التحليل الكامل...');
+        await processFullReport(ctx, reportData, {});
+      }
+
+    } catch (error) {
+      console.error('Confirm command error:', error);
+      await ctx.reply('❌ حدث خطأ أثناء بدء التحليل. حاول مرة أخرى.');
+    }
   });
 
   // Cancel command
   bot.command('cancel', async (ctx) => {
-    await ctx.reply('✅ تم الإلغاء');
+    try {
+      const chatId = ctx.chat?.id.toString() || '';
+      const conversationMgr = createConversationManager(ctx.db);
+
+      const hasConversation = await conversationMgr.hasActiveConversation(chatId);
+      if (hasConversation) {
+        await conversationMgr.clearConversation(chatId);
+        await ctx.reply('✅ تم إلغاء المحادثة');
+      } else {
+        await ctx.reply('✅ لا توجد محادثة نشطة للإلغاء');
+      }
+    } catch (error) {
+      console.error('Cancel command error:', error);
+      await ctx.reply('✅ تم الإلغاء');
+    }
   });
 
   // Memory command
   bot.command('memory', async (ctx) => {
     try {
       await ctx.reply('🔄 جاري تحميل الذاكرة...');
-      
-      // Get all memory categories
-      const memory = await ctx.db.select('memory', {
-        columns: 'category,content,last_updated',
-        order: 'category.asc',
-      });
 
-      if (memory.length === 0) {
-        await ctx.reply('📝 الذاكرة فارغة حالياً');
+      // Get API keys (needed for memory manager)
+      const openRouterKey = await ctx.settings.get('openrouter_api_key');
+      const aiModel = await ctx.settings.get('ai_model') || 'anthropic/claude-sonnet-4';
+
+      if (!openRouterKey) {
+        // Fallback to direct database query
+        const memory = await ctx.db.select('memory', {});
+
+        if (memory.length === 0) {
+          await ctx.reply('📝 الذاكرة فارغة حالياً');
+          return;
+        }
+
+        let message = '🧠 *الذاكرة المنظمة*\n\n';
+        for (const item of memory) {
+          message += `*${item.category}:*\n`;
+          const content = item.content || '_فارغ_';
+          message += `${content.substring(0, 300)}${content.length > 300 ? '...' : ''}\n\n`;
+        }
+
+        await sendLongMessage(ctx, message);
         return;
       }
 
-      // Format memory display
-      let message = '*🧠 الذاكرة المنظمة*\n\n';
-      
-      for (const item of memory) {
-        message += `*${item.category}:*\n`;
-        
-        if (item.content && item.content.trim().length > 0) {
-          // Truncate if too long
-          const content = item.content.length > 500 
-            ? item.content.substring(0, 500) + '...'
-            : item.content;
-          message += `${content}\n\n`;
-        } else {
-          message += '_(فارغ)_\n\n';
-        }
-      }
+      // Use memory manager for formatted display
+      const aiClient = createAIClient(openRouterKey, aiModel);
+      const memoryMgr = createMemoryManager(ctx.db, aiClient);
 
-      // Split message if too long (Telegram limit: 4096 chars)
-      await ctx.reply(message);
+      const formattedMemory = await memoryMgr.getFormattedMemory();
+      await sendLongMessage(ctx, formattedMemory);
+
     } catch (error) {
       console.error('Memory command error:', error);
       await ctx.reply('❌ حدث خطأ أثناء تحميل الذاكرة');
@@ -198,15 +301,45 @@ function registerCommands(bot: Bot<BotContext>) {
 
   // Handle text messages (for conversation flows)
   bot.on('message:text', async (ctx) => {
-    // This will be enhanced in Phase 2 for Q&A flows
-    // For now, just acknowledge
-    const text = ctx.message.text.toLowerCase();
-    
-    // Simple responses for memory clear confirmation
-    if (text === 'نعم' || text === 'yes') {
-      // Check if there's a pending memory clear operation
-      // This is simplified for Phase 1
-      await ctx.reply('تم إلغاء العملية. استخدم /clearmemory للمحاولة مرة أخرى');
+    try {
+      const chatId = ctx.chat?.id.toString() || '';
+      const text = ctx.message?.text || '';
+      const conversationMgr = createConversationManager(ctx.db);
+
+      // Check if user is in Q&A conversation
+      const hasConversation = await conversationMgr.hasActiveConversation(chatId);
+
+      if (hasConversation) {
+        // Save answer
+        await conversationMgr.saveAnswer(chatId, text);
+
+        // Check if all questions answered
+        const isComplete = await conversationMgr.isComplete(chatId);
+
+        if (isComplete) {
+          // All questions answered, process full report
+          await ctx.reply('✅ شكراً على إجاباتك! جاري التحليل الكامل الآن...');
+
+          const reportContext = await conversationMgr.getReportContext(chatId);
+          const answers = await conversationMgr.getAnswers(chatId);
+
+          // Clear conversation
+          await conversationMgr.clearConversation(chatId);
+
+          // Process full report with answers
+          await processFullReport(ctx, reportContext, answers || {});
+
+        } else {
+          // Get next question
+          const nextQuestion = await conversationMgr.getCurrentQuestion(chatId);
+          if (nextQuestion) {
+            const progress = await conversationMgr.getProgress(chatId);
+            await ctx.reply(`✅ تمام!\n\n[${progress}] ❓ ${nextQuestion}`);
+          }
+        }
+      }
+    } catch (error) {
+      console.error('Text message handler error:', error);
     }
   });
 
@@ -222,6 +355,128 @@ function registerCommands(bot: Bot<BotContext>) {
       await ctx.reply('✅ Report cancelled');
     }
   });
+}
+
+/**
+ * Process full report with AI analysis
+ */
+async function processFullReport(
+  ctx: BotContext,
+  reportData: any,
+  userAnswers: Record<string, string>
+) {
+  try {
+    // Get API keys from settings
+    const openRouterKey = await ctx.settings.get('openrouter_api_key');
+    const aiModel = await ctx.settings.get('ai_model') || 'anthropic/claude-sonnet-4';
+
+    if (!openRouterKey) {
+      await ctx.reply('❌ OpenRouter API key غير مضبوط في الإعدادات');
+      return;
+    }
+
+    // Create services
+    const reportGen = createReportGenerator(ctx.db, ctx.settings);
+    const aiClient = createAIClient(openRouterKey, aiModel);
+    const memoryMgr = createMemoryManager(ctx.db, aiClient);
+
+    // Generate past week summary
+    const pastWeekSummary = reportGen.generatePastWeekSummary(reportData.previousReports);
+
+    // Call AI for unified analysis
+    await ctx.reply('🤖 جاري التحليل بالذكاء الاصطناعي...');
+
+    const aiResponse = await aiClient.generateDailyReport({
+      reportDate: reportData.date,
+      tasks: reportData.tasks,
+      streaks: reportData.streaks,
+      weeklyGoals: reportData.weeklyGoals?.goals_text || null,
+      dailyChallenge: reportData.dailyChallenge?.challenge_text || null,
+      memory: reportData.memory,
+      pastWeekSummary,
+      strategicGoals: reportData.strategicGoals,
+      userAnswers: Object.keys(userAnswers).length > 0 ? userAnswers : undefined,
+    });
+
+    // Send AI commentary
+    await ctx.reply('💬 *التحليل والتعليق:*');
+    await sendLongMessage(ctx, aiResponse.mainCommentary);
+
+    // Send challenge evaluation
+    if (reportData.dailyChallenge) {
+      await ctx.reply(
+        `🎯 *تقييم التحدي اليومي:* ${aiResponse.challengeEvaluation}\n` +
+        `"${reportData.dailyChallenge.challenge_text}"`
+      );
+    }
+
+    // Send reward suggestion
+    if (aiResponse.reward) {
+      await ctx.reply(`🎁 *المكافأة المقترحة:* ${aiResponse.reward}`);
+    }
+
+    // Send goals analysis
+    if (aiResponse.goalsAnalysis) {
+      let goalsMsg = '🎯 *تحليل الأهداف الأسبوعية:*\n\n';
+
+      if (aiResponse.goalsAnalysis.completed.length > 0) {
+        goalsMsg += '✅ *منجزة:*\n';
+        aiResponse.goalsAnalysis.completed.forEach(g => goalsMsg += `- ${g}\n`);
+        goalsMsg += '\n';
+      }
+
+      if (aiResponse.goalsAnalysis.inProgress.length > 0) {
+        goalsMsg += '🔄 *قيد التنفيذ:*\n';
+        aiResponse.goalsAnalysis.inProgress.forEach(g => goalsMsg += `- ${g}\n`);
+        goalsMsg += '\n';
+      }
+
+      if (aiResponse.goalsAnalysis.neglected.length > 0) {
+        goalsMsg += '⚠️ *مهملة:*\n';
+        aiResponse.goalsAnalysis.neglected.forEach(g => goalsMsg += `- ${g}\n`);
+      }
+
+      await ctx.reply(goalsMsg);
+    }
+
+    // Update memory
+    if (Object.keys(aiResponse.memoryUpdates).length > 0) {
+      await ctx.reply('🧠 جاري تحديث الذاكرة...');
+      await memoryMgr.updateMemory(aiResponse.memoryUpdates);
+      await ctx.reply('✅ تم تحديث الذاكرة');
+    }
+
+    // Check if memory optimization is needed
+    if (aiResponse.memoryOptimization === 'OPTIMIZE_NEEDED') {
+      await ctx.reply('🔄 جاري تحسين الذاكرة...');
+      await memoryMgr.checkOptimizationTriggers();
+    }
+
+    // Save report to database
+    await ctx.reply('💾 جاري حفظ التقرير...');
+    const stats = reportGen.calculateStatistics(reportData.tasks);
+
+    await ctx.db.insert('daily_reports', {
+      report_date: reportData.date,
+      report_markdown: aiResponse.mainCommentary,
+      success_rate: stats.success_rate,
+      total_tasks: stats.total_tasks,
+      completed_tasks: stats.completed_tasks,
+      failed_tasks: stats.failed_tasks,
+      achievement_time_minutes: stats.total_time_minutes,
+      challenge_evaluation: aiResponse.challengeEvaluation,
+      ai_commentary: aiResponse.mainCommentary,
+      suggested_reward: aiResponse.reward,
+      weekly_goals_analysis: JSON.stringify(aiResponse.goalsAnalysis),
+    });
+
+    await ctx.reply('✅ تم حفظ التقرير بنجاح!');
+
+  } catch (error) {
+    console.error('Process full report error:', error);
+    await ctx.reply('❌ حدث خطأ أثناء معالجة التقرير الكامل');
+    throw error;
+  }
 }
 
 /**
@@ -286,8 +541,8 @@ export async function setWebhook(
       }
     );
 
-    const data = await response.json();
-    
+    const data = await response.json() as { ok: boolean; description?: string };
+
     if (!data.ok) {
       console.error('Failed to set webhook:', data);
       return false;
@@ -311,7 +566,7 @@ export async function deleteWebhook(botToken: string): Promise<boolean> {
       { method: 'POST' }
     );
 
-    const data = await response.json();
+    const data = await response.json() as { ok: boolean };
     return data.ok;
   } catch (error) {
     console.error('Error deleting webhook:', error);

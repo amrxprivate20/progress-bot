@@ -1,0 +1,511 @@
+# My Progress Telegram Bot - Complete Rebuild Project
+
+## 🎯 Project Overview
+Build a modern, fast, and maintainable progress tracking system with AI-powered daily reports, replacing a slow Google Sheets-based system. The bot integrates with Todoist, generates intelligent Arabic reports, manages weekly goals, and maintains an organized memory system about the user.
+
+---
+
+## 📋 Core Requirements
+
+### 1. **System Architecture**
+- **Database:** Supabase (PostgreSQL) - free tier
+- **Backend API:** Cloudflare Workers (serverless, free tier)
+- **Bot Framework:** Grammy (TypeScript/Deno) for Telegram
+- **AI Provider:** OpenRouter API (Claude Sonnet 4)
+- **Language:** TypeScript/JavaScript (Node.js compatible)
+- **File Storage:** Google Drive API (for Obsidian markdown files)
+
+### 2. **Data Models**
+
+#### **Tasks Table** (`tasks`)
+```sql
+CREATE TABLE tasks (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  task_id TEXT UNIQUE NOT NULL,
+  content TEXT NOT NULL,
+  category TEXT,
+  priority INTEGER,
+  description TEXT,
+  completed_at TIMESTAMPTZ NOT NULL,
+  duration_minutes INTEGER DEFAULT 0,
+  quantity NUMERIC,
+  quantity_unit TEXT,
+  is_origin BOOLEAN DEFAULT false,
+  origin_task TEXT,
+  status TEXT CHECK (status IN ('done', 'failed', 'partial')),
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX idx_tasks_completed_at ON tasks(completed_at DESC);
+CREATE INDEX idx_tasks_category ON tasks(category);
+```
+
+#### **Streaks Table** (`streaks`)
+```sql
+CREATE TABLE streaks (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  task_name TEXT UNIQUE NOT NULL,
+  current_streak INTEGER DEFAULT 0,
+  best_streak INTEGER DEFAULT 0,
+  last_completed_date DATE,
+  streak_type TEXT CHECK (streak_type IN ('daily', 'weekly')),
+  weekly_pattern TEXT, -- e.g., "1,2,3,4,5,6,7" for daily or "6" for Saturday only
+  updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+```
+
+#### **Daily Reports Table** (`daily_reports`)
+```sql
+CREATE TABLE daily_reports (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  report_date DATE UNIQUE NOT NULL,
+  report_markdown TEXT NOT NULL,
+  success_rate NUMERIC,
+  total_tasks INTEGER,
+  completed_tasks INTEGER,
+  failed_tasks INTEGER,
+  achievement_time_minutes INTEGER,
+  challenge_evaluation TEXT,
+  ai_commentary TEXT,
+  suggested_reward TEXT,
+  weekly_goals_analysis TEXT,
+  user_comments TEXT,
+  obsidian_file_id TEXT,
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX idx_daily_reports_date ON daily_reports(report_date DESC);
+```
+
+#### **Weekly Goals Table** (`weekly_goals`)
+```sql
+CREATE TABLE weekly_goals (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  week_start_date DATE NOT NULL,
+  week_end_date DATE NOT NULL,
+  goals_text TEXT NOT NULL,
+  evaluation_text TEXT,
+  completion_rate NUMERIC,
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX idx_weekly_goals_dates ON weekly_goals(week_start_date DESC);
+```
+
+#### **Daily Challenges Table** (`daily_challenges`)
+```sql
+CREATE TABLE daily_challenges (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  challenge_date DATE UNIQUE NOT NULL,
+  challenge_text TEXT NOT NULL,
+  result BOOLEAN,
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+```
+
+#### **Memory Table** (`memory`)
+```sql
+CREATE TABLE memory (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  category TEXT UNIQUE NOT NULL CHECK (category IN (
+    'Personal Insights & Patterns',
+    'Successful Strategies & What Works',
+    'Triggers & Challenges',
+    'Important Milestones & Breakthroughs',
+    'Recurring Themes & Lessons',
+    'Personal Information & Facts'
+  )),
+  content TEXT,
+  last_updated TIMESTAMPTZ DEFAULT NOW(),
+  last_optimized TIMESTAMPTZ
+);
+```
+
+#### **Settings Table** (`settings`)
+```sql
+CREATE TABLE settings (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL,
+  updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+```
+
+### 3. **Essential Features**
+
+#### **A. Todoist Integration**
+- Webhook receiver for task completion events
+- Parse task metadata (duration, quantity, origin tasks)
+- Calculate streaks automatically
+- Filter by specific project ID
+- Duplicate detection (20-minute window)
+
+#### **B. Report Generation**
+- Collect all completed tasks for the day
+- Calculate success rate, time spent, task distribution
+- Retrieve current weekly goals and daily challenge
+- Get organized memory context
+- Get analysis of past week's reports
+- Send everything to AI for unified analysis
+
+#### **C. AI Analysis System**
+- **Single unified prompt** that produces all outputs:
+  1. Clarifying questions (1-5 questions, at least 1 required)
+  2. Comprehensive commentary (Egyptian dialect)
+  3. Daily challenge evaluation (✅/❌)
+  4. Suggested reward
+  5. Weekly goals analysis (completed/in-progress/neglected)
+  6. Memory updates (only if new important info)
+  7. Memory optimization (only if needed)
+
+- **Interactive Q&A Flow:**
+  - If AI generates questions, bot enters Q&A mode
+  - Stores questions in conversation state
+  - Sends one question at a time
+  - Waits for user answers (10-minute timeout)
+  - After all answers collected, continues with full analysis
+
+#### **D. Telegram Bot Commands**
+- `/progress@amrxprivatebot` - Show report preview, ask for confirmation
+- `/confirm@amrxprivatebot` - Proceed with full AI analysis
+- `/cancel@amrxprivatebot` - Cancel report processing
+- `/memory@amrxprivatebot` - View current organized memory
+- `/clearmemory@amrxprivatebot` - Clear all memory (with confirmation)
+- `/createtasks@amrxprivatebot` - Generate week's tasks in Todoist from goals
+- `/lastupdate@amrxprivatebot` - Create _LastUpdate.md file with current state
+- All other commands from original system (recovery, quran, etc.)
+
+#### **E. Memory Management**
+- 6 organized categories
+- Automatic updates from daily insights
+- Smart deduplication (70% word overlap threshold)
+- Auto-optimization triggers:
+  - Size exceeds 10,000 characters
+  - 7 days since last optimization
+- AI-powered consolidation and cleanup
+
+#### **F. Weekly Goals System**
+- Generate new goals every Friday using AI
+- Evaluation of previous week's goals
+- Integration with long-term strategic goals
+- Extract 7 daily challenges (Saturday-Friday)
+- Store challenges separately
+
+#### **G. Todoist Task Creation**
+- Read weekly goals and daily challenges
+- Generate 5-8 specific tasks using AI
+- Create all tasks with correct due dates
+- Assign priorities (1-4)
+- Handle rate limiting properly
+
+#### **H. Google Drive Integration**
+- Save daily reports as Markdown files
+- Folder structure: main folder + "Gallery" subfolder for images
+- Filename format: `YYYY-MM-DD.md`
+- Support image uploads from Telegram
+- Create `_LastUpdate.md` with current status
+
+### 4. **API Endpoints Structure**
+```typescript
+// Cloudflare Workers endpoints
+
+POST /webhook/todoist
+  - Receive task completion from Todoist
+  - Validate project ID
+  - Store in database
+  - Update streaks
+  - Check for special tasks (Quran memorization)
+  - Send Telegram notification
+
+POST /telegram/webhook
+  - Receive all bot interactions
+  - Route to appropriate handlers
+  - Manage conversation state
+
+GET /api/report/preview/:date
+  - Generate report preview without AI
+  - Return formatted text
+
+POST /api/report/generate/:date
+  - Gather all context (tasks, goals, memory, etc.)
+  - Call AI with unified prompt
+  - Parse AI response
+  - Handle Q&A flow if needed
+  - Save to database
+  - Send to Telegram
+  - Save to Google Drive
+
+POST /api/memory/optimize
+  - Get current memory
+  - Call AI for optimization
+  - Update database
+
+POST /api/goals/generate
+  - Evaluate previous week
+  - Generate new goals
+  - Extract challenges
+  - Save to database
+
+POST /api/todoist/create-tasks
+  - Read current week's goals and challenges
+  - Generate tasks with AI
+  - Create in Todoist via API
+```
+
+### 5. **Configuration Requirements**
+
+Store in Supabase `settings` table:
+```typescript
+{
+  // Telegram
+  "telegram_bot_token": "7237718018:AAEYT7PatDELEbKjE3U4AnVlhUSrWCSNWKY",
+  "telegram_chat_id": "-1002194965669",
+  "telegram_thread_arabic": "149",
+  "telegram_thread_english": "155",
+  "telegram_thread_quran": "2053",
+  
+  // Todoist
+  "todoist_api_token": "e0da939344cf499a579a49760dd907e610ab1bd1",
+  "todoist_project_id": "6G5w8P3227Gxp9vw",
+  
+  // AI
+  "openrouter_api_key": "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",
+  "ai_model": "anthropic/claude-sonnet-4",
+  
+  // Google Drive
+  "google_drive_folder_id": "1Ue_DiDbOFVY_nAuByhKxFCdxzuJJa54Q",
+  
+  // System
+  "quran_task_name": "Reviewing a memorized portion from the the Holy Quran❗",
+  "quran_spreadsheet_id": "1MHFaNWUyzDaGYRWEJOs8BV_g4JOmoagjnr4ZY0wxg0g",
+  
+  // Long-term goals (stored as JSON text)
+  "strategic_goals": "...",
+  
+  // Master AI Prompt
+  "master_prompt": "..." // The complete unified prompt
+}
+```
+
+### 6. **Critical Business Logic**
+
+#### **Streak Calculation Algorithm**
+```typescript
+// For daily streaks (every day)
+function updateDailyStreak(taskName: string, completionDate: Date) {
+  const streak = getStreak(taskName);
+  const yesterday = new Date(completionDate);
+  yesterday.setDate(yesterday.getDate() - 1);
+  
+  if (streak.lastCompletedDate === null) {
+    // First time
+    streak.currentStreak = 1;
+  } else if (isSameDay(streak.lastCompletedDate, completionDate)) {
+    // Same day, no change
+    return;
+  } else if (isSameDay(streak.lastCompletedDate, yesterday)) {
+    // Consecutive day
+    streak.currentStreak++;
+  } else {
+    // Streak broken
+    streak.currentStreak = 1;
+  }
+  
+  streak.bestStreak = Math.max(streak.bestStreak, streak.currentStreak);
+  streak.lastCompletedDate = completionDate;
+  saveStreak(streak);
+}
+
+// For weekly streaks (specific days of week)
+function updateWeeklyStreak(taskName: string, completionDate: Date, weeklyPattern: string) {
+  // Pattern example: "1,2,3,4,5" means Mon-Fri
+  // Check if completed on expected days within each week
+  // Calculate consecutive weeks completed
+}
+```
+
+#### **Report Arabic Formatting**
+```typescript
+// Convert minutes to Arabic time format
+function formatArabicTime(minutes: number): string {
+  const hours = Math.floor(minutes / 60);
+  const mins = minutes % 60;
+  
+  let result = [];
+  
+  if (hours > 0) {
+    if (hours === 1) result.push("ساعة");
+    else if (hours === 2) result.push("ساعتان");
+    else if (hours <= 10) result.push(`${hours} ساعات`);
+    else result.push(`${hours} ساعة`);
+  }
+  
+  if (mins > 0) {
+    if (mins <= 1) result.push("دقيقة");
+    else if (mins === 2) result.push("دقيقتان");
+    else if (mins <= 10) result.push(`${mins} دقائق`);
+    else result.push(`${mins} دقيقة`);
+  }
+  
+  return result.join(" و");
+}
+
+// Generate full Arabic daily report
+function generateArabicReport(data: ReportData): string {
+  // Format like the example provided
+  // Include: date, rating, success rate, time, task counts
+  // List completed tasks with streaks and details
+  // List failed tasks
+  // Show challenge result
+  // Show weekly goals progress
+}
+```
+
+#### **AI Response Parsing**
+```typescript
+interface UnifiedAIResponse {
+  questions: string[];
+  mainCommentary: string;
+  challengeEvaluation: string;
+  reward: string;
+  goalsAnalysis: {
+    completed: string[];
+    inProgress: string[];
+    neglected: string[];
+  };
+  memoryUpdates: Map<string, string>; // category -> new content
+  memoryOptimization?: string; // full optimized memory if needed
+}
+
+function parseUnifiedAIResponse(aiText: string): UnifiedAIResponse {
+  // Extract each section using regex patterns
+  // Handle markdown formatting
+  // Return structured object
+}
+```
+
+### 7. **Error Handling Requirements**
+- All API calls must have retry logic (3 attempts with exponential backoff)
+- Database transactions for critical operations
+- Graceful degradation (if AI fails, save raw report)
+- Detailed logging for debugging
+- User-friendly error messages in Arabic
+
+### 8. **Performance Requirements**
+- Todoist webhook response < 500ms
+- Report generation < 30 seconds
+- Database queries < 100ms
+- Support 100+ tasks per day
+
+---
+
+## 📦 Deliverables Required
+
+### **Phase 1: Foundation (Priority 1)**
+1. Complete Supabase database setup script
+2. Cloudflare Workers boilerplate with TypeScript
+3. Todoist webhook handler with duplicate detection
+4. Basic Telegram bot with Grammy framework
+5. Settings management system
+
+### **Phase 2: Core Features (Priority 2)**
+6. Task storage and streak calculation
+7. Report generation (Arabic formatting)
+8. AI integration with unified prompt
+9. Q&A conversation flow
+10. Memory management system
+
+### **Phase 3: Advanced Features (Priority 3)**
+11. Weekly goals generation
+12. Todoist task creation
+13. Google Drive integration
+14. All Telegram commands
+
+### **Phase 4: Testing & Deployment (Priority 4)**
+15. Unit tests for critical functions
+16. Integration testing guide
+17. Deployment instructions
+18. Migration script (if needed for any critical historical data)
+19. Monitoring and logging setup
+
+---
+
+## 📝 Documentation Required
+
+1. **Architecture Diagram** (visual overview)
+2. **Setup Guide** (step-by-step for someone with basic programming knowledge)
+3. **Environment Variables** (complete .env.example)
+4. **API Documentation** (all endpoints)
+5. **Database Schema** (with relationships diagram)
+6. **Deployment Guide** (Cloudflare Workers + Supabase)
+7. **Testing Guide** (how to test each feature)
+8. **Troubleshooting Guide** (common issues and solutions)
+
+---
+
+## 🎨 Code Quality Standards
+
+- **TypeScript strict mode**
+- **Functional programming style** where possible
+- **Clear naming conventions** (descriptive, not abbreviated)
+- **Comprehensive comments** (explain WHY, not WHAT)
+- **Error handling everywhere**
+- **No magic numbers** (use named constants)
+- **Modular design** (small, focused functions)
+- **DRY principle** (don't repeat yourself)
+
+---
+
+## 🚀 Special Implementation Notes
+
+1. **Telegram Message Splitting:** Messages longer than 4096 characters must be split intelligently (at paragraph breaks, not mid-sentence)
+
+2. **Rate Limiting:** 
+   - Todoist API: 450 requests per 15 minutes
+   - Telegram: 30 messages per second
+   - OpenRouter: varies by model
+
+3. **Time Zones:** All dates/times in GMT+3 (Egypt/Cairo)
+
+4. **Arabic Text Handling:** Ensure proper RTL support and Unicode handling
+
+5. **Conversation State:** Use in-memory store (Cloudflare Workers KV for persistence)
+
+6. **Graceful Shutdown:** Handle cleanup on worker termination
+
+---
+
+## 💡 Implementation Guidance Requested
+
+For each deliverable, provide:
+- ✅ **Complete working code** (copy-paste ready)
+- ✅ **Inline comments** explaining logic
+- ✅ **Setup instructions** for that specific component
+- ✅ **Testing examples** showing how to verify it works
+- ✅ **Common pitfalls** to avoid
+- ✅ **Next steps** to integrate with other components
+
+Assume the developer has:
+- Basic JavaScript/TypeScript knowledge
+- Familiarity with terminal/command line
+- No prior experience with Cloudflare Workers or Supabase
+- Needs clear, step-by-step instructions
+
+---
+
+## 🎯 Success Criteria
+
+The system is complete when:
+1. ✅ Todoist tasks are captured automatically
+2. ✅ Daily reports generate with AI analysis
+3. ✅ Interactive Q&A works smoothly
+4. ✅ Memory system updates and optimizes
+5. ✅ Weekly goals generate and evaluate
+6. ✅ Tasks are created in Todoist from goals
+7. ✅ All Telegram commands work
+8. ✅ Reports save to Google Drive
+9. ✅ System is fast (reports in < 30 seconds)
+10. ✅ System is stable (no crashes for 7 days)
+
+---
+
+**Start with Phase 1, provide complete implementation with all code, setup instructions, and testing guidance. After Phase 1 is confirmed working, proceed to Phase 2, and so on.**

@@ -2,7 +2,7 @@
 // Validation Utilities
 // ============================================
 
-import type { Task, TodoistWebhookEvent, ValidationResult } from '../types';
+import type { Task, ValidationResult } from '../types';
 
 /**
  * Validate Todoist webhook event structure
