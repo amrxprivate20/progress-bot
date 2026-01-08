@@ -10,6 +10,7 @@ import { createBot, createTelegramWebhookHandler } from './bot/grammy';
 import { handleTodoistWebhook, sendTaskNotification } from './handlers/todoist';
 import { validateEnvironment } from './utils/validation';
 import { asyncHandler, formatErrorResponse, ValidationError } from './utils/errors';
+import { handleReportProcessing } from './handlers/process-report';
 
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
@@ -34,6 +35,11 @@ export default {
     const path = url.pathname;
 
     try {
+if (path === '/api/process-report' && request.method === 'POST') {
+  return asyncHandler(async () => {
+    return await handleReportProcessing(request, db, settings);
+  })(request, env, ctx);
+}
       if (path === '/health' && request.method === 'GET') {
         return handleHealth(db);
       }

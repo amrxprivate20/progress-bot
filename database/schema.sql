@@ -160,8 +160,10 @@ COMMENT ON TABLE settings IS 'System configuration and API keys';
 CREATE TABLE IF NOT EXISTS conversation_state (
   id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
   chat_id TEXT NOT NULL,
-  state_type TEXT NOT NULL,
-  state_data JSONB,
+  conversation_type TEXT NOT NULL,
+  current_step INTEGER DEFAULT 0,
+  total_steps INTEGER DEFAULT 0,
+  data JSONB,
   expires_at TIMESTAMPTZ NOT NULL,
   created_at TIMESTAMPTZ DEFAULT NOW()
 );
@@ -170,7 +172,7 @@ CREATE INDEX IF NOT EXISTS idx_conversation_chat_id ON conversation_state(chat_i
 CREATE INDEX IF NOT EXISTS idx_conversation_expires ON conversation_state(expires_at);
 
 COMMENT ON TABLE conversation_state IS 'Temporary storage for multi-step conversations';
-COMMENT ON COLUMN conversation_state.state_type IS 'Type of conversation: qa_flow, report_confirmation, etc.';
+COMMENT ON COLUMN conversation_state.conversation_type IS 'Type of conversation: qa_flow, report_confirmation, etc.';
 
 -- ============================================
 -- 9. INSERT DEFAULT SETTINGS

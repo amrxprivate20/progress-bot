@@ -5,7 +5,7 @@
  * Collects tasks, streaks, goals, challenges, and memory for AI analysis.
  */
 
-import { SupabaseClient } from '../database/client';
+import { SupabaseClient, op } from '../database/client';
 import { SettingsManager } from '../database/settings';
 import { Task, Streak, DailyReport, WeeklyGoals, DailyChallenge, Memory } from '../types';
 
@@ -320,8 +320,10 @@ export class ReportGenerator {
    * Get daily challenge for date
    */
   private async getDailyChallenge(date: string): Promise<DailyChallenge | null> {
+    // FIX: Use op.eq() for the filter
     const challenges = await this.db.select<DailyChallenge>('daily_challenges', {
-      filter: { challenge_date: date },
+      filter: { challenge_date: op.eq(date) },
+      limit: 1
     });
 
     return challenges.length > 0 ? (challenges[0] || null) : null;
@@ -348,7 +350,7 @@ export class ReportGenerator {
     const allReports = await this.db.select<DailyReport>(
       'daily_reports',
       {
-        order: 'report_date:desc',
+        order: 'report_date.desc',
         limit: limit + 5,
       }
     );

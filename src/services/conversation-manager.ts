@@ -5,7 +5,7 @@
  * Stores conversation state in database with 10-minute expiry.
  */
 
-import { SupabaseClient } from '../database/client';
+import { SupabaseClient, op } from '../database/client';
 import { ConversationState } from '../types';
 
 // ============================================
@@ -46,7 +46,9 @@ export class ConversationManager {
     };
 
     // Delete any existing conversation for this chat
-    await this.db.delete('conversation_state', { filter: { chat_id: chatId } });
+    await this.db.delete('conversation_state', { 
+      chat_id: op.eq(chatId) 
+    });
 
     // Create new conversation
     await this.db.insert('conversation_state', state);
@@ -58,7 +60,12 @@ export class ConversationManager {
   async getConversation(chatId: string): Promise<ConversationState | null> {
     const result = await this.db.select<ConversationState>(
       'conversation_state',
-      { filter: { chat_id: chatId } }
+      { 
+        filter: { 
+          chat_id: op.eq(chatId) 
+        },
+        limit: 1
+      }
     );
 
     if (result.length === 0) {
@@ -123,10 +130,12 @@ export class ConversationManager {
     const answers = conversation.data.answers || {};
     answers[currentQuestion] = answer;
 
-    // Update conversation
+    // Update conversation - FIX: Use op.eq() for the filter
     await this.db.update(
       'conversation_state',
-      { filter: { id: conversation.id } },
+      { 
+        id: op.eq(conversation.id as string)
+      },
       {
         current_step: currentStep + 1,
         data: {
@@ -179,7 +188,9 @@ export class ConversationManager {
    * Clear conversation state
    */
   async clearConversation(chatId: string): Promise<void> {
-    await this.db.delete('conversation_state', { filter: { chat_id: chatId } });
+    await this.db.delete('conversation_state', { 
+      chat_id: op.eq(chatId) 
+    });
   }
 
   /**
@@ -204,7 +215,9 @@ export class ConversationManager {
       .filter((id): id is string => id !== undefined);
 
     for (const id of expiredIds) {
-      await this.db.delete('conversation_state', { filter: { id } });
+      await this.db.delete('conversation_state', { 
+        id: op.eq(id) 
+      });
     }
   }
 

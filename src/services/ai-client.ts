@@ -64,10 +64,17 @@ export class AIClient {
   private baseUrl = 'https://openrouter.ai/api/v1';
   private model: string;
 
-  constructor(apiKey: string, model: string = 'anthropic/claude-sonnet-4') {
-    this.apiKey = apiKey;
-    this.model = model;
+  // NEW
+constructor(apiKey: string, model: string = 'anthropic/claude-sonnet-4') {
+  // Trim whitespace and validate API key format
+  this.apiKey = apiKey.trim();
+  
+  if (!this.apiKey.startsWith('sk-or-v1-')) {
+    throw new Error('Invalid OpenRouter API key format. Key must start with "sk-or-v1-"');
   }
+  
+  this.model = model;
+}
 
   /**
    * Send a completion request to OpenRouter API
