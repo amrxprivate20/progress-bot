@@ -1,11 +1,12 @@
 // ============================================
 // Grammy Bot Setup and Handlers
-// FIXED: Better error handling and logging in trigger
+// FIXED: Process reports internally instead of HTTP self-call
 // ============================================
 
 import { Bot, Context, webhookCallback } from 'grammy';
 import type { SupabaseClient } from '../database/client';
 import type { SettingsManager } from '../database/settings';
+import { op } from '../database/client';
 import { createReportGenerator } from '../services/report-generator';
 import { createAIClient } from '../services/ai-client';
 import { createConversationManager } from '../services/conversation-manager';
@@ -74,7 +75,7 @@ function registerCommands(bot: Bot<BotContext>) {
     await ctx.reply(welcomeMessage);
   });
 
-// Help command
+  // Help command
   bot.command('help', async (ctx) => {
     const helpMessage = `
 📖 دليل الاستخدام
@@ -211,18 +212,13 @@ function registerCommands(bot: Bot<BotContext>) {
         // No questions, proceed directly with analysis
         await ctx.reply('🤖 جاري التحليل الكامل...');
         
-        // Store report data for processing
-        await storeReportForProcessing(ctx.db, chatId, reportData, {});
-        
-        // Trigger processing via self-call
-        const triggerResult = await triggerReportProcessing(chatId, trimmedKey);
-        
-        if (!triggerResult.success) {
-          console.error('Failed to trigger processing:', triggerResult.error);
-          await ctx.reply('❌ حدث خطأ في بدء المعالجة. جاري المحاولة مباشرة...');
-          // Fallback: process directly (may timeout but worth trying)
-          await processInline(ctx, reportData, {});
-        }
+        // Process directly (no HTTP call)
+        await processFullReportDirect(
+          ctx,
+          reportData,
+          {},
+          trimmedKey
+        );
       }
 
     } catch (error) {
@@ -346,21 +342,16 @@ function registerCommands(bot: Bot<BotContext>) {
           // Clear conversation
           await conversationMgr.clearConversation(chatId);
 
-          // Store report data for processing
-          await storeReportForProcessing(ctx.db, chatId, reportContext, answers || {});
-          
           // Get API key
           const openRouterKey = await ctx.settings.get('openrouter_api_key');
           if (openRouterKey) {
-            // Trigger processing via self-call
-            const triggerResult = await triggerReportProcessing(chatId, openRouterKey.trim());
-            
-            if (!triggerResult.success) {
-              console.error('Failed to trigger processing:', triggerResult.error);
-              await ctx.reply('❌ حدث خطأ في بدء المعالجة. جاري المحاولة مباشرة...');
-              // Fallback: process directly
-              await processInline(ctx, reportContext, answers || {});
-            }
+            // Process directly (no HTTP call)
+            await processFullReportDirect(
+              ctx,
+              reportContext,
+              answers || {},
+              openRouterKey.trim()
+            );
           }
 
         } else {
@@ -392,113 +383,138 @@ function registerCommands(bot: Bot<BotContext>) {
 }
 
 /**
- * Store report data for processing (temporary storage)
+ * Process full report directly (no HTTP call)
+ * FIXED: This runs in the same worker context
  */
-async function storeReportForProcessing(
-  db: SupabaseClient,
-  chatId: string,
-  reportData: any,
-  userAnswers: Record<string, string>
-): Promise<void> {
-  const expiresAt = new Date();
-  expiresAt.setMinutes(expiresAt.getMinutes() + 15);
-
-  const storageKey = `processing_${chatId}`;
-
-  try {
-    // Delete any existing entry first
-    await db.delete('conversation_state', {
-      filter: { chat_id: storageKey },
-    });
-  } catch (error) {
-    console.log('No existing processing entry to delete');
-  }
-
-  // Insert fresh
-  await db.insert('conversation_state', {
-    chat_id: storageKey,
-    conversation_type: 'report_processing',
-    current_step: 0,
-    total_steps: 1,
-    data: {
-      reportData,
-      userAnswers,
-    },
-    expires_at: expiresAt.toISOString(),
-  });
-  
-  console.log('✅ Report data stored for processing');
-}
-
-/**
- * Trigger report processing via worker self-call
- * FIXED: Now returns result and logs properly
- */
-async function triggerReportProcessing(
-  chatId: string,
-  openRouterKey: string
-): Promise<{ success: boolean; error?: string }> {
-  try {
-    console.log('🚀 Triggering report processing for chat:', chatId);
-    
-    const url = 'https://progress-bot.progressbot.workers.dev/api/process-report';
-    
-    console.log('📡 Calling:', url);
-    
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: { 
-        'Content-Type': 'application/json',
-        'X-Internal-Call': 'true'
-      },
-      body: JSON.stringify({
-        chat_id: chatId,
-        api_key: openRouterKey
-      }),
-    });
-
-    console.log('📥 Response status:', response.status);
-    
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.error('❌ Trigger failed:', errorText);
-      return { success: false, error: errorText };
-    }
-    
-    const result = await response.json();
-    console.log('✅ Trigger successful:', result);
-    
-    return { success: true };
-    
-  } catch (error) {
-    console.error('💥 Failed to trigger report processing:', error);
-    return { success: false, error: (error as Error).message };
-  }
-}
-
-/**
- * Fallback: Process inline (may timeout but worth trying)
- */
-async function processInline(
+async function processFullReportDirect(
   ctx: BotContext,
   reportData: any,
-  _userAnswers: Record<string, string>
+  userAnswers: Record<string, string>,
+  apiKey: string
 ): Promise<void> {
-  // Simple inline processing without full AI analysis
   try {
-    const stats = createReportGenerator(ctx.db, ctx.settings).calculateStatistics(reportData.tasks);
-    
-    let message = '📊 *ملخص سريع:*\n\n';
-    message += `✅ المهام المكتملة: ${stats.completed_tasks}/${stats.total_tasks}\n`;
-    message += `📈 معدل النجاح: ${stats.success_rate.toFixed(1)}%\n`;
-    message += `⏱ الوقت: ${stats.total_time_minutes} دقيقة\n\n`;
-    message += '⚠️ التحليل الكامل بالذكاء الاصطناعي تعذر إكماله.\n';
-    message += 'يمكنك المحاولة مرة أخرى لاحقاً بإرسال /progress';
-    
-    await ctx.reply(message);
+    console.log('🤖 processFullReportDirect started');
+
+    const chatId = ctx.chat?.id.toString() || '';
+
+    // Send status
+    await ctx.reply('🤖 جاري التحليل بالذكاء الاصطناعي...');
+
+    // Validate API key
+    if (!apiKey.startsWith('sk-or-v1-')) {
+      await ctx.reply('❌ OpenRouter API key غير صحيح');
+      return;
+    }
+
+    // Get AI model
+    const aiModel = await ctx.settings.get('ai_model') || 'anthropic/claude-sonnet-4';
+    console.log('🎯 AI Model:', aiModel);
+
+    // Create services
+    const reportGen = createReportGenerator(ctx.db, ctx.settings);
+    const aiClient = createAIClient(apiKey, aiModel);
+    const memoryMgr = createMemoryManager(ctx.db, aiClient);
+
+    // Generate past week summary
+    const pastWeekSummary = reportGen.generatePastWeekSummary(reportData.previousReports || []);
+
+    console.log('🤖 Calling AI for analysis...');
+    const startTime = Date.now();
+
+    // Call AI for unified analysis
+    const aiResponse = await aiClient.generateDailyReport({
+      reportDate: reportData.date,
+      tasks: reportData.tasks,
+      streaks: reportData.streaks,
+      weeklyGoals: reportData.weeklyGoals?.goals_text || null,
+      dailyChallenge: reportData.dailyChallenge?.challenge_text || null,
+      memory: reportData.memory,
+      pastWeekSummary,
+      strategicGoals: reportData.strategicGoals,
+      userAnswers: Object.keys(userAnswers).length > 0 ? userAnswers : undefined,
+    });
+
+    const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+    console.log(`✅ AI analysis complete in ${elapsed}s`);
+
+    // Send AI commentary
+    await ctx.reply('💬 *التحليل والتعليق:*');
+    await sendLongMessage(ctx, aiResponse.mainCommentary);
+
+    // Send challenge evaluation
+    if (reportData.dailyChallenge) {
+      await ctx.reply(
+        `🎯 *تقييم التحدي اليومي:* ${aiResponse.challengeEvaluation}\n` +
+        `"${reportData.dailyChallenge.challenge_text}"`
+      );
+    }
+
+    // Send reward suggestion
+    if (aiResponse.reward) {
+      await ctx.reply(`🎁 *المكافأة المقترحة:* ${aiResponse.reward}`);
+    }
+
+    // Send goals analysis
+    if (aiResponse.goalsAnalysis) {
+      let goalsMsg = '🎯 *تحليل الأهداف الأسبوعية:*\n\n';
+
+      if (aiResponse.goalsAnalysis.completed.length > 0) {
+        goalsMsg += '✅ *منجزة:*\n';
+        aiResponse.goalsAnalysis.completed.forEach(g => goalsMsg += `- ${g}\n`);
+        goalsMsg += '\n';
+      }
+
+      if (aiResponse.goalsAnalysis.inProgress.length > 0) {
+        goalsMsg += '🔄 *قيد التنفيذ:*\n';
+        aiResponse.goalsAnalysis.inProgress.forEach(g => goalsMsg += `- ${g}\n`);
+        goalsMsg += '\n';
+      }
+
+      if (aiResponse.goalsAnalysis.neglected.length > 0) {
+        goalsMsg += '⚠️ *مهملة:*\n';
+        aiResponse.goalsAnalysis.neglected.forEach(g => goalsMsg += `- ${g}\n`);
+      }
+
+      await ctx.reply(goalsMsg);
+    }
+
+    // Update memory
+    if (Object.keys(aiResponse.memoryUpdates).length > 0) {
+      await ctx.reply('🧠 جاري تحديث الذاكرة...');
+      await memoryMgr.updateMemory(aiResponse.memoryUpdates);
+      await ctx.reply('✅ تم تحديث الذاكرة');
+    }
+
+    // Check if memory optimization is needed
+    if (aiResponse.memoryOptimization === 'OPTIMIZE_NEEDED') {
+      await ctx.reply('🔄 جاري تحسين الذاكرة...');
+      await memoryMgr.checkOptimizationTriggers();
+    }
+
+    // Save report to database
+    await ctx.reply('💾 جاري حفظ التقرير...');
+    const stats = reportGen.calculateStatistics(reportData.tasks);
+
+    await ctx.db.insert('daily_reports', {
+      report_date: reportData.date,
+      report_markdown: aiResponse.mainCommentary,
+      success_rate: stats.success_rate,
+      total_tasks: stats.total_tasks,
+      completed_tasks: stats.completed_tasks,
+      failed_tasks: stats.failed_tasks,
+      achievement_time_minutes: stats.total_time_minutes,
+      challenge_evaluation: aiResponse.challengeEvaluation,
+      ai_commentary: aiResponse.mainCommentary,
+      suggested_reward: aiResponse.reward,
+      weekly_goals_analysis: JSON.stringify(aiResponse.goalsAnalysis),
+    });
+
+    await ctx.reply('✅ تم حفظ التقرير بنجاح!');
+    console.log('🎉 All done!');
+
   } catch (error) {
-    console.error('Inline processing error:', error);
-    await ctx.reply('❌ حدث خطأ في المعالجة');
+    console.error('💥 Report processing error:', error);
+    await ctx.reply('❌ حدث خطأ أثناء معالجة التقرير:\n' + (error as Error).message);
   }
 }
 

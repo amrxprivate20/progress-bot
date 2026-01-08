@@ -1,10 +1,11 @@
 // ==============================================================================
 // Report Processing Handler - Runs independently of webhook
-// ENHANCED WITH LOGGING
+// FIXED: Proper database filter syntax
 // ==============================================================================
 
 import type { SupabaseClient } from '../database/client';
 import type { SettingsManager } from '../database/settings';
+import { op } from '../database/client';
 import { createReportGenerator } from '../services/report-generator';
 import { createAIClient } from '../services/ai-client';
 import { createMemoryManager } from '../services/memory-manager';
@@ -47,11 +48,14 @@ export async function handleReportProcessing(
       return new Response('Bot token not configured', { status: 500 });
     }
 
-    console.log('🔍 Looking for stored data with key: processing_' + chat_id);
+    const storageKey = `processing_${chat_id}`;
+    console.log('🔍 Looking for stored data with key:', storageKey);
 
-    // Retrieve stored report data
+    // Retrieve stored report data - FIXED: Use op.eq() for filter
     const storedData = await db.select('conversation_state', {
-      filter: { chat_id: `processing_${chat_id}` },
+      filter: { 
+        chat_id: op.eq(storageKey)
+      },
       limit: 1,
     });
 
@@ -97,9 +101,9 @@ export async function handleReportProcessing(
 
     console.log('🧹 Cleaning up stored data...');
 
-    // Clean up stored data
+    // Clean up stored data - FIXED: Use op.eq() for filter
     await db.delete('conversation_state', {
-      filter: { chat_id: `processing_${chat_id}` },
+      chat_id: op.eq(storageKey)
     });
 
     console.log('✅ Report processing complete for chat', chat_id);

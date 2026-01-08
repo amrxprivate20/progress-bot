@@ -1,6 +1,6 @@
 // ============================================
 // Cloudflare Worker - Main Entry Point
-// FIXED: Await notification completion to prevent premature termination
+// FIXED: Proper route ordering and logging
 // ============================================
 
 import type { Env } from './types';
@@ -14,6 +14,11 @@ import { handleReportProcessing } from './handlers/process-report';
 
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+    const url = new URL(request.url);
+    const path = url.pathname;
+    
+    console.log(`📥 ${request.method} ${path}`);
+
     const envValidation = validateEnvironment(env);
     if (!envValidation.valid) {
       return new Response(
@@ -31,19 +36,28 @@ export default {
 
     const db = createSupabaseClient(env);
     const settings = new SettingsManager(db);
-    const url = new URL(request.url);
-    const path = url.pathname;
 
     try {
-if (path === '/api/process-report' && request.method === 'POST') {
-  return asyncHandler(async () => {
-    return await handleReportProcessing(request, db, settings);
-  })(request, env, ctx);
-}
+      // ============================================
+      // HEALTH CHECK
+      // ============================================
       if (path === '/health' && request.method === 'GET') {
         return handleHealth(db);
       }
 
+      // ============================================
+      // REPORT PROCESSING ENDPOINT (PRIORITY!)
+      // ============================================
+      if (path === '/api/process-report' && request.method === 'POST') {
+        console.log('🎯 Report processing endpoint hit');
+        return asyncHandler(async () => {
+          return await handleReportProcessing(request, db, settings);
+        })(request, env, ctx);
+      }
+
+      // ============================================
+      // TODOIST WEBHOOK
+      // ============================================
       if (path === '/webhook/todoist' && request.method === 'POST') {
         return asyncHandler(async () => {
           const rawBody = await request.text();
@@ -63,6 +77,9 @@ if (path === '/api/process-report' && request.method === 'POST') {
         })(request, env, ctx);
       }
 
+      // ============================================
+      // TELEGRAM WEBHOOK
+      // ============================================
       if (path === '/telegram/webhook' && request.method === 'POST') {
         const botToken = env.TELEGRAM_BOT_TOKEN;
         const bot = createBot(botToken, db, settings);
@@ -70,12 +87,18 @@ if (path === '/api/process-report' && request.method === 'POST') {
         return await handler(request);
       }
 
+      // ============================================
+      // SETTINGS API
+      // ============================================
       if (path.startsWith('/api/settings')) {
         return asyncHandler(async () => {
           return await handleSettingsAPI(request, path, settings);
         })(request, env, ctx);
       }
 
+      // ============================================
+      // ROOT INFO
+      // ============================================
       if (path === '/' && request.method === 'GET') {
         return new Response(
           JSON.stringify({
@@ -88,6 +111,7 @@ if (path === '/api/process-report' && request.method === 'POST') {
               todoist_webhook: 'POST /webhook/todoist',
               telegram_webhook: 'POST /telegram/webhook',
               settings: 'GET/POST/DELETE /api/settings',
+              process_report: 'POST /api/process-report',
             },
           }),
           {
@@ -97,8 +121,12 @@ if (path === '/api/process-report' && request.method === 'POST') {
         );
       }
 
+      // ============================================
+      // 404 NOT FOUND
+      // ============================================
+      console.log(`❌ Route not found: ${path}`);
       return new Response(
-        JSON.stringify({ success: false, error: 'Not found' }),
+        JSON.stringify({ success: false, error: 'Not found', path }),
         { status: 404, headers: { 'Content-Type': 'application/json' } }
       );
     } catch (error) {
