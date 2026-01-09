@@ -1,20 +1,30 @@
 /**
- * Report Generator Service
+ * Report Generator Service - FIXED VERSION
  *
- * Handles daily report generation with Arabic formatting.
- * Collects tasks, streaks, goals, challenges, and memory for AI analysis.
+ * FIXES APPLIED:
+ * - Egypt timezone (UTC+2) for all date operations
+ * - Task breakdown in preview (✅/⚠️/❌ with subtasks)
+ * - Arabic formatting with proper plural rules
+ * - Hierarchy-aware task grouping
  */
 
 import { SupabaseClient, op } from '../database/client';
 import { SettingsManager } from '../database/settings';
 import { Task, Streak, DailyReport, WeeklyGoals, DailyChallenge, Memory } from '../types';
+import { 
+  getTodayInEgypt, 
+  getEgyptDayBoundaries, 
+  formatArabicDate,
+  formatArabicTime,
+  formatArabicStreak
+} from '../utils/timezone';
 
 // ============================================
 // Types
 // ============================================
 
 export interface ReportData {
-  date: string; // YYYY-MM-DD
+  date: string; // YYYY-MM-DD (Egypt date)
   tasks: Task[];
   streaks: Streak[];
   weeklyGoals: WeeklyGoals | null;
@@ -45,7 +55,7 @@ export interface ReportStatistics {
   partial_tasks: number;
   success_rate: number;
   total_time_minutes: number;
-  total_quantity: Record<string, number>; // unit -> total
+  total_quantity: Record<string, number>;
   category_breakdown: Record<string, number>;
 }
 
@@ -65,7 +75,7 @@ export class ReportGenerator {
   async collectReportData(date?: string): Promise<ReportData> {
     const reportDate = date || this.getTodayDateString();
 
-    // Collect tasks for the day
+    // Collect tasks for the day (using Egypt timezone)
     const tasks = await this.getTasksForDate(reportDate);
 
     // Get streaks for all recurring tasks
@@ -131,7 +141,7 @@ export class ReportGenerator {
       ? this.checkChallengeCompletion(data.dailyChallenge, data.tasks)
       : 'لا يوجد تحدي';
 
-    // Format preview text
+    // FIXED: Format preview text with full task breakdown
     const formattedText = this.formatPreviewText(data, stats, topCategories, challengeStatus);
 
     return {
@@ -187,54 +197,6 @@ export class ReportGenerator {
   }
 
   /**
-   * Format Arabic date
-   */
-  formatArabicDate(date: Date): string {
-    const days = ['الأحد', 'الاثنين', 'الثلاثاء', 'الأربعاء', 'الخميس', 'الجمعة', 'السبت'];
-    const months = [
-      'يناير', 'فبراير', 'مارس', 'إبريل', 'مايو', 'يونيو',
-      'يوليو', 'أغسطس', 'سبتمبر', 'أكتوبر', 'نوفمبر', 'ديسمبر'
-    ];
-
-    const dayName = days[date.getDay()];
-    const day = date.getDate();
-    const month = months[date.getMonth()];
-    const year = date.getFullYear();
-
-    return `${dayName}، ${day} ${month} ${year}`;
-  }
-
-  /**
-   * Format time in Arabic
-   */
-  formatArabicTime(minutes: number): string {
-    const hours = Math.floor(minutes / 60);
-    const mins = minutes % 60;
-
-    const parts: string[] = [];
-
-    if (hours > 0) {
-      if (hours === 1) parts.push('ساعة');
-      else if (hours === 2) parts.push('ساعتان');
-      else if (hours <= 10) parts.push(`${hours} ساعات`);
-      else parts.push(`${hours} ساعة`);
-    }
-
-    if (mins > 0) {
-      if (mins === 1) parts.push('دقيقة');
-      else if (mins === 2) parts.push('دقيقتان');
-      else if (mins <= 10) parts.push(`${mins} دقائق`);
-      else parts.push(`${mins} دقيقة`);
-    }
-
-    if (parts.length === 0) {
-      return 'صفر دقيقة';
-    }
-
-    return parts.join(' و ');
-  }
-
-  /**
    * Generate summary of past week
    */
   generatePastWeekSummary(reports: DailyReport[]): string {
@@ -252,7 +214,7 @@ export class ReportGenerator {
 - معدل النجاح: ${avgSuccess.toFixed(1)}%
 - إجمالي المهام: ${totalTasks}
 - المنجزة: ${completedTasks}
-- إجمالي الوقت: ${this.formatArabicTime(totalTime)}
+- إجمالي الوقت: ${formatArabicTime(totalTime)}
 `.trim();
   }
 
@@ -261,33 +223,34 @@ export class ReportGenerator {
   // ============================================
 
   /**
-   * Get today's date as YYYY-MM-DD in Egypt timezone
+   * FIXED: Get today's date as YYYY-MM-DD in Egypt timezone
    */
   private getTodayDateString(): string {
-    const now = new Date();
-    // Convert to Egypt timezone (GMT+2)
-    const egyptDate = new Date(now.toLocaleString('en-US', { timeZone: 'Africa/Cairo' }));
-    return egyptDate.toISOString().split('T')[0]!;
+    return getTodayInEgypt();
   }
 
   /**
-   * Get tasks for a specific date
+   * FIXED: Get tasks for a specific date using Egypt timezone boundaries
    */
   private async getTasksForDate(date: string): Promise<Task[]> {
-    const startOfDay = `${date}T00:00:00`;
-    const endOfDay = `${date}T23:59:59`;
+    const { start, end } = getEgyptDayBoundaries(date);
+    
+    console.log(`📅 Fetching tasks for Egypt date ${date}:`);
+    console.log(`   UTC start: ${start.toISOString()}`);
+    console.log(`   UTC end: ${end.toISOString()}`);
 
-    // Note: Supabase REST API doesn't support gte/lte directly in our client
-    // We'll get all tasks and filter in memory
+    // Get all tasks
     const allTasks = await this.db.select<Task>('tasks', {});
 
-    return allTasks.filter(task => {
+    // Filter by Egypt day boundaries
+    const tasksInRange = allTasks.filter(task => {
       const completedAt = new Date(task.completed_at);
-      return (
-        completedAt >= new Date(startOfDay) &&
-        completedAt <= new Date(endOfDay)
-      );
+      return completedAt >= start && completedAt <= end;
     });
+
+    console.log(`   Found ${tasksInRange.length} tasks`);
+
+    return tasksInRange;
   }
 
   /**
@@ -320,7 +283,6 @@ export class ReportGenerator {
    * Get daily challenge for date
    */
   private async getDailyChallenge(date: string): Promise<DailyChallenge | null> {
-    // FIX: Use op.eq() for the filter
     const challenges = await this.db.select<DailyChallenge>('daily_challenges', {
       filter: { challenge_date: op.eq(date) },
       limit: 1
@@ -392,7 +354,77 @@ export class ReportGenerator {
   }
 
   /**
-   * Format preview text in Arabic
+   * NEW: Format task breakdown with hierarchy and symbols
+   */
+  private formatTaskBreakdown(tasks: Task[], streaks: Streak[]): string {
+    let breakdown = '🎯 **مهام اليوم**\n----------------\n';
+    
+    if (tasks.length === 0) {
+      return breakdown + 'لا توجد مهام لهذا اليوم\n\n';
+    }
+    
+    // Group by status and hierarchy
+    const rootTasks = tasks.filter(t => !t.origin_task);
+    const childTasks = tasks.filter(t => t.origin_task);
+    
+    // Group children by parent
+    const childrenByParent = new Map<string, Task[]>();
+    for (const child of childTasks) {
+      if (!child.origin_task) continue;
+      if (!childrenByParent.has(child.origin_task)) {
+        childrenByParent.set(child.origin_task, []);
+      }
+      childrenByParent.get(child.origin_task)!.push(child);
+    }
+    
+    // Sort: completed → partial → failed
+    const statusOrder = { done: 0, partial: 1, failed: 2 };
+    const sortedTasks = rootTasks.sort((a, b) => {
+      const aOrder = statusOrder[a.status || 'done'] || 0;
+      const bOrder = statusOrder[b.status || 'done'] || 0;
+      return aOrder - bOrder;
+    });
+    
+    for (const task of sortedTasks) {
+      // Determine symbol
+      let symbol = '✅';
+      if (task.status === 'partial') symbol = '⚠️';
+      if (task.status === 'failed') symbol = '❌';
+      
+      // Build task line
+      let line = `${symbol} ${task.content}`;
+      
+      // Add duration
+      if (task.duration_minutes) {
+        line += ` [${task.duration_minutes}m]`;
+      }
+      
+      // Add category
+      if (task.category) {
+        line += ` #${task.category}`;
+      }
+      
+      // Add streak with Arabic formatting
+      const streak = streaks.find(s => s.task_name === task.content);
+      if (streak && streak.current_streak > 0) {
+        line += ` 🔥 ${formatArabicStreak(streak.current_streak)}`;
+      }
+      
+      breakdown += line + '\n';
+      
+      // Add children if any
+      const children = childrenByParent.get(task.content) || [];
+      for (const child of children) {
+        const childSymbol = child.status === 'done' ? '✓' : '✕';
+        breakdown += `   ${childSymbol} ${child.content}\n`;
+      }
+    }
+    
+    return breakdown + '\n';
+  }
+
+  /**
+   * FIXED: Format preview text in Arabic with full task breakdown
    */
   private formatPreviewText(
     data: ReportData,
@@ -401,7 +433,7 @@ export class ReportGenerator {
     challengeStatus: string
   ): string {
     const date = new Date(data.date);
-    const arabicDate = this.formatArabicDate(date);
+    const arabicDate = formatArabicDate(date);
 
     let text = `📊 **معاينة التقرير اليومي**\n\n`;
     text += `📅 **التاريخ:** ${arabicDate}\n\n`;
@@ -410,8 +442,14 @@ export class ReportGenerator {
     text += `- إجمالي المهام: ${stats.total_tasks}\n`;
     text += `- المنجزة: ${stats.completed_tasks}\n`;
     text += `- الفاشلة: ${stats.failed_tasks}\n`;
+    if (stats.partial_tasks > 0) {
+      text += `- الجزئية: ${stats.partial_tasks}\n`;
+    }
     text += `- معدل النجاح: ${stats.success_rate.toFixed(1)}%\n`;
-    text += `- وقت الإنجاز: ${this.formatArabicTime(stats.total_time_minutes)}\n\n`;
+    text += `- وقت الإنجاز: ${formatArabicTime(stats.total_time_minutes)}\n\n`;
+
+    // NEW: Add full task breakdown
+    text += this.formatTaskBreakdown(data.tasks, data.streaks);
 
     if (topCategories.length > 0) {
       text += `🏷️ **أهم الفئات:**\n`;

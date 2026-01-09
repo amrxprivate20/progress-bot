@@ -130,7 +130,7 @@ npm run deploy
 
 ```bash
 # Test production health endpoint
-curl https://progress-bot.your-account.workers.dev/health
+curl https://progress-bot.progressbot.workers.dev/health
 
 # Should return:
 # {"status":"ok","database":"connected","timestamp":"..."}

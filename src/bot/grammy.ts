@@ -1,6 +1,12 @@
 // ============================================
-// Grammy Bot Setup with Durable Objects Support
+// Grammy Bot Setup - FIXED VERSION
 // ============================================
+// FIXES APPLIED:
+// - Correct question numbering [1/N], [2/N], [3/N]
+// - /skip_questions command to exit Q&A early
+// - /log_failure command for manual failure logging
+// - First question shows progress indicator
+// - Removed noisy job ID messages
 
 import { Bot, Context, webhookCallback } from 'grammy';
 import type { SupabaseClient } from '../database/client';
@@ -9,7 +15,7 @@ import { createConversationManager } from '../services/conversation-manager';
 import { createMemoryManager } from '../services/memory-manager';
 import { createReportGenerator } from '../services/report-generator';
 import { createAIClient } from '../services/ai-client';
-import { handleConfirmCommand, startDurableObjectJob } from './confirm-handler';
+import { handleConfirmCommand } from './confirm-handler';
 
 /**
  * Extended context with Durable Objects namespace
@@ -17,17 +23,17 @@ import { handleConfirmCommand, startDurableObjectJob } from './confirm-handler';
 export interface BotContext extends Context {
   db: SupabaseClient;
   settings: SettingsManager;
-  reportProcessorNamespace: DurableObjectNamespace; // Changed from reportQueue
+  reportProcessorNamespace: DurableObjectNamespace;
 }
 
 /**
- * Create and configure Grammy bot with Durable Objects support
+ * Create and configure Grammy bot
  */
 export function createBot(
   token: string,
   db: SupabaseClient,
   settings: SettingsManager,
-  reportProcessorNamespace: DurableObjectNamespace // Changed from queue
+  reportProcessorNamespace: DurableObjectNamespace
 ): Bot<BotContext> {
   const bot = new Bot<BotContext>(token);
 
@@ -35,7 +41,7 @@ export function createBot(
   bot.use(async (ctx, next) => {
     ctx.db = db;
     ctx.settings = settings;
-    ctx.reportProcessorNamespace = reportProcessorNamespace; // Changed
+    ctx.reportProcessorNamespace = reportProcessorNamespace;
     await next();
   });
 
@@ -62,14 +68,14 @@ function registerCommands(bot: Bot<BotContext>) {
 الأوامر المتاحة:
 
 📊 /progress - عرض ملخص اليوم
-✅ /confirm - بدء التحليل الكامل (معالجة خلفية - لا انتظار!)
+✅ /confirm - بدء التحليل الكامل (معالجة خلفية)
+⏭️ /skip_questions - تخطي الأسئلة المتبقية
 ❌ /cancel - إلغاء المحادثة
 
 🧠 /memory - عرض الذاكرة المنظمة
 🗑 /clearmemory - مسح كل الذاكرة
 
-📝 /createtasks - إنشاء مهام الأسبوع (قريباً)
-📄 /lastupdate - إنشاء ملف LastUpdate.md (قريباً)
+📝 /log_failure - تسجيل مهمة فاشلة
 
 ✨ *جديد:* التحليل يعمل الآن في الخلفية بدون حدود زمنية! 🚀
     `.trim();
@@ -92,13 +98,17 @@ function registerCommands(bot: Bot<BotContext>) {
 - يمكنك الاستمرار باستخدام البوت
 - لا حدود زمنية للمعالجة!
 
-2️⃣ الذاكرة:
+2️⃣ الأسئلة التوضيحية:
+- البوت قد يطرح 1-5 أسئلة حسب الحاجة
+- استخدم /skip_questions لتخطي الأسئلة المتبقية
+- استخدم /cancel لإلغاء المحادثة كاملاً
+
+3️⃣ الذاكرة:
 /memory - عرض كل ما تعلمته عنك
 /clearmemory - مسح الذاكرة
 
-3️⃣ المهام والأهداف:
-/createtasks - إنشاء مهام من الأهداف (قريباً)
-/lastupdate - ملخص الحالة الحالية (قريباً)
+4️⃣ تسجيل المهام:
+/log_failure - تسجيل مهمة فشلت في إنجازها
 
 💡 نصيحة: البوت يتتبع المهام تلقائياً من Todoist!
     `.trim();
@@ -123,7 +133,7 @@ function registerCommands(bot: Bot<BotContext>) {
         return;
       }
 
-      // Generate preview
+      // Generate preview (with full task breakdown)
       const preview = await reportGen.generatePreview();
 
       // Send preview
@@ -135,9 +145,55 @@ function registerCommands(bot: Bot<BotContext>) {
     }
   });
 
-  // Confirm command - NOW WITH DURABLE OBJECTS!
+  // Confirm command
   bot.command('confirm', async (ctx) => {
     await handleConfirmCommand(ctx, ctx.reportProcessorNamespace);
+  });
+
+  // NEW: Skip questions command
+  bot.command(['skip_questions', 'skipquestions'], async (ctx) => {
+    try {
+      const chatId = ctx.chat?.id.toString() || '';
+      const conversationMgr = createConversationManager(ctx.db);
+
+      const conversation = await conversationMgr.getConversation(chatId);
+
+      if (!conversation || conversation.conversation_type !== 'qa_report') {
+        await ctx.reply('⚠️ لا توجد محادثة أسئلة نشطة حالياً');
+        return;
+      }
+
+      // Get context and partial answers
+      const reportContext = await conversationMgr.getReportContext(chatId);
+      const partialAnswers = await conversationMgr.getAnswers(chatId);
+
+      // Clear conversation
+      await conversationMgr.clearConversation(chatId);
+
+      await ctx.reply('✅ تم تخطي الأسئلة المتبقية. جاري بدء التحليل...');
+
+      // Start Durable Object job with partial answers
+      const openRouterKey = await ctx.settings.get('openrouter_api_key');
+      const aiModel = await ctx.settings.get('ai_model') || 'anthropic/claude-sonnet-4';
+      const botToken = await ctx.settings.get('telegram_bot_token');
+
+      if (openRouterKey && botToken) {
+        const { startDurableObjectJob } = await import('./confirm-handler');
+        await startDurableObjectJob(
+          ctx,
+          ctx.reportProcessorNamespace,
+          reportContext,
+          partialAnswers || {},
+          openRouterKey.trim(),
+          aiModel,
+          botToken
+        );
+      }
+
+    } catch (error) {
+      console.error('Skip questions error:', error);
+      await ctx.reply('❌ حدث خطأ. حاول مرة أخرى.');
+    }
   });
 
   // Cancel command
@@ -156,6 +212,34 @@ function registerCommands(bot: Bot<BotContext>) {
     } catch (error) {
       console.error('Cancel command error:', error);
       await ctx.reply('✅ تم الإلغاء');
+    }
+  });
+
+  // NEW: Log failure command
+  bot.command('log_failure', async (ctx) => {
+    try {
+      await ctx.reply(
+        '📝 **تسجيل مهمة فاشلة**\n\n' +
+        'أرسل اسم المهمة التي فشلت في إنجازها:\n' +
+        'مثال: "قراءة كتاب"\n\n' +
+        'أو استخدم /cancel للإلغاء'
+      );
+
+      // Store state
+      const chatId = ctx.chat?.id.toString() || '';
+      
+      await ctx.db.insert('conversation_state', {
+        chat_id: chatId,
+        conversation_type: 'log_failure',
+        current_step: 0,
+        total_steps: 1,
+        data: {},
+        expires_at: new Date(Date.now() + 10 * 60 * 1000).toISOString(),
+      });
+
+    } catch (error) {
+      console.error('Log failure error:', error);
+      await ctx.reply('❌ حدث خطأ. حاول مرة أخرى.');
     }
   });
 
@@ -210,25 +294,50 @@ function registerCommands(bot: Bot<BotContext>) {
     );
   });
 
-  // Placeholder commands for Phase 3
-  bot.command('createtasks', async (ctx) => {
-    await ctx.reply('⚠️ هذه الميزة ستكون متاحة في المرحلة 3');
-  });
-
-  bot.command('lastupdate', async (ctx) => {
-    await ctx.reply('⚠️ هذه الميزة ستكون متاحة في المرحلة 3');
-  });
-
-  // Handle text messages (for Q&A flow)
+  // Handle text messages (for Q&A flow and log_failure)
   bot.on('message:text', async (ctx) => {
     try {
       const chatId = ctx.chat?.id.toString() || '';
       const text = ctx.message?.text || '';
       const conversationMgr = createConversationManager(ctx.db);
 
-      const hasConversation = await conversationMgr.hasActiveConversation(chatId);
+      const conversation = await conversationMgr.getConversation(chatId);
 
-      if (hasConversation) {
+      if (!conversation) {
+        return; // No active conversation
+      }
+
+      // Handle log_failure conversation
+      if (conversation.conversation_type === 'log_failure') {
+        const taskName = text;
+
+        if (!taskName || taskName.trim().length === 0) {
+          await ctx.reply('⚠️ اسم المهمة مطلوب');
+          return;
+        }
+
+        // Log as failed task
+        await ctx.db.insert('tasks', {
+          task_id: `manual_fail_${Date.now()}`,
+          content: taskName,
+          completed_at: new Date().toISOString(),
+          status: 'failed',
+          duration_minutes: 0,
+          created_at: new Date().toISOString(),
+        });
+
+        await conversationMgr.clearConversation(chatId);
+
+        await ctx.reply(
+          `✅ تم تسجيل المهمة الفاشلة:\n` +
+          `❌ ${taskName}\n\n` +
+          `ستظهر في تقرير اليوم`
+        );
+        return;
+      }
+
+      // Handle Q&A conversation
+      if (conversation.conversation_type === 'qa_report') {
         // Save answer
         await conversationMgr.saveAnswer(chatId, text);
 
@@ -250,6 +359,7 @@ function registerCommands(bot: Bot<BotContext>) {
           const botToken = await ctx.settings.get('telegram_bot_token');
 
           if (openRouterKey && botToken) {
+            const { startDurableObjectJob } = await import('./confirm-handler');
             await startDurableObjectJob(
               ctx,
               ctx.reportProcessorNamespace,
@@ -262,7 +372,7 @@ function registerCommands(bot: Bot<BotContext>) {
           }
 
         } else {
-          // Send next question
+          // FIXED: Send next question with correct progress
           const nextQuestion = await conversationMgr.getCurrentQuestion(chatId);
           if (nextQuestion) {
             const progress = await conversationMgr.getProgress(chatId);

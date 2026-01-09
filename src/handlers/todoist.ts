@@ -1,21 +1,26 @@
 // ============================================
 // Todoist Webhook Handler - FIXED VERSION
-// Features:
-// - Egypt timezone (GMT+2) for streak calculation
-// - Comma-separated format: [30m, 5 pages]
-// - Direct user notifications (no groups)
-// - Better timestamp handling and logging
+// ============================================
+// FIXES APPLIED:
+// - Egypt timezone (UTC+2) for streak calculation
+// - Arabic duration/unit parsing ([30د], [3س], [50 ورقة])
+// - Parent-child status tracking (complete/partial/failed)
+// - Enhanced notifications with description and Arabic streaks
+// - Proper Arabic plural rules
 // ============================================
 
 import type { SupabaseClient } from '../database/client';
 import type { SettingsManager } from '../database/settings';
-import type { TodoistWebhookEvent, Task, ParsedTaskMetadata } from '../types';
+import type { TodoistWebhookEvent, Task, Streak } from '../types';
 import { op } from '../database/client';
 import { SETTINGS_KEYS } from '../database/settings';
 import { logError } from '../utils/errors';
-
-// Egypt timezone offset (GMT+2)
-const EGYPT_OFFSET_MS = 2 * 60 * 60 * 1000;
+import { parseTaskMetadata } from '../utils/task-parser';
+import { 
+  getEgyptDateString, 
+  formatArabicTime,
+  formatArabicStreak
+} from '../utils/timezone';
 
 export async function handleTodoistWebhook(
   payload: any,
@@ -46,12 +51,14 @@ export async function handleTodoistWebhook(
   }
 
   // Get completion time - use completed_at or fallback to now
-  let completedAtString = event.event_data.completed_at ||
-                         new Date().toISOString(); // Fallback to now
+  let completedAtString = event.event_data.completed_at || new Date().toISOString();
   
-  console.log('⏰ Completion timestamp:', completedAtString);
+  console.log('⏰ UTC completion timestamp:', completedAtString);
   
   const completedAt = new Date(completedAtString);
+  
+  // FIXED: Log Egypt date for debugging
+  console.log('📅 Egypt date:', getEgyptDateString(completedAt));
 
   const isRecurring = event.event_data.due?.is_recurring || false;
   const isSubtask = !!event.event_data.parent_id;
@@ -71,7 +78,7 @@ export async function handleTodoistWebhook(
     }
   }
 
-  // Parse task metadata
+  // FIXED: Parse task metadata with Arabic support
   const metadata = parseTaskMetadata(event.event_data.content);
   console.log('📊 Parsed metadata:', metadata);
 
@@ -94,7 +101,7 @@ export async function handleTodoistWebhook(
     category: category,
     priority: event.event_data.priority,
     description: event.event_data.description || undefined,
-    completed_at: completedAt, // Store UTC time
+    completed_at: completedAt,
     duration_minutes: metadata.duration_minutes || 0,
     quantity: metadata.quantity,
     quantity_unit: metadata.quantity_unit,
@@ -119,7 +126,7 @@ export async function handleTodoistWebhook(
       });
       savedTask = inserted[0];
 
-      // Update streak (uses Egypt timezone internally)
+      // FIXED: Update streak (uses Egypt timezone internally)
       await updateStreakFromDueDate(
         db,
         task.content,
@@ -135,6 +142,12 @@ export async function handleTodoistWebhook(
         created_at: new Date().toISOString(),
       });
       savedTask = inserted[0];
+    }
+
+    // NEW: If this is a subtask, update parent status
+    if (isSubtask && event.event_data.parent_id) {
+      console.log('🔗 Updating parent task status...');
+      await updateParentTaskStatus(db, event.event_data.parent_id);
     }
 
     if (!savedTask) {
@@ -163,77 +176,65 @@ export async function handleTodoistWebhook(
 }
 
 /**
- * Parse task metadata from content
- * Supports:
- * - [30m] or [2h] → duration
- * - [5 pages] → quantity
- * - [30m, 5 pages] → both (comma-separated)
- * - @category → category
+ * NEW: Update parent task status based on subtasks
  */
-export function parseTaskMetadata(content: string): ParsedTaskMetadata {
-  const metadata: ParsedTaskMetadata = {};
+async function updateParentTaskStatus(
+  db: SupabaseClient,
+  parentId: string
+): Promise<void> {
+  try {
+    // Get all subtasks for this parent
+    const subtasks = await db.select<Task>('tasks', {
+      filter: { origin_task: op.eq(parentId) },
+    });
 
-  // Check for comma-separated format: [30m, 5 pages]
-  const comboMatch = content.match(/\[([^\]]+),\s*([^\]]+)\]/);
-  if (comboMatch && comboMatch[1] && comboMatch[2]) {
-    const part1 = comboMatch[1].trim();
-    const part2 = comboMatch[2].trim();
-
-    // Parse first part (usually duration)
-    const durationMatch1 = part1.match(/^(\d+(?:\.\d+)?)(m|h|min|mins|hour|hours)$/i);
-    if (durationMatch1 && durationMatch1[1] && durationMatch1[2]) {
-      const value = parseFloat(durationMatch1[1]);
-      const unit = durationMatch1[2].toLowerCase();
-      
-      if (unit === 'h' || unit === 'hour' || unit === 'hours') {
-        metadata.duration_minutes = Math.round(value * 60);
-      } else {
-        metadata.duration_minutes = Math.round(value);
-      }
+    if (subtasks.length === 0) {
+      console.log('ℹ️ No subtasks found for parent');
+      return;
     }
 
-    // Parse second part (usually quantity)
-    const quantityMatch2 = part2.match(/^(\d+(?:\.\d+)?)\s+([a-z]+)$/i);
-    if (quantityMatch2 && quantityMatch2[1] && quantityMatch2[2]) {
-      metadata.quantity = parseFloat(quantityMatch2[1]);
-      metadata.quantity_unit = quantityMatch2[2];
-    }
-    
-    return metadata;
-  }
+    // Count statuses
+    const doneCount = subtasks.filter(t => t.status === 'done').length;
+    const totalCount = subtasks.length;
 
-  // Single bracket formats
-  // Try duration: [30m] or [2h]
-  const durationMatch = content.match(/\[(\d+(?:\.\d+)?)(m|h|min|mins|hour|hours)\]/i);
-  if (durationMatch && durationMatch[1] && durationMatch[2]) {
-    const value = parseFloat(durationMatch[1]);
-    const unit = durationMatch[2].toLowerCase();
+    // Determine parent status
+    let parentStatus: 'done' | 'partial' | 'failed';
+    let parentCompletionStatus: 'complete' | 'partial' | 'failed';
     
-    if (unit === 'h' || unit === 'hour' || unit === 'hours') {
-      metadata.duration_minutes = Math.round(value * 60);
+    if (doneCount === totalCount) {
+      parentStatus = 'done';
+      parentCompletionStatus = 'complete';
+      console.log(`✅ Parent ${parentId}: All subtasks complete`);
+    } else if (doneCount > 0) {
+      parentStatus = 'partial';
+      parentCompletionStatus = 'partial';
+      console.log(`⚠️ Parent ${parentId}: ${doneCount}/${totalCount} subtasks done`);
     } else {
-      metadata.duration_minutes = Math.round(value);
+      parentStatus = 'failed';
+      parentCompletionStatus = 'failed';
+      console.log(`❌ Parent ${parentId}: No subtasks completed`);
     }
-  }
 
-  // Try quantity: [5 pages] or [25 reps]
-  const quantityMatch = content.match(/\[(\d+(?:\.\d+)?)\s+([a-z]+)\]/i);
-  if (quantityMatch && quantityMatch[1] && quantityMatch[2] && !durationMatch) {
-    metadata.quantity = parseFloat(quantityMatch[1]);
-    metadata.quantity_unit = quantityMatch[2];
-  }
+    // Update parent task
+    await db.update(
+      'tasks',
+      { task_id: op.eq(parentId) },
+      { 
+        status: parentStatus,
+        parent_completion_status: parentCompletionStatus 
+      }
+    );
 
-  // Category with @
-  const categoryMatch = content.match(/@([a-z0-9_]+)/i);
-  if (categoryMatch) {
-    metadata.category = categoryMatch[1];
-  }
+    console.log(`✅ Updated parent ${parentId}: ${parentCompletionStatus}`);
 
-  return metadata;
+  } catch (error) {
+    console.error('❌ Failed to update parent status:', error);
+    // Don't throw - this is not critical
+  }
 }
 
 /**
- * Update streak with Egypt timezone (GMT+2)
+ * FIXED: Update streak with Egypt timezone (UTC+2)
  */
 async function updateStreakFromDueDate(
   db: SupabaseClient,
@@ -248,14 +249,13 @@ async function updateStreakFromDueDate(
     const streakType = determineStreakType(dueString);
     const weeklyPattern = extractWeeklyPattern(dueString);
 
-    // Convert to Egypt time for date calculation
-    const egyptTime = new Date(completedAt.getTime() + EGYPT_OFFSET_MS);
-    egyptTime.setHours(0, 0, 0, 0);
-    const completedDateStr = egyptTime.toISOString().split('T')[0];
+    // FIXED: Convert to Egypt time for date calculation
+    const completedDateStr = getEgyptDateString(completedAt);
 
     console.log('🔥 Updating streak:', {
       task: streakKey,
       egyptDate: completedDateStr,
+      utcDate: completedAt.toISOString(),
       streakType,
       weeklyPattern,
     });
@@ -283,17 +283,20 @@ async function updateStreakFromDueDate(
     const streak = existing[0];
     const lastDate = new Date(streak.last_completed_date + 'T00:00:00Z');
     lastDate.setHours(0, 0, 0, 0);
+    
+    const currentDate = new Date(completedDateStr + 'T00:00:00Z');
+    currentDate.setHours(0, 0, 0, 0);
 
-    // Same day - no update
-    if (lastDate.getTime() === egyptTime.getTime()) {
-      console.log('ℹ️ Same day - no streak update');
+    // Same day in Egypt - no update
+    if (lastDate.getTime() === currentDate.getTime()) {
+      console.log('ℹ️ Same Egypt day - no streak update');
       return;
     }
 
     let newStreak: number;
 
     if (streakType === 'daily') {
-      const daysDiff = Math.floor((egyptTime.getTime() - lastDate.getTime()) / (1000 * 60 * 60 * 24));
+      const daysDiff = Math.floor((currentDate.getTime() - lastDate.getTime()) / (1000 * 60 * 60 * 24));
       
       if (daysDiff === 1) {
         newStreak = streak.current_streak + 1;
@@ -303,11 +306,11 @@ async function updateStreakFromDueDate(
         console.log(`💔 Streak reset: "${streakKey}"`);
       }
     } else {
-      const dayOfWeek = egyptTime.getDay();
+      const dayOfWeek = currentDate.getDay();
       const expectedDays = weeklyPattern ? weeklyPattern.split(',').map(d => parseInt(d)) : [];
       
       if (expectedDays.length === 0 || expectedDays.includes(dayOfWeek)) {
-        const daysDiff = Math.floor((egyptTime.getTime() - lastDate.getTime()) / (1000 * 60 * 60 * 24));
+        const daysDiff = Math.floor((currentDate.getTime() - lastDate.getTime()) / (1000 * 60 * 60 * 24));
         
         if (daysDiff <= 7 && daysDiff > 0) {
           newStreak = streak.current_streak + 1;
@@ -405,23 +408,30 @@ async function checkDuplicate(
 }
 
 /**
- * Send Telegram notification directly to user
- * NO groups, NO threads
+ * ENHANCED: Send Telegram notification with full details and Arabic streak
  */
 export async function sendTaskNotification(
   task: Task,
   chatId: string,
-  botToken: string
+  botToken: string,
+  db: SupabaseClient
 ): Promise<void> {
   try {
     console.log('📤 Preparing notification for chat:', chatId);
     
-    const message = formatTaskNotification(task);
+    // Get streak info
+    const streaks = await db.select<Streak>('streaks', {
+      filter: { task_name: op.eq(task.content) },
+      limit: 1,
+    });
+    
+    const streak = streaks.length > 0 ? streaks[0] : undefined;
+    
+    const message = formatTaskNotification(task, streak);
     
     const payload = {
       chat_id: chatId,
       text: message,
-      parse_mode: 'HTML',
     };
 
     console.log('📨 Sending to Telegram API...');
@@ -447,36 +457,66 @@ export async function sendTaskNotification(
 }
 
 /**
- * Format notification message
+ * ENHANCED: Format notification message with all details
+ * Uses correct symbols and Arabic formatting
  */
-function formatTaskNotification(task: Task): string {
-  let message = `✅ <b>مهمة مكتملة</b>\n\n${escapeHtml(task.content)}`;
-
+function formatTaskNotification(task: Task, streak?: Streak): string {
+  // Determine symbol based on task status and hierarchy
+  let symbol = '✅'; // Default: Completed main task
+  
+  if (task.is_origin === false) {
+    // It's a subtask
+    symbol = task.status === 'done' ? '✓' : '✕';
+  } else {
+    // Main task
+    if (task.status === 'partial') {
+      symbol = '⚠️';
+    } else if (task.status === 'failed') {
+      symbol = '❌';
+    }
+  }
+  
+  let message = `${symbol} ${task.content}\n`;
+  
+  // Add description if exists
+  if (task.description && task.description.trim().length > 0) {
+    message += `\n📝 ${task.description}\n`;
+  }
+  
+  // Add duration with Arabic formatting
   if (task.duration_minutes && task.duration_minutes > 0) {
-    const hours = Math.floor(task.duration_minutes / 60);
-    const minutes = task.duration_minutes % 60;
-    
-    let timeStr = '';
-    if (hours > 0) timeStr += `${hours} ساعة `;
-    if (minutes > 0) timeStr += `${minutes} دقيقة`;
-    
-    message += `\n⏱ <i>المدة:</i> ${timeStr.trim()}`;
+    const timeStr = formatArabicTime(task.duration_minutes);
+    message += `\n⏱ المدة: ${timeStr}`;
   }
-
+  
+  // Add quantity
   if (task.quantity) {
-    message += `\n📊 <i>الكمية:</i> ${task.quantity} ${task.quantity_unit || 'وحدات'}`;
+    message += `\n📊 الكمية: ${task.quantity} ${task.quantity_unit || 'وحدات'}`;
   }
-
+  
+  // Add category
   if (task.category) {
-    message += `\n🏷 <i>الفئة:</i> ${escapeHtml(task.category)}`;
+    message += `\n🏷 الفئة: ${task.category}`;
   }
-
+  
+  // Add streak info (if exists and active)
+  if (streak && streak.current_streak > 0) {
+    message += `\n\n🔥 السلسلة:\n`;
+    
+    // Streak type in Arabic
+    const typeText = streak.streak_type === 'daily' ? 'يومية' : 'أسبوعية';
+    message += `النوع: ${typeText}\n`;
+    
+    // Current streak with proper Arabic plurals
+    message += `المدة: ${formatArabicStreak(streak.current_streak)}`;
+    
+    // Check if it's a new record
+    if (streak.current_streak === streak.best_streak && streak.current_streak > 1) {
+      message += ' 🎉 (رقم قياسي جديد!)';
+    } else if (streak.best_streak > streak.current_streak) {
+      message += `\nالأفضل: ${formatArabicStreak(streak.best_streak)}`;
+    }
+  }
+  
   return message;
-}
-
-function escapeHtml(text: string): string {
-  return text
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;');
 }

@@ -1,7 +1,10 @@
 // ============================================
-// Confirm Command Handler (Durable Objects)
+// Confirm Command Handler - FIXED VERSION
 // ============================================
-// Starts report generation job using Durable Objects
+// FIXES APPLIED:
+// - First question shows progress indicator [1/N]
+// - Removed job ID message spam
+// - Cleaner user experience
 
 import type { BotContext } from './grammy';
 import type { ReportJobData } from '../durable-objects/report-processor';
@@ -85,13 +88,16 @@ export async function handleConfirmCommand(
 
       await ctx.reply(
         `📝 لدي ${questions.length} أسئلة توضيحية لفهم تجربتك اليوم بشكل أفضل.\n\n` +
-        'سأرسل سؤال واحد في كل مرة. أجب بحرية!'
+        'سأرسل سؤال واحد في كل مرة. أجب بحرية!\n' +
+        'يمكنك استخدام /skip_questions لتخطي الأسئلة المتبقية.'
       );
 
-      // Send first question
+      // FIXED: Send first question WITH PROGRESS
       const firstQuestion = await conversationMgr.getCurrentQuestion(chatId);
-      if (firstQuestion) {
-        await ctx.reply(`❓ ${firstQuestion}`);
+      const progress = await conversationMgr.getProgress(chatId);
+      
+      if (firstQuestion && progress) {
+        await ctx.reply(`[${progress}] ❓ ${firstQuestion}`);
       }
     } else {
       // No questions, start job immediately
@@ -144,7 +150,6 @@ export async function startDurableObjectJob(
     };
 
     // Get Durable Object instance for this job
-    // Using jobId as the name ensures each job gets its own isolated instance
     const id = reportProcessorNamespace.idFromName(jobId);
     const stub = reportProcessorNamespace.get(id);
 
@@ -161,13 +166,11 @@ export async function startDurableObjectJob(
 
     console.log(`✅ [Job ${jobId}] Durable Object job started`);
 
-    // Notify user
+    // FIXED: Simplified notification without job ID spam
     await ctx.reply(
-      '✅ *تم بدء التحليل!*\n\n' +
+      '✅ تم بدء التحليل!\n\n' +
       'جاري معالجة تقريرك في الخلفية. سأرسل لك النتائج خلال دقيقة أو دقيقتين.\n\n' +
-      'يمكنك الاستمرار في استخدام البوت عادياً، سأرسل لك التقرير تلقائياً عند الانتهاء! 🚀\n\n' +
-      `معرف المهمة: \`${jobId}\``,
-      { parse_mode: 'Markdown' }
+      'يمكنك الاستمرار في استخدام البوت عادياً! 🚀'
     );
 
   } catch (error) {

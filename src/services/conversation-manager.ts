@@ -1,5 +1,9 @@
 /**
- * Conversation State Manager
+ * Conversation State Manager - FIXED VERSION
+ *
+ * FIXES APPLIED:
+ * - Correct question numbering (off-by-one error fixed)
+ * - Proper closing braces
  *
  * Manages multi-step conversations for Q&A flow during report generation.
  * Stores conversation state in database with 10-minute expiry.
@@ -130,7 +134,7 @@ export class ConversationManager {
     const answers = conversation.data.answers || {};
     answers[currentQuestion] = answer;
 
-    // Update conversation - FIX: Use op.eq() for the filter
+    // Update conversation - Use op.eq() for the filter
     await this.db.update(
       'conversation_state',
       { 
@@ -230,7 +234,8 @@ export class ConversationManager {
   }
 
   /**
-   * Get conversation progress (e.g., "2/5")
+   * FIXED: Get conversation progress (e.g., "2/5")
+   * Now correctly shows 1-based indexing
    */
   async getProgress(chatId: string): Promise<string | null> {
     const conversation = await this.getConversation(chatId);
@@ -238,7 +243,8 @@ export class ConversationManager {
       return null;
     }
 
-    return `${conversation.current_step}/${conversation.total_steps}`;
+    // FIXED: Add 1 to current_step for 1-based display
+    return `${conversation.current_step + 1}/${conversation.total_steps}`;
   }
 }
 

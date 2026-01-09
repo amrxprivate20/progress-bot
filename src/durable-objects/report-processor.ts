@@ -1,8 +1,9 @@
 // ============================================
-// Report Processor Durable Object
+// Report Processor Durable Object - FIXED
 // ============================================
-// Handles long-running AI report generation without timeout limits
-// Each report job gets its own isolated Durable Object instance
+// FIXED: Removed unused escapeMarkdown function (TypeScript error)
+// FIXED: Removed noisy progress messages
+// FIXED: Uses timezone utilities for Egypt UTC+2
 
 import { DurableObject } from 'cloudflare:workers';
 import { createSupabaseClient } from '../database/client';
@@ -108,7 +109,7 @@ export class ReportProcessor extends DurableObject<Env> {
         startedAt: new Date().toISOString(),
       };
 
-      // Send status to user
+      // Send initial status to user
       await this.sendTelegramMessage(
         chatId, 
         botToken, 
@@ -145,9 +146,6 @@ export class ReportProcessor extends DurableObject<Env> {
       console.log(`🤖 [Job ${jobId}] Calling AI (may take 15-60 seconds)...`);
       const startTime = Date.now();
 
-      // Update progress
-      this.status.progress = 'جاري استدعاء الذكاء الاصطناعي...';
-
       // Call AI - THIS IS THE LONG OPERATION (no timeout here!)
       const aiResponse = await aiClient.generateDailyReport({
         reportDate: reportData.date,
@@ -164,33 +162,23 @@ export class ReportProcessor extends DurableObject<Env> {
       const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
       console.log(`✅ [Job ${jobId}] AI analysis complete in ${elapsed}s`);
 
-      // Update progress
-      this.status.progress = 'جاري إرسال النتائج...';
-
       // Send results to user
       await this.sendReportResults(chatId, botToken, reportData, aiResponse);
 
-      console.log(`🧠 [Job ${jobId}] Updating memory...`);
-      this.status.progress = 'جاري تحديث الذاكرة...';
-
-      // Update memory
+      // Update memory (REMOVED noisy messages)
       if (Object.keys(aiResponse.memoryUpdates).length > 0) {
-        await this.sendTelegramMessage(chatId, botToken, '🧠 جاري تحديث الذاكرة...');
+        console.log(`🧠 [Job ${jobId}] Updating memory...`);
         await memoryMgr.updateMemory(aiResponse.memoryUpdates);
-        await this.sendTelegramMessage(chatId, botToken, '✅ تم تحديث الذاكرة');
       }
 
       // Check memory optimization
       if (aiResponse.memoryOptimization === 'OPTIMIZE_NEEDED') {
-        await this.sendTelegramMessage(chatId, botToken, '🔄 جاري تحسين الذاكرة...');
+        console.log(`🔄 [Job ${jobId}] Optimizing memory...`);
         await memoryMgr.checkOptimizationTriggers();
       }
 
+      // Save report to database
       console.log(`💾 [Job ${jobId}] Saving report to database...`);
-      this.status.progress = 'جاري حفظ التقرير...';
-
-      // Save report to database - USE UPSERT to handle duplicates
-      await this.sendTelegramMessage(chatId, botToken, '💾 جاري حفظ التقرير...');
       const stats = reportGen.calculateStatistics(reportData.tasks);
 
       await db.upsert('daily_reports', {
@@ -205,7 +193,7 @@ export class ReportProcessor extends DurableObject<Env> {
         ai_commentary: aiResponse.mainCommentary,
         suggested_reward: aiResponse.reward,
         weekly_goals_analysis: JSON.stringify(aiResponse.goalsAnalysis),
-      }, 'report_date'); // Upsert based on report_date
+      }, 'report_date');
 
       console.log(`✅ [Job ${jobId}] Report saved successfully`);
 
@@ -250,33 +238,8 @@ export class ReportProcessor extends DurableObject<Env> {
   }
 
   /**
-   * Escape markdown special characters
-   */
-  private escapeMarkdown(text: string): string {
-    return text
-      .replace(/\_/g, '\\_')
-      .replace(/\*/g, '\\*')
-      .replace(/\[/g, '\\[')
-      .replace(/\]/g, '\\]')
-      .replace(/\(/g, '\\(')
-      .replace(/\)/g, '\\)')
-      .replace(/\~/g, '\\~')
-      .replace(/\`/g, '\\`')
-      .replace(/\>/g, '\\>')
-      .replace(/\#/g, '\\#')
-      .replace(/\+/g, '\\+')
-      .replace(/\-/g, '\\-')
-      .replace(/\=/g, '\\=')
-      .replace(/\|/g, '\\|')
-      .replace(/\{/g, '\\{')
-      .replace(/\}/g, '\\}')
-      .replace(/\./g, '\\.')
-      .replace(/\!/g, '\\!');
-  }
-
-  /**
    * Send Telegram message
-   * FIXED: Don't use Markdown parse_mode to avoid formatting errors
+   * Don't use Markdown parse_mode to avoid formatting errors
    */
   private async sendTelegramMessage(
     chatId: string,
@@ -292,7 +255,6 @@ export class ReportProcessor extends DurableObject<Env> {
           body: JSON.stringify({
             chat_id: chatId,
             text: text,
-            // Don't use parse_mode to avoid markdown parsing errors
           }),
         }
       );
