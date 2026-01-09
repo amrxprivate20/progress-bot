@@ -1,5 +1,6 @@
 # ============================================
 # Cloudflare Worker Configuration
+# WITH QUEUES FOR ASYNC PROCESSING
 # ============================================
 
 name = "progress-bot"
@@ -24,32 +25,49 @@ workers_dev = true
 # SUPABASE_URL = "https://xxxxx.supabase.co"
 # Note: Don't put actual secrets here, use 'wrangler secret put' command
 
+# ============================================
+# QUEUES CONFIGURATION
+# ============================================
+# Cloudflare Queues for async background jobs
+# NO TIMEOUT LIMITS - Perfect for long AI processing!
+
+# Producer binding - allows worker to send messages to queue
+[[queues.producers]]
+queue = "report-processing-queue"
+binding = "REPORT_QUEUE"
+
+# Producer for dead letter queue
+[[queues.producers]]
+queue = "report-processing-dlq"
+binding = "REPORT_DLQ"
+
+# Consumer configuration - processes messages from queue
+[[queues.consumers]]
+queue = "report-processing-queue"
+max_batch_size = 1           # Process 1 message at a time
+max_batch_timeout = 30        # Wait max 30s to batch messages
+max_retries = 3               # Retry failed messages up to 3 times
+dead_letter_queue = "report-processing-dlq"  # Send failed messages here
+
+# ============================================
 # Build configuration
+# ============================================
 [build]
 command = ""
 
+# ============================================
 # Development configuration
+# ============================================
 [env.development]
 vars = { ENVIRONMENT = "development" }
 
+# ============================================
 # Production configuration
+# ============================================
 [env.production]
 vars = { ENVIRONMENT = "production" }
 
-# Limits and settings
-#[limits]
-# CPU time limit (in milliseconds)
-#cpu_ms = 50
-
-# Observability settings
-[observability]
-enabled = true
-
-# Compatibility flags
-compatibility_flags = []
-
-# Preserve file names during build
-preserve_file_names = []
-
-# Node.js compatibility (for Grammy and other packages)
-node_compat = true
+# ============================================
+# Compatibility settings
+# ============================================
+compatibility_flags = ["nodejs_compat"]

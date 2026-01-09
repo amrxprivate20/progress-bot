@@ -1,6 +1,5 @@
 // ============================================
-// Cloudflare Worker - Main Entry Point
-// FIXED: Proper route ordering and logging
+// Cloudflare Worker - Main Entry Point (WITH QUEUES)
 // ============================================
 
 import type { Env } from './types';
@@ -10,10 +9,19 @@ import { createBot, createTelegramWebhookHandler } from './bot/grammy';
 import { handleTodoistWebhook, sendTaskNotification } from './handlers/todoist';
 import { validateEnvironment } from './utils/validation';
 import { asyncHandler, formatErrorResponse, ValidationError } from './utils/errors';
-import { handleReportProcessing } from './handlers/process-report';
+import { processReportJob } from './queues/report-processor';
+import type { ReportJobMessage } from './queues/report-processor';
+
+// Extended Env with Queue binding
+interface EnvWithQueue extends Env {
+  REPORT_QUEUE: any; // Cloudflare Queue binding
+}
 
 export default {
-  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+  /**
+   * Main HTTP request handler
+   */
+  async fetch(request: Request, env: EnvWithQueue, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
     const path = url.pathname;
     
@@ -46,32 +54,13 @@ export default {
       }
 
       // ============================================
-      // REPORT PROCESSING ENDPOINT (PRIORITY!)
-      // ============================================
-      if (path === '/api/process-report' && request.method === 'POST') {
-        console.log('🎯 Report processing endpoint hit');
-        return asyncHandler(async () => {
-          return await handleReportProcessing(request, db, settings);
-        })(request, env, ctx);
-      }
-
-      // ============================================
       // TODOIST WEBHOOK
       // ============================================
       if (path === '/webhook/todoist' && request.method === 'POST') {
         return asyncHandler(async () => {
           const rawBody = await request.text();
-          
-          // Log raw payload for debugging
           console.log('📥 Raw Todoist webhook:', rawBody);
-          
           const payload = JSON.parse(rawBody);
-          
-          console.log('📥 Parsed webhook:', {
-            event: payload.event_name,
-            task: payload.event_data?.content,
-            project: payload.event_data?.project_id,
-          });
           
           return await handleTodoistWebhookEndpoint(payload, env, db, settings);
         })(request, env, ctx);
@@ -82,8 +71,11 @@ export default {
       // ============================================
       if (path === '/telegram/webhook' && request.method === 'POST') {
         const botToken = env.TELEGRAM_BOT_TOKEN;
-        const bot = createBot(botToken, db, settings);
+        
+        // Pass queue to bot context
+        const bot = createBot(botToken, db, settings, env.REPORT_QUEUE);
         const handler = createTelegramWebhookHandler(bot);
+        
         return await handler(request);
       }
 
@@ -97,21 +89,49 @@ export default {
       }
 
       // ============================================
+      // JOB STATUS API (Optional - for monitoring)
+      // ============================================
+      if (path.startsWith('/api/jobs/') && request.method === 'GET') {
+        const jobId = path.split('/').pop();
+        if (!jobId) {
+          return new Response('Job ID required', { status: 400 });
+        }
+
+        const job = await db.select('job_status', {
+          filter: { job_id: jobId },
+          limit: 1,
+        });
+
+        if (job.length === 0) {
+          return new Response(
+            JSON.stringify({ success: false, error: 'Job not found' }),
+            { status: 404, headers: { 'Content-Type': 'application/json' } }
+          );
+        }
+
+        return new Response(
+          JSON.stringify({ success: true, data: job[0] }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+
+      // ============================================
       // ROOT INFO
       // ============================================
       if (path === '/' && request.method === 'GET') {
         return new Response(
           JSON.stringify({
             name: 'Progress Bot API',
-            version: '1.0.0',
+            version: '2.0.0',
             status: 'online',
+            features: ['Async Report Processing', 'No Timeout Limits'],
             timezone: 'Africa/Cairo (GMT+2)',
             endpoints: {
               health: 'GET /health',
               todoist_webhook: 'POST /webhook/todoist',
               telegram_webhook: 'POST /telegram/webhook',
               settings: 'GET/POST/DELETE /api/settings',
-              process_report: 'POST /api/process-report',
+              job_status: 'GET /api/jobs/{jobId}',
             },
           }),
           {
@@ -139,7 +159,42 @@ export default {
       });
     }
   },
+
+  /**
+   * Queue consumer handler
+   * This runs when a message is received from the queue
+   * NO TIMEOUT LIMITS HERE!
+   */
+  async queue(batch: MessageBatch<ReportJobMessage>, env: EnvWithQueue): Promise<void> {
+    const db = createSupabaseClient(env);
+    const settings = new SettingsManager(db);
+
+    console.log(`📦 Processing ${batch.messages.length} messages from queue`);
+
+    for (const message of batch.messages) {
+      try {
+        console.log(`🎯 Processing message ID: ${message.id}`);
+        
+        // Process the report job (NO TIMEOUT!)
+        await processReportJob(message.body, db, settings);
+        
+        // Acknowledge successful processing
+        message.ack();
+        
+        console.log(`✅ Message ${message.id} processed successfully`);
+      } catch (error) {
+        console.error(`❌ Failed to process message ${message.id}:`, error);
+        
+        // Retry the message (up to max_retries in wrangler.toml)
+        message.retry();
+      }
+    }
+  },
 };
+
+// ============================================
+// Helper Functions
+// ============================================
 
 async function handleHealth(db: any): Promise<Response> {
   try {
@@ -151,6 +206,10 @@ async function handleHealth(db: any): Promise<Response> {
         database: isHealthy ? 'connected' : 'disconnected',
         timestamp: new Date().toISOString(),
         timezone: 'Africa/Cairo (GMT+2)',
+        features: {
+          async_processing: 'enabled',
+          queue_system: 'cloudflare_queues',
+        },
       }),
       {
         status: isHealthy ? 200 : 503,
@@ -171,27 +230,21 @@ async function handleHealth(db: any): Promise<Response> {
 
 async function handleTodoistWebhookEndpoint(
   payload: any,
-  env: Env,
+  env: EnvWithQueue,
   db: any,
   settings: SettingsManager
 ): Promise<Response> {
   try {
     const result = await handleTodoistWebhook(payload, db, settings);
 
-    // FIXED: Await notification completion before responding
     if (result.task) {
       const botToken = env.TELEGRAM_BOT_TOKEN;
       const chatId = env.TELEGRAM_CHAT_ID;
       
       console.log('📤 Sending notification to:', chatId);
       
-      // Send notification and wait for completion
       try {
-        await sendTaskNotification(
-          result.task,
-          chatId,
-          botToken
-        );
+        await sendTaskNotification(result.task, chatId, botToken);
         console.log('✅ Notification sent successfully');
       } catch (err) {
         console.error('❌ Notification failed:', err);
@@ -275,4 +328,18 @@ async function handleSettingsAPI(
   }
 
   throw new ValidationError('Invalid settings API endpoint');
+}
+
+// Type for Queue message batch
+interface MessageBatch<T = any> {
+  queue: string;
+  messages: QueueMessage<T>[];
+}
+
+interface QueueMessage<T = any> {
+  id: string;
+  timestamp: Date;
+  body: T;
+  ack(): void;
+  retry(): void;
 }
