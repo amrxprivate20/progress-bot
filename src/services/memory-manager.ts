@@ -15,7 +15,7 @@
  * - Auto-optimization triggers
  */
 
-import { SupabaseClient } from '../database/client';
+import { SupabaseClient, op } from '../database/client';
 import { Memory } from '../types';
 import { AIClient } from './ai-client';
 
@@ -69,9 +69,12 @@ export class MemoryManager {
 
   /**
    * Get memory for a specific category
+   * FIXED: Use op.eq() to properly encode the filter
    */
   async getCategory(category: string): Promise<string> {
-    const result = await this.db.select<Memory>('memory', { filter: { category } });
+    const result = await this.db.select<Memory>('memory', { 
+      filter: { category: op.eq(category) } 
+    });
 
     if (result.length === 0) {
       return '';
@@ -305,20 +308,23 @@ export class MemoryManager {
 
   /**
    * Upsert memory category
+   * FIXED: Use op.eq() for proper filter encoding
    */
   private async upsertCategory(
     category: string,
     content: string,
     isOptimization: boolean = false
   ): Promise<void> {
-    const existing = await this.db.select<Memory>('memory', { filter: { category } });
+    const existing = await this.db.select<Memory>('memory', { 
+      filter: { category: op.eq(category) } 
+    });
 
     const now = new Date().toISOString();
 
     if (existing.length > 0) {
       await this.db.update(
         'memory',
-        { filter: { category } },
+        { category: op.eq(category) },
         {
           content,
           last_updated: now,

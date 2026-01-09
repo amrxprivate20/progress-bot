@@ -1,5 +1,5 @@
 // ============================================
-// Grammy Bot Setup with Queue Support
+// Grammy Bot Setup with Durable Objects Support
 // ============================================
 
 import { Bot, Context, webhookCallback } from 'grammy';
@@ -9,25 +9,25 @@ import { createConversationManager } from '../services/conversation-manager';
 import { createMemoryManager } from '../services/memory-manager';
 import { createReportGenerator } from '../services/report-generator';
 import { createAIClient } from '../services/ai-client';
-import { handleConfirmCommand, queueReportJob } from './confirm-handler';
+import { handleConfirmCommand, startDurableObjectJob } from './confirm-handler';
 
 /**
- * Extended context with queue
+ * Extended context with Durable Objects namespace
  */
 export interface BotContext extends Context {
   db: SupabaseClient;
   settings: SettingsManager;
-  reportQueue: any; // Cloudflare Queue binding
+  reportProcessorNamespace: DurableObjectNamespace; // Changed from reportQueue
 }
 
 /**
- * Create and configure Grammy bot with queue support
+ * Create and configure Grammy bot with Durable Objects support
  */
 export function createBot(
   token: string,
   db: SupabaseClient,
   settings: SettingsManager,
-  reportQueue: any // Queue binding from env
+  reportProcessorNamespace: DurableObjectNamespace // Changed from queue
 ): Bot<BotContext> {
   const bot = new Bot<BotContext>(token);
 
@@ -35,7 +35,7 @@ export function createBot(
   bot.use(async (ctx, next) => {
     ctx.db = db;
     ctx.settings = settings;
-    ctx.reportQueue = reportQueue;
+    ctx.reportProcessorNamespace = reportProcessorNamespace; // Changed
     await next();
   });
 
@@ -62,16 +62,16 @@ function registerCommands(bot: Bot<BotContext>) {
 الأوامر المتاحة:
 
 📊 /progress - عرض ملخص اليوم
-✅ /confirm - بدء التحليل الكامل (معالجة خلفية - لا تنتظر!)
+✅ /confirm - بدء التحليل الكامل (معالجة خلفية - لا انتظار!)
 ❌ /cancel - إلغاء المحادثة
 
 🧠 /memory - عرض الذاكرة المنظمة
 🗑 /clearmemory - مسح كل الذاكرة
 
-📝 /createtasks - إنشاء مهام الأسبوع
-📄 /lastupdate - إنشاء ملف LastUpdate.md
+📝 /createtasks - إنشاء مهام الأسبوع (قريباً)
+📄 /lastupdate - إنشاء ملف LastUpdate.md (قريباً)
 
-✨ *جديد:* التحليل يعمل الآن في الخلفية! لن تنتظر طويلاً! 🚀
+✨ *جديد:* التحليل يعمل الآن في الخلفية بدون حدود زمنية! 🚀
     `.trim();
 
     await ctx.reply(welcomeMessage);
@@ -90,14 +90,15 @@ function registerCommands(bot: Bot<BotContext>) {
 - التحليل يعمل الآن في الخلفية
 - لن تنتظر - سأرسل لك النتائج تلقائياً
 - يمكنك الاستمرار باستخدام البوت
+- لا حدود زمنية للمعالجة!
 
 2️⃣ الذاكرة:
 /memory - عرض كل ما تعلمته عنك
 /clearmemory - مسح الذاكرة
 
 3️⃣ المهام والأهداف:
-/createtasks - إنشاء مهام من الأهداف
-/lastupdate - ملخص الحالة الحالية
+/createtasks - إنشاء مهام من الأهداف (قريباً)
+/lastupdate - ملخص الحالة الحالية (قريباً)
 
 💡 نصيحة: البوت يتتبع المهام تلقائياً من Todoist!
     `.trim();
@@ -134,9 +135,9 @@ function registerCommands(bot: Bot<BotContext>) {
     }
   });
 
-  // Confirm command - NOW WITH QUEUE!
+  // Confirm command - NOW WITH DURABLE OBJECTS!
   bot.command('confirm', async (ctx) => {
-    await handleConfirmCommand(ctx, ctx.reportQueue);
+    await handleConfirmCommand(ctx, ctx.reportProcessorNamespace);
   });
 
   // Cancel command
@@ -167,6 +168,7 @@ function registerCommands(bot: Bot<BotContext>) {
       const aiModel = await ctx.settings.get('ai_model') || 'anthropic/claude-sonnet-4';
 
       if (!openRouterKey) {
+        // Fallback: show raw memory if no AI key
         const memory = await ctx.db.select('memory', {});
 
         if (memory.length === 0) {
@@ -242,18 +244,20 @@ function registerCommands(bot: Bot<BotContext>) {
           // Clear conversation
           await conversationMgr.clearConversation(chatId);
 
-          // Queue the job with answers
+          // Start Durable Object job with answers
           const openRouterKey = await ctx.settings.get('openrouter_api_key');
           const aiModel = await ctx.settings.get('ai_model') || 'anthropic/claude-sonnet-4';
+          const botToken = await ctx.settings.get('telegram_bot_token');
 
-          if (openRouterKey) {
-            await queueReportJob(
+          if (openRouterKey && botToken) {
+            await startDurableObjectJob(
               ctx,
-              ctx.reportQueue,
+              ctx.reportProcessorNamespace,
               reportContext,
               answers || {},
               openRouterKey.trim(),
-              aiModel
+              aiModel,
+              botToken
             );
           }
 
@@ -315,6 +319,9 @@ export function createTelegramWebhookHandler(
   return webhookCallback(bot, 'cloudflare-mod');
 }
 
+/**
+ * Set webhook (helper function)
+ */
 export async function setWebhook(
   botToken: string,
   webhookUrl: string

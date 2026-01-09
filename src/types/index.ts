@@ -334,3 +334,14 @@ export function isTodoistWebhookEvent(obj: any): obj is TodoistWebhookEvent {
 
 export type PartialTask = Partial<Task> & Pick<Task, 'task_id'>;
 export type PartialStreak = Partial<Streak> & Pick<Streak, 'task_name'>;
+
+// Add if not present
+export interface ReportJobData {
+  jobId: string;
+  chatId: string;
+  reportData: any;
+  userAnswers: Record<string, string>;
+  apiKey: string;
+  aiModel: string;
+  botToken: string;
+}

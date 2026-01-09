@@ -1,5 +1,5 @@
 // ============================================
-// Cloudflare Worker - Main Entry Point (WITH QUEUES)
+// Cloudflare Worker - Main Entry Point (WITH DURABLE OBJECTS)
 // ============================================
 
 import type { Env } from './types';
@@ -9,19 +9,20 @@ import { createBot, createTelegramWebhookHandler } from './bot/grammy';
 import { handleTodoistWebhook, sendTaskNotification } from './handlers/todoist';
 import { validateEnvironment } from './utils/validation';
 import { asyncHandler, formatErrorResponse, ValidationError } from './utils/errors';
-import { processReportJob } from './queues/report-processor';
-import type { ReportJobMessage } from './queues/report-processor';
+import { ReportProcessor } from './durable-objects/report-processor';
 
-// Extended Env with Queue binding
-interface EnvWithQueue extends Env {
-  REPORT_QUEUE: any; // Cloudflare Queue binding
+// Extended Env with Durable Object binding
+interface EnvWithDO extends Env {
+  REPORT_PROCESSOR: DurableObjectNamespace; // Durable Object namespace
 }
+
+export { ReportProcessor }; // Export the Durable Object class
 
 export default {
   /**
    * Main HTTP request handler
    */
-  async fetch(request: Request, env: EnvWithQueue, ctx: ExecutionContext): Promise<Response> {
+  async fetch(request: Request, env: EnvWithDO, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
     const path = url.pathname;
     
@@ -72,8 +73,8 @@ export default {
       if (path === '/telegram/webhook' && request.method === 'POST') {
         const botToken = env.TELEGRAM_BOT_TOKEN;
         
-        // Pass queue to bot context
-        const bot = createBot(botToken, db, settings, env.REPORT_QUEUE);
+        // Pass Durable Object namespace to bot
+        const bot = createBot(botToken, db, settings, env.REPORT_PROCESSOR);
         const handler = createTelegramWebhookHandler(bot);
         
         return await handler(request);
@@ -89,7 +90,7 @@ export default {
       }
 
       // ============================================
-      // JOB STATUS API (Optional - for monitoring)
+      // JOB STATUS API - Poll for job status
       // ============================================
       if (path.startsWith('/api/jobs/') && request.method === 'GET') {
         const jobId = path.split('/').pop();
@@ -97,20 +98,16 @@ export default {
           return new Response('Job ID required', { status: 400 });
         }
 
-        const job = await db.select('job_status', {
-          filter: { job_id: jobId },
-          limit: 1,
-        });
+        // Get Durable Object for this job
+        const id = env.REPORT_PROCESSOR.idFromName(jobId);
+        const stub = env.REPORT_PROCESSOR.get(id);
 
-        if (job.length === 0) {
-          return new Response(
-            JSON.stringify({ success: false, error: 'Job not found' }),
-            { status: 404, headers: { 'Content-Type': 'application/json' } }
-          );
-        }
+        // Forward request to Durable Object
+        const doResponse = await stub.fetch(new Request(`https://fake-host/status`));
+        const status = await doResponse.json();
 
         return new Response(
-          JSON.stringify({ success: true, data: job[0] }),
+          JSON.stringify({ success: true, data: status }),
           { status: 200, headers: { 'Content-Type': 'application/json' } }
         );
       }
@@ -122,9 +119,13 @@ export default {
         return new Response(
           JSON.stringify({
             name: 'Progress Bot API',
-            version: '2.0.0',
+            version: '2.0.0-durable-objects',
             status: 'online',
-            features: ['Async Report Processing', 'No Timeout Limits'],
+            features: [
+              'Durable Objects for async processing',
+              'No timeout limits on AI generation',
+              'Free tier compatible'
+            ],
             timezone: 'Africa/Cairo (GMT+2)',
             endpoints: {
               health: 'GET /health',
@@ -159,37 +160,6 @@ export default {
       });
     }
   },
-
-  /**
-   * Queue consumer handler
-   * This runs when a message is received from the queue
-   * NO TIMEOUT LIMITS HERE!
-   */
-  async queue(batch: MessageBatch<ReportJobMessage>, env: EnvWithQueue): Promise<void> {
-    const db = createSupabaseClient(env);
-    const settings = new SettingsManager(db);
-
-    console.log(`📦 Processing ${batch.messages.length} messages from queue`);
-
-    for (const message of batch.messages) {
-      try {
-        console.log(`🎯 Processing message ID: ${message.id}`);
-        
-        // Process the report job (NO TIMEOUT!)
-        await processReportJob(message.body, db, settings);
-        
-        // Acknowledge successful processing
-        message.ack();
-        
-        console.log(`✅ Message ${message.id} processed successfully`);
-      } catch (error) {
-        console.error(`❌ Failed to process message ${message.id}:`, error);
-        
-        // Retry the message (up to max_retries in wrangler.toml)
-        message.retry();
-      }
-    }
-  },
 };
 
 // ============================================
@@ -208,7 +178,8 @@ async function handleHealth(db: any): Promise<Response> {
         timezone: 'Africa/Cairo (GMT+2)',
         features: {
           async_processing: 'enabled',
-          queue_system: 'cloudflare_queues',
+          backend: 'durable_objects',
+          free_tier: 'yes',
         },
       }),
       {
@@ -230,7 +201,7 @@ async function handleHealth(db: any): Promise<Response> {
 
 async function handleTodoistWebhookEndpoint(
   payload: any,
-  env: EnvWithQueue,
+  env: EnvWithDO,
   db: any,
   settings: SettingsManager
 ): Promise<Response> {
@@ -328,18 +299,4 @@ async function handleSettingsAPI(
   }
 
   throw new ValidationError('Invalid settings API endpoint');
-}
-
-// Type for Queue message batch
-interface MessageBatch<T = any> {
-  queue: string;
-  messages: QueueMessage<T>[];
-}
-
-interface QueueMessage<T = any> {
-  id: string;
-  timestamp: Date;
-  body: T;
-  ack(): void;
-  retry(): void;
 }

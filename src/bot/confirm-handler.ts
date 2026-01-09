@@ -1,19 +1,21 @@
 // ============================================
-// Confirm Command Handler (Queue-based)
+// Confirm Command Handler (Durable Objects)
 // ============================================
-// Queues report generation job instead of processing synchronously
+// Starts report generation job using Durable Objects
 
 import type { BotContext } from './grammy';
-import type { ReportJobMessage } from '../queues/report-processor';
+import type { ReportJobData } from '../durable-objects/report-processor';
 import { createReportGenerator } from '../services/report-generator';
 import { createAIClient } from '../services/ai-client';
 import { createConversationManager } from '../services/conversation-manager';
-import { v4 as uuidv4 } from 'crypto';
 
 /**
- * Handle /confirm command - Queue report generation job
+ * Handle /confirm command - Start Durable Object job
  */
-export async function handleConfirmCommand(ctx: BotContext, reportQueue: any): Promise<void> {
+export async function handleConfirmCommand(
+  ctx: BotContext, 
+  reportProcessorNamespace: DurableObjectNamespace
+): Promise<void> {
   try {
     await ctx.reply('🔄 جاري بدء التحليل الكامل...');
 
@@ -33,9 +35,15 @@ export async function handleConfirmCommand(ctx: BotContext, reportQueue: any): P
     // Get API keys from settings
     const openRouterKey = await ctx.settings.get('openrouter_api_key');
     const aiModel = await ctx.settings.get('ai_model') || 'anthropic/claude-sonnet-4';
+    const botToken = await ctx.settings.get('telegram_bot_token');
 
     if (!openRouterKey || openRouterKey.trim().length === 0) {
       await ctx.reply('❌ OpenRouter API key غير مضبوط في الإعدادات');
+      return;
+    }
+
+    if (!botToken) {
+      await ctx.reply('❌ Bot token غير مضبوط');
       return;
     }
 
@@ -86,8 +94,16 @@ export async function handleConfirmCommand(ctx: BotContext, reportQueue: any): P
         await ctx.reply(`❓ ${firstQuestion}`);
       }
     } else {
-      // No questions, queue job immediately
-      await queueReportJob(ctx, reportQueue, reportData, {}, trimmedKey, aiModel);
+      // No questions, start job immediately
+      await startDurableObjectJob(
+        ctx, 
+        reportProcessorNamespace, 
+        reportData, 
+        {}, 
+        trimmedKey, 
+        aiModel, 
+        botToken
+      );
     }
 
   } catch (error) {
@@ -97,76 +113,65 @@ export async function handleConfirmCommand(ctx: BotContext, reportQueue: any): P
 }
 
 /**
- * Queue report generation job (called after Q&A or directly)
+ * Start Durable Object job for report processing
  */
-export async function queueReportJob(
+export async function startDurableObjectJob(
   ctx: BotContext,
-  reportQueue: any,
+  reportProcessorNamespace: DurableObjectNamespace,
   reportData: any,
   userAnswers: Record<string, string>,
   apiKey: string,
-  aiModel: string
+  aiModel: string,
+  botToken: string
 ): Promise<void> {
   const chatId = ctx.chat?.id.toString() || '';
   
   // Generate unique job ID
-  const jobId = uuidv4();
+  const jobId = crypto.randomUUID();
 
-  console.log(`📋 [Job ${jobId}] Queueing report generation for chat ${chatId}`);
+  console.log(`📋 [Job ${jobId}] Starting Durable Object job for chat ${chatId}`);
 
   try {
-    // Create job status record
-    await ctx.db.insert('job_status', {
-      job_id: jobId,
-      chat_id: chatId,
-      job_type: 'report_generation',
-      status: 'queued',
-      progress_message: 'في قائمة الانتظار...',
-    });
-
-    // Create job message
-    const jobMessage: ReportJobMessage = {
+    // Create job data
+    const jobData: ReportJobData = {
       jobId,
       chatId,
       reportData,
       userAnswers,
       apiKey,
       aiModel,
+      botToken,
     };
 
-    // Send to queue
-    await reportQueue.send(jobMessage);
+    // Get Durable Object instance for this job
+    // Using jobId as the name ensures each job gets its own isolated instance
+    const id = reportProcessorNamespace.idFromName(jobId);
+    const stub = reportProcessorNamespace.get(id);
 
-    console.log(`✅ [Job ${jobId}] Queued successfully`);
+    // Start processing (non-blocking)
+    const response = await stub.fetch(
+      new Request('https://fake-host/process', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(jobData),
+      })
+    );
+
+    await response.json() as { success: boolean; message: string };
+
+    console.log(`✅ [Job ${jobId}] Durable Object job started`);
 
     // Notify user
     await ctx.reply(
       '✅ *تم بدء التحليل!*\n\n' +
       'جاري معالجة تقريرك في الخلفية. سأرسل لك النتائج خلال دقيقة أو دقيقتين.\n\n' +
-      'يمكنك الاستمرار في استخدام البوت عادياً، سأرسل لك التقرير تلقائياً عند الانتهاء! 🚀',
+      'يمكنك الاستمرار في استخدام البوت عادياً، سأرسل لك التقرير تلقائياً عند الانتهاء! 🚀\n\n' +
+      `معرف المهمة: \`${jobId}\``,
       { parse_mode: 'Markdown' }
     );
 
   } catch (error) {
-    console.error(`❌ [Job ${jobId}] Failed to queue:`, error);
-    
-    // Update job status
-    await ctx.db.update(
-      'job_status',
-      { job_id: jobId },
-      {
-        status: 'failed',
-        error_message: (error as Error).message,
-      }
-    );
-
-    await ctx.reply('❌ حدث خطأ أثناء إضافة المهمة للقائمة. حاول مرة أخرى.');
+    console.error(`❌ [Job ${jobId}] Failed to start:`, error);
+    await ctx.reply('❌ حدث خطأ أثناء بدء المعالجة. حاول مرة أخرى.');
   }
-}
-
-/**
- * Helper to generate UUID (crypto is built-in to Workers)
- */
-function uuidv4(): string {
-  return crypto.randomUUID();
 }

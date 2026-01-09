@@ -1,7 +1,8 @@
 // ============================================
-// Supabase Database Client
+// Supabase Database Client - FIXED VERSION
 // ============================================
 // Simple REST API client for Supabase without SDK dependency
+// FIXED: Properly consume response bodies to prevent deadlock warnings
 
 import type { Env } from '../types';
 
@@ -37,6 +38,7 @@ export class SupabaseClient {
 
   /**
    * Execute a query with automatic retry logic
+   * FIXED: Properly handle response bodies
    */
   private async executeWithRetry<T>(
     operation: () => Promise<T>,
@@ -68,16 +70,14 @@ export class SupabaseClient {
 
   /**
    * SELECT query
-   * @param table - Table name
-   * @param query - Query parameters
-   * @returns Array of results
+   * FIXED: Ensure response body is always consumed
    */
   async select<T = any>(
     table: string,
     query: {
-      columns?: string; // e.g., 'id,name,email' or '*'
-      filter?: Record<string, any>; // e.g., { id: 'eq.123', status: 'eq.done' }
-      order?: string; // e.g., 'created_at.desc'
+      columns?: string;
+      filter?: Record<string, any>;
+      order?: string;
       limit?: number;
       offset?: number;
     } = {}
@@ -85,29 +85,24 @@ export class SupabaseClient {
     return this.executeWithRetry(async () => {
       const params = new URLSearchParams();
       
-      // Add select columns
       if (query.columns) {
         params.append('select', query.columns);
       }
 
-      // Add filters
       if (query.filter) {
         for (const [key, value] of Object.entries(query.filter)) {
           params.append(key, value);
         }
       }
 
-      // Add ordering
       if (query.order) {
         params.append('order', query.order);
       }
 
-      // Add limit
       if (query.limit) {
         params.append('limit', query.limit.toString());
       }
 
-      // Add offset
       if (query.offset) {
         params.append('offset', query.offset.toString());
       }
@@ -119,20 +114,21 @@ export class SupabaseClient {
         headers: this.getHeaders(),
       });
 
+      // ALWAYS consume the response body
+      const responseText = await response.text();
+
       if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(`Supabase SELECT failed: ${response.status} ${errorText}`);
+        throw new Error(`Supabase SELECT failed: ${response.status} ${responseText}`);
       }
 
-      return await response.json();
+      // Parse the consumed text
+      return JSON.parse(responseText);
     });
   }
 
   /**
    * INSERT query
-   * @param table - Table name
-   * @param data - Data to insert (single object or array)
-   * @returns Inserted record(s)
+   * FIXED: Ensure response body is consumed
    */
   async insert<T = any>(
     table: string,
@@ -147,21 +143,20 @@ export class SupabaseClient {
         body: JSON.stringify(data),
       });
 
+      // ALWAYS consume the response body
+      const responseText = await response.text();
+
       if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(`Supabase INSERT failed: ${response.status} ${errorText}`);
+        throw new Error(`Supabase INSERT failed: ${response.status} ${responseText}`);
       }
 
-      return await response.json();
+      return JSON.parse(responseText);
     });
   }
 
   /**
    * UPDATE query
-   * @param table - Table name
-   * @param filter - Filter criteria (e.g., { id: 'eq.123' })
-   * @param data - Data to update
-   * @returns Updated record(s)
+   * FIXED: Ensure response body is consumed
    */
   async update<T = any>(
     table: string,
@@ -171,7 +166,6 @@ export class SupabaseClient {
     return this.executeWithRetry(async () => {
       const params = new URLSearchParams();
       
-      // Add filters
       for (const [key, value] of Object.entries(filter)) {
         params.append(key, value);
       }
@@ -184,21 +178,20 @@ export class SupabaseClient {
         body: JSON.stringify(data),
       });
 
+      // ALWAYS consume the response body
+      const responseText = await response.text();
+
       if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(`Supabase UPDATE failed: ${response.status} ${errorText}`);
+        throw new Error(`Supabase UPDATE failed: ${response.status} ${responseText}`);
       }
 
-      return await response.json();
+      return JSON.parse(responseText);
     });
   }
 
   /**
    * UPSERT query (insert or update)
-   * @param table - Table name
-   * @param data - Data to upsert
-   * @param onConflict - Column(s) to check for conflict (e.g., 'task_id')
-   * @returns Upserted record(s)
+   * FIXED: Ensure response body is consumed
    */
   async upsert<T = any>(
     table: string,
@@ -222,20 +215,20 @@ export class SupabaseClient {
         body: JSON.stringify(data),
       });
 
+      // ALWAYS consume the response body
+      const responseText = await response.text();
+
       if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(`Supabase UPSERT failed: ${response.status} ${errorText}`);
+        throw new Error(`Supabase UPSERT failed: ${response.status} ${responseText}`);
       }
 
-      return await response.json();
+      return JSON.parse(responseText);
     });
   }
 
   /**
    * DELETE query
-   * @param table - Table name
-   * @param filter - Filter criteria (e.g., { id: 'eq.123' })
-   * @returns Deleted record(s)
+   * FIXED: Ensure response body is consumed
    */
   async delete<T = any>(
     table: string,
@@ -244,7 +237,6 @@ export class SupabaseClient {
     return this.executeWithRetry(async () => {
       const params = new URLSearchParams();
       
-      // Add filters
       for (const [key, value] of Object.entries(filter)) {
         params.append(key, value);
       }
@@ -256,20 +248,21 @@ export class SupabaseClient {
         headers: this.getHeaders(),
       });
 
+      // ALWAYS consume the response body (even for DELETE)
+      const responseText = await response.text();
+
       if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(`Supabase DELETE failed: ${response.status} ${errorText}`);
+        throw new Error(`Supabase DELETE failed: ${response.status} ${responseText}`);
       }
 
-      return await response.json();
+      // Return empty array or parsed response
+      return responseText ? JSON.parse(responseText) : [];
     });
   }
 
   /**
    * Execute RPC (stored procedure)
-   * @param functionName - Name of the function
-   * @param params - Parameters to pass
-   * @returns Function result
+   * FIXED: Ensure response body is consumed
    */
   async rpc<T = any>(
     functionName: string,
@@ -284,17 +277,20 @@ export class SupabaseClient {
         body: JSON.stringify(params),
       });
 
+      // ALWAYS consume the response body
+      const responseText = await response.text();
+
       if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(`Supabase RPC failed: ${response.status} ${errorText}`);
+        throw new Error(`Supabase RPC failed: ${response.status} ${responseText}`);
       }
 
-      return await response.json();
+      return JSON.parse(responseText);
     });
   }
 
   /**
    * Health check - verify connection to Supabase
+   * FIXED: Properly consume response
    */
   async healthCheck(): Promise<boolean> {
     try {

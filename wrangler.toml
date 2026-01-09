@@ -1,6 +1,6 @@
 # ============================================
 # Cloudflare Worker Configuration
-# WITH QUEUES FOR ASYNC PROCESSING
+# WITH DURABLE OBJECTS FOR ASYNC PROCESSING
 # ============================================
 
 name = "progress-bot"
@@ -14,40 +14,22 @@ compatibility_date = "2024-01-01"
 # Workers settings
 workers_dev = true
 
-# Custom domain (optional - configure after deployment)
-# routes = [
-#   { pattern = "progress.yourdomain.com/*", zone_name = "yourdomain.com" }
-# ]
-
-# Environment variables (for production)
-# Use 'wrangler secret put <NAME>' to set these securely
-# [vars]
-# SUPABASE_URL = "https://xxxxx.supabase.co"
-# Note: Don't put actual secrets here, use 'wrangler secret put' command
-
 # ============================================
-# QUEUES CONFIGURATION
+# DURABLE OBJECTS CONFIGURATION
 # ============================================
-# Cloudflare Queues for async background jobs
-# NO TIMEOUT LIMITS - Perfect for long AI processing!
+# Durable Objects provide isolated, stateful execution
+# with NO timeout limits - perfect for long AI processing!
 
-# Producer binding - allows worker to send messages to queue
-[[queues.producers]]
-queue = "report-processing-queue"
-binding = "REPORT_QUEUE"
+[[durable_objects.bindings]]
+name = "REPORT_PROCESSOR"
+class_name = "ReportProcessor"
+script_name = "progress-bot"
 
-# Producer for dead letter queue
-[[queues.producers]]
-queue = "report-processing-dlq"
-binding = "REPORT_DLQ"
-
-# Consumer configuration - processes messages from queue
-[[queues.consumers]]
-queue = "report-processing-queue"
-max_batch_size = 1           # Process 1 message at a time
-max_batch_timeout = 30        # Wait max 30s to batch messages
-max_retries = 3               # Retry failed messages up to 3 times
-dead_letter_queue = "report-processing-dlq"  # Send failed messages here
+# Migrations (required for Durable Objects)
+# Using new_sqlite_classes for free tier compatibility
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["ReportProcessor"]
 
 # ============================================
 # Build configuration
