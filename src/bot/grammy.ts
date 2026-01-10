@@ -57,40 +57,6 @@ export function createBot(
 }
 
 /**
- * Send long message with splitting
- */
-async function sendLongMessage(ctx: Context, message: string) {
-  const MAX_LENGTH = 4096;
-  
-  if (message.length <= MAX_LENGTH) {
-    await ctx.reply(message);
-    return;
-  }
-
-  const parts: string[] = [];
-  let currentPart = '';
-  const lines = message.split('\n');
-
-  for (const line of lines) {
-    if (currentPart.length + line.length + 1 > MAX_LENGTH) {
-      parts.push(currentPart);
-      currentPart = line + '\n';
-    } else {
-      currentPart += line + '\n';
-    }
-  }
-
-  if (currentPart) {
-    parts.push(currentPart);
-  }
-
-  for (const part of parts) {
-    await ctx.reply(part);
-    await new Promise(resolve => setTimeout(resolve, 100));
-  }
-}
-
-/**
  * Register all bot commands
  */
 function registerCommands(bot: Bot<BotContext>) {

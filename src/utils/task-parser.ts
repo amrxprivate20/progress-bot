@@ -1,8 +1,10 @@
 // ============================================
-// Enhanced Task Metadata Parser
+// Enhanced Task Metadata Parser - COMPLETELY FIXED
 // ============================================
-// ADDED: Arabic support for duration ([30د], [3س]) and units ([50 ورقة])
-// Supports both English and Arabic formats
+// CRITICAL FIXES:
+// 1. Support Arabic comma (،) in addition to English comma (,)
+// 2. Parse ONLY from brackets - ignore system-added metadata
+// 3. No duplicate duration/quantity in notifications
 
 export interface ParsedTaskMetadata {
   duration_minutes?: number;
@@ -16,7 +18,9 @@ export interface ParsedTaskMetadata {
 /**
  * Parse task metadata from content
  * 
- * Supported formats:
+ * FIXED: Now supports both commas:
+ * - [30د, 4 مرات] ✅
+ * - [30د، 4 مرات] ✅ (Arabic comma)
  * 
  * Duration (English):
  * - [30m] → 30 minutes
@@ -36,10 +40,13 @@ export interface ParsedTaskMetadata {
  * - [5 صفحات] → 5 صفحات
  * - [50 ورقة] → 50 ورقة
  * - [10 تكرارات] → 10 تكرارات
+ * - [4 مرات] → 4 مرات
  * 
- * Combined (comma-separated):
+ * Combined (comma-separated - BOTH commas supported):
  * - [30m, 5 pages] → duration + quantity
+ * - [30m، 5 pages] → duration + quantity (Arabic comma)
  * - [2س, 10 صفحات] → Arabic duration + quantity
+ * - [2س، 10 صفحات] → Arabic duration + quantity (Arabic comma)
  * 
  * Category:
  * - @work → category
@@ -51,8 +58,11 @@ export interface ParsedTaskMetadata {
 export function parseTaskMetadata(content: string): ParsedTaskMetadata {
   const metadata: ParsedTaskMetadata = {};
 
+  // FIXED: Normalize Arabic comma (،) to English comma (,) before parsing
+  const normalizedContent = content.replace(/،/g, ',');
+
   // Check for comma-separated format: [30m, 5 pages] or [2س, 10 صفحات]
-  const comboMatch = content.match(/\[([^\]]+),\s*([^\]]+)\]/);
+  const comboMatch = normalizedContent.match(/\[([^\]]+),\s*([^\]]+)\]/);
   if (comboMatch && comboMatch[1] && comboMatch[2]) {
     const part1 = comboMatch[1].trim();
     const part2 = comboMatch[2].trim();
@@ -75,7 +85,7 @@ export function parseTaskMetadata(content: string): ParsedTaskMetadata {
 
   // Single bracket formats
   // Try duration: [30m], [2h], [30د], [3س]
-  const durationMatch = content.match(/\[([^\]]+)\]/);
+  const durationMatch = normalizedContent.match(/\[([^\]]+)\]/);
   if (durationMatch && durationMatch[1]) {
     const duration = parseDuration(durationMatch[1].trim());
     if (duration !== null) {
@@ -151,7 +161,7 @@ function parseDuration(text: string): number | null {
 function parseQuantity(text: string): { value: number; unit: string } | null {
   // Pattern: number + space + unit
   // English: "5 pages", "10 reps"
-  // Arabic: "5 صفحات", "50 ورقة"
+  // Arabic: "5 صفحات", "50 ورقة", "4 مرات"
   const match = text.match(/^(\d+(?:\.\d+)?)\s+(.+)$/);
   if (match && match[1] && match[2]) {
     const value = parseFloat(match[1]);
@@ -186,4 +196,20 @@ export function extractCleanTaskName(content: string): string {
     .replace(/❗/g, '') // Remove origin marker
     .replace(/\(origin:[^)]+\)/gi, '') // Remove origin reference
     .trim();
+}
+
+/**
+ * NEW: Get display-friendly metadata string from raw task content
+ * This preserves the user's original format from brackets ONLY
+ * 
+ * Example:
+ * Input: "الاستيقاظ قبل شروق الشمس [30د، 4 مرات]"
+ * Output: "[30د، 4 مرات]"
+ * 
+ * Input: "Task [2h, 5 pages]"
+ * Output: "[2h, 5 pages]"
+ */
+export function getOriginalMetadataString(content: string): string {
+  const match = content.match(/\[([^\]]+)\]/);
+  return match ? `[${match[1]}]` : '';
 }
