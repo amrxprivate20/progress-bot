@@ -14,9 +14,9 @@ import { Task, Streak, DailyReport, WeeklyGoals, DailyChallenge, Memory } from '
 import { 
   getTodayInEgypt, 
   getEgyptDayBoundaries, 
-  formatArabicDate,
-  formatArabicTime,
-  formatArabicStreak
+  formatArabicTime, 
+  formatArabicStreak, 
+  formatArabicDate 
 } from '../utils/timezone';
 
 // ============================================
@@ -353,127 +353,279 @@ export class ReportGenerator {
     return isCompleted ? '✅ منجز' : '❌ غير منجز';
   }
 
-  /**
-   * NEW: Format task breakdown with hierarchy and symbols
-   */
-  private formatTaskBreakdown(tasks: Task[], streaks: Streak[]): string {
-    let breakdown = '🎯 **مهام اليوم**\n----------------\n';
+ /**
+ * UPDATED: Format preview text with detailed Arabic formatting
+ * Matches the desired output format with categories, hierarchies, and streaks
+ */
+private formatPreviewText(
+  data: ReportData,
+  stats: ReportStatistics,
+  _topCategories: Array<{ name: string; count: number }>,
+  challengeStatus: string
+): string {
+  const date = new Date(data.date);
+  const arabicDate = formatArabicDate(date);
+
+  let text = `# 📝 تقرير الإنجاز اليومي - ${data.date}\n\n`;
+  text += `تقرير الإنجاز اليومي\n`;
+  text += `${arabicDate}\n\n`;
+
+  // Rating based on success rate
+  const rating = this.getPerformanceRating(stats.success_rate);
+  text += `التقدير: ${rating}\n`;
+  text += `معدل النجاح: ${stats.success_rate.toFixed(1)} %\n\n`;
+
+  text += `وقت الإنجاز اليوم: ${formatArabicTime(stats.total_time_minutes)}\n\n`;
+
+  text += `عدد مهام اليوم: ${stats.total_tasks}\n\n`;
+
+  // Completed tasks by category
+  if (stats.completed_tasks > 0) {
+    const completedByCategory = this.groupTasksByCategory(
+      data.tasks.filter(t => t.status === 'done')
+    );
     
-    if (tasks.length === 0) {
-      return breakdown + 'لا توجد مهام لهذا اليوم\n\n';
+    text += `عدد المهام المكتملة اليوم: ${stats.completed_tasks}\n`;
+    for (const [category, info] of Object.entries(completedByCategory)) {
+      const emoji = this.getCategoryEmoji(category);
+      const timeStr = info.time > 0 ? ` - ${formatArabicTime(info.time)}` : '';
+      text += `${category}${emoji} ${info.count} ${this.getTaskWord(info.count)}${timeStr}\n`;
     }
-    
-    // Group by status and hierarchy
-    const rootTasks = tasks.filter(t => !t.origin_task);
-    const childTasks = tasks.filter(t => t.origin_task);
-    
-    // Group children by parent
-    const childrenByParent = new Map<string, Task[]>();
-    for (const child of childTasks) {
-      if (!child.origin_task) continue;
-      if (!childrenByParent.has(child.origin_task)) {
-        childrenByParent.set(child.origin_task, []);
-      }
-      childrenByParent.get(child.origin_task)!.push(child);
-    }
-    
-    // Sort: completed → partial → failed
-    const statusOrder = { done: 0, partial: 1, failed: 2 };
-    const sortedTasks = rootTasks.sort((a, b) => {
-      const aOrder = statusOrder[a.status || 'done'] || 0;
-      const bOrder = statusOrder[b.status || 'done'] || 0;
-      return aOrder - bOrder;
-    });
-    
-    for (const task of sortedTasks) {
-      // Determine symbol
-      let symbol = '✅';
-      if (task.status === 'partial') symbol = '⚠️';
-      if (task.status === 'failed') symbol = '❌';
-      
-      // Build task line
-      let line = `${symbol} ${task.content}`;
-      
-      // Add duration
-      if (task.duration_minutes) {
-        line += ` [${task.duration_minutes}m]`;
-      }
-      
-      // Add category
-      if (task.category) {
-        line += ` #${task.category}`;
-      }
-      
-      // Add streak with Arabic formatting
-      const streak = streaks.find(s => s.task_name === task.content);
-      if (streak && streak.current_streak > 0) {
-        line += ` 🔥 ${formatArabicStreak(streak.current_streak)}`;
-      }
-      
-      breakdown += line + '\n';
-      
-      // Add children if any
-      const children = childrenByParent.get(task.content) || [];
-      for (const child of children) {
-        const childSymbol = child.status === 'done' ? '✓' : '✕';
-        breakdown += `   ${childSymbol} ${child.content}\n`;
-      }
-    }
-    
-    return breakdown + '\n';
+    text += '\n';
   }
 
-  /**
-   * FIXED: Format preview text in Arabic with full task breakdown
-   */
-  private formatPreviewText(
-    data: ReportData,
-    stats: ReportStatistics,
-    topCategories: Array<{ name: string; count: number }>,
-    challengeStatus: string
-  ): string {
-    const date = new Date(data.date);
-    const arabicDate = formatArabicDate(date);
-
-    let text = `📊 **معاينة التقرير اليومي**\n\n`;
-    text += `📅 **التاريخ:** ${arabicDate}\n\n`;
-
-    text += `📈 **الإحصائيات:**\n`;
-    text += `- إجمالي المهام: ${stats.total_tasks}\n`;
-    text += `- المنجزة: ${stats.completed_tasks}\n`;
-    text += `- الفاشلة: ${stats.failed_tasks}\n`;
-    if (stats.partial_tasks > 0) {
-      text += `- الجزئية: ${stats.partial_tasks}\n`;
+  // Partial tasks by category
+  if (stats.partial_tasks > 0) {
+    const partialByCategory = this.groupTasksByCategory(
+      data.tasks.filter(t => t.status === 'partial')
+    );
+    
+    text += `عدد المهام المكتملة جزئيا اليوم: ${stats.partial_tasks}\n`;
+    for (const [category, info] of Object.entries(partialByCategory)) {
+      const emoji = this.getCategoryEmoji(category);
+      const timeStr = info.time > 0 ? ` - ${formatArabicTime(info.time)}` : '';
+      text += `${category}${emoji} ${info.count} ${this.getTaskWord(info.count)}${timeStr}\n`;
     }
-    text += `- معدل النجاح: ${stats.success_rate.toFixed(1)}%\n`;
-    text += `- وقت الإنجاز: ${formatArabicTime(stats.total_time_minutes)}\n\n`;
-
-    // NEW: Add full task breakdown
-    text += this.formatTaskBreakdown(data.tasks, data.streaks);
-
-    if (topCategories.length > 0) {
-      text += `🏷️ **أهم الفئات:**\n`;
-      topCategories.forEach(cat => {
-        text += `- ${cat.name}: ${cat.count} مهام\n`;
-      });
-      text += '\n';
-    }
-
-    if (data.dailyChallenge) {
-      text += `🎯 **التحدي اليومي:** ${challengeStatus}\n`;
-      text += `"${data.dailyChallenge.challenge_text}"\n\n`;
-    }
-
-    if (data.weeklyGoals) {
-      text += `🎯 **الأهداف الأسبوعية:**\n`;
-      text += `${data.weeklyGoals.goals_text}\n\n`;
-    }
-
-    text += `\nهل تريد إكمال التحليل بالذكاء الاصطناعي؟\n`;
-    text += `استخدم /confirm للمتابعة أو /cancel للإلغاء`;
-
-    return text;
+    text += '\n';
   }
+
+  // Failed tasks
+  if (stats.failed_tasks > 0) {
+    text += `عدد المهام المتروكة اليوم: ${stats.failed_tasks}\n\n`;
+  }
+
+  // Achievements section
+  text += `ـــــــــــــــــــــــــــــــــــــــــــــــــــ\n`;
+  text += `🎯 الإنجاز:\n`;
+  text += `ـــــــــــــــــــــــ\n`;
+  text += this.formatTasksWithHierarchy(
+    data.tasks.filter(t => t.status === 'done'),
+    data.streaks,
+    '✅'
+  );
+
+  // Partial tasks section
+  if (stats.partial_tasks > 0) {
+    text += `⚠️ مكتملة جزئيا:\n`;
+    text += `ـــــــــــــــــــــــ\n`;
+    text += this.formatTasksWithHierarchy(
+      data.tasks.filter(t => t.status === 'partial'),
+      data.streaks,
+      '⚠️'
+    );
+  }
+
+  // Losses section
+  if (stats.failed_tasks > 0) {
+    text += `ـــــــــــــــــــــــــــــــــــــــــــــــــــ\n`;
+    text += `🏳 خسائر:\n`;
+    text += `ـــــــــــــــــــــــ\n`;
+    text += this.formatTasksWithHierarchy(
+      data.tasks.filter(t => t.status === 'failed'),
+      data.streaks,
+      '❌'
+    );
+  }
+
+  // Challenge
+  if (data.dailyChallenge) {
+    text += `\n🎯 **التحدي اليومي:** ${challengeStatus}\n`;
+    text += `"${data.dailyChallenge.challenge_text}"\n\n`;
+  }
+
+  // Weekly goals
+  if (data.weeklyGoals) {
+    text += `🎯 **الأهداف الأسبوعية:**\n`;
+    text += `${data.weeklyGoals.goals_text}\n\n`;
+  }
+
+  text += `\nهل تريد إكمال التحليل بالذكاء الاصطناعي؟\n`;
+  text += `استخدم /confirm للمتابعة أو /cancel للإلغاء`;
+
+  return text;
+}
+
+/**
+ * Format tasks with full hierarchy (parent + subtasks)
+ */
+private formatTasksWithHierarchy(
+  tasks: Task[],
+  streaks: Streak[],
+  mainSymbol: string
+): string {
+  if (tasks.length === 0) return '';
+
+  let output = '';
+  
+  // Separate main tasks and subtasks
+  const mainTasks = tasks.filter(t => !t.origin_task);
+  const subtasksByParent = new Map<string, Task[]>();
+  
+  // Group subtasks by parent task_id
+  tasks.filter(t => t.origin_task).forEach(subtask => {
+    if (!subtask.origin_task) return;
+    if (!subtasksByParent.has(subtask.origin_task)) {
+      subtasksByParent.set(subtask.origin_task, []);
+    }
+    subtasksByParent.get(subtask.origin_task)!.push(subtask);
+  });
+
+  for (const task of mainTasks) {
+    // Main task line
+    output += `${mainSymbol} ${task.content}`;
+    
+    // Add streak info if exists
+    const streak = streaks.find(s => s.task_name === task.content);
+    if (streak && streak.current_streak > 1) {
+      // Show streak start date if available
+      if (streak.last_completed_date) {
+        const streakStartDate = this.calculateStreakStartDate(
+          streak.last_completed_date?.toString() || '',
+          streak.current_streak
+        );
+        output += ` -  منذ ${streakStartDate}`;
+      }
+      output += ` [${formatArabicStreak(streak.current_streak)} بدون إنقطاع]`;
+    }
+    
+    // Add duration if exists
+    if (task.duration_minutes && task.duration_minutes > 0) {
+      output += ` [${formatArabicTime(task.duration_minutes)}]`;
+    }
+    
+    // Add quantity if exists
+    if (task.quantity) {
+      output += ` [${task.quantity} ${task.quantity_unit || ''}]`;
+    }
+    
+    output += '\n';
+    
+    // Add subtasks
+    const subtasks = subtasksByParent.get(task.task_id) || [];
+    for (const subtask of subtasks) {
+      const subSymbol = subtask.status === 'done' ? '✓' : '✕';
+      output += `${subSymbol} ${subtask.content}`;
+      
+      if (subtask.duration_minutes && subtask.duration_minutes > 0) {
+        output += ` [${formatArabicTime(subtask.duration_minutes)}]`;
+      }
+      
+      if (subtask.quantity) {
+        output += ` [${subtask.quantity} ${subtask.quantity_unit || ''}]`;
+      }
+      
+      output += '\n';
+    }
+    
+    // Add spacing between main tasks
+    output += ' \n';
+  }
+
+  return output;
+}
+
+/**
+ * Group tasks by category with counts and time
+ */
+private groupTasksByCategory(tasks: Task[]): Record<string, { count: number; time: number }> {
+  const grouped: Record<string, { count: number; time: number }> = {};
+
+  for (const task of tasks) {
+    const category = task.category || 'غير_مصنف';
+    
+    if (!grouped[category]) {
+      grouped[category] = { count: 0, time: 0 };
+    }
+    
+    grouped[category].count++;
+    grouped[category].time += task.duration_minutes || 0;
+  }
+
+  return grouped;
+}
+
+/**
+ * Get emoji for category
+ */
+private getCategoryEmoji(category: string): string {
+  const emojiMap: Record<string, string> = {
+    'religion': '🕋',
+    'الدين': '🕋',
+    'self_care': '🫶🏻',
+    'العناية_بالذات': '🫶🏻',
+    'recovery': '🏞️',
+    'التعافي': '🏞️',
+    'work': '💼',
+    'العمل': '💼',
+    'health': '🏃',
+    'الصحة': '🏃',
+    'learning': '📚',
+    'التعلم': '📚',
+  };
+  
+  return emojiMap[category] || '';
+}
+
+/**
+ * Get correct Arabic word for task count
+ */
+private getTaskWord(count: number): string {
+  if (count === 1) return 'مهمة';
+  if (count === 2) return 'مهمتان';
+  if (count >= 3 && count <= 10) return 'مهمات';
+  return 'مهمة';
+}
+
+/**
+ * Get performance rating based on success rate
+ */
+private getPerformanceRating(successRate: number): string {
+  if (successRate >= 90) return '(م) ممتاز';
+  if (successRate >= 75) return '(ج) جيد جدا';
+  if (successRate >= 60) return '(ج) جيد';
+  if (successRate >= 50) return '(م) مقبول';
+  return '(ض) ضعيف';
+}
+
+/**
+ * Calculate streak start date from last completed date and streak count
+ */
+private calculateStreakStartDate(lastCompletedDate: string, streakCount: number): string {
+  const lastDate = new Date(lastCompletedDate + 'T00:00:00Z');
+  const startDate = new Date(lastDate);
+  startDate.setDate(startDate.getDate() - (streakCount - 1));
+  
+  const day = startDate.getDate();
+  const month = startDate.getMonth() + 1;
+  const year = startDate.getFullYear();
+  
+  const months = [
+    'يناير', 'فبراير', 'مارس', 'إبريل', 'مايو', 'يونيو',
+    'يوليو', 'أغسطس', 'سبتمبر', 'أكتوبر', 'نوفمبر', 'ديسمبر'
+  ];
+  
+  return `${day} ${months[month - 1]} ${year}`;
+}
 }
 
 // ============================================

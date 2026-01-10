@@ -1,40 +1,49 @@
 // ============================================
-// Timezone Utilities for Egypt (UTC+2)
+// Timezone Utilities for Egypt (UTC+2) - COMPLETELY FIXED
 // ============================================
-// Handles all timezone conversions consistently
-// Strategy: Store UTC, Convert at Boundaries
+// CRITICAL FIX: Uses proper timezone conversion
+// 1:16 AM Egypt = 23:16 UTC previous day = SHOULD BE TODAY
 
 /**
- * Egypt timezone configuration
+ * Egypt timezone offset in milliseconds
+ * Egypt is UTC+2 (no DST)
  */
-const EGYPT_TIMEZONE = 'Africa/Cairo';
-const EGYPT_OFFSET_HOURS = 2;
-const EGYPT_OFFSET_MS = EGYPT_OFFSET_HOURS * 60 * 60 * 1000;
+const EGYPT_OFFSET_MS = 2 * 60 * 60 * 1000; // 2 hours
 
 /**
  * Get current time in Egypt timezone
+ * FIXED: Properly adds offset to UTC time
  */
 export function getNowInEgypt(): Date {
-  return new Date(new Date().toLocaleString('en-US', { timeZone: EGYPT_TIMEZONE }));
+  const utcNow = new Date();
+  return new Date(utcNow.getTime() + EGYPT_OFFSET_MS);
 }
 
 /**
  * Get today's date string in Egypt (YYYY-MM-DD)
+ * FIXED: Correctly determines Egypt date even at 1 AM
  */
 export function getTodayInEgypt(): string {
-  const now = getNowInEgypt();
-  return now.toISOString().split('T')[0]!;
+  const egyptNow = getNowInEgypt();
+  
+  const year = egyptNow.getUTCFullYear();
+  const month = String(egyptNow.getUTCMonth() + 1).padStart(2, '0');
+  const day = String(egyptNow.getUTCDate()).padStart(2, '0');
+  
+  return `${year}-${month}-${day}`;
 }
 
 /**
  * Convert UTC Date to Egypt Date
+ * FIXED: Adds 2 hours to UTC
  */
 export function utcToEgypt(utcDate: Date): Date {
-  return new Date(utcDate.toLocaleString('en-US', { timeZone: EGYPT_TIMEZONE }));
+  return new Date(utcDate.getTime() + EGYPT_OFFSET_MS);
 }
 
 /**
  * Convert Egypt Date to UTC Date
+ * FIXED: Subtracts 2 hours from Egypt
  */
 export function egyptToUtc(egyptDate: Date): Date {
   return new Date(egyptDate.getTime() - EGYPT_OFFSET_MS);
@@ -42,19 +51,27 @@ export function egyptToUtc(egyptDate: Date): Date {
 
 /**
  * Get date string in Egypt timezone from UTC Date
+ * FIXED: Properly converts to Egypt date
  */
 export function getEgyptDateString(utcDate: Date): string {
   const egyptDate = utcToEgypt(utcDate);
-  return egyptDate.toISOString().split('T')[0]!;
+  
+  const year = egyptDate.getUTCFullYear();
+  const month = String(egyptDate.getUTCMonth() + 1).padStart(2, '0');
+  const day = String(egyptDate.getUTCDate()).padStart(2, '0');
+  
+  return `${year}-${month}-${day}`;
 }
 
 /**
  * Get start and end of day in Egypt timezone (returned as UTC)
- * This is critical for filtering tasks by day
+ * FIXED: Correctly calculates midnight in Egypt as UTC
  * 
- * Example: For 2026-01-08 in Egypt
- * - Start: 2026-01-07 22:00:00 UTC (midnight in Egypt)
- * - End:   2026-01-08 21:59:59 UTC (23:59:59 in Egypt)
+ * Example: For 2026-01-08 in Egypt (at 1:16 AM)
+ * - Egypt midnight: 2026-01-08 00:00:00 Egypt = 2026-01-07 22:00:00 UTC
+ * - Egypt end of day: 2026-01-08 23:59:59 Egypt = 2026-01-08 21:59:59 UTC
+ * 
+ * So task at 1:16 AM Egypt (23:16 UTC Jan 7) falls AFTER midnight Egypt
  */
 export function getEgyptDayBoundaries(dateString: string): { start: Date; end: Date } {
   const [year, month, day] = dateString.split('-').map(Number);
@@ -63,18 +80,18 @@ export function getEgyptDayBoundaries(dateString: string): { start: Date; end: D
     throw new Error(`Invalid date string: ${dateString}`);
   }
   
-  // Create date at Egypt midnight
-  const egyptMidnight = new Date(year, month - 1, day, 0, 0, 0, 0);
+  // Create midnight in Egypt (as UTC date object)
+  // Egypt midnight = UTC minus 2 hours
+  const egyptMidnightUTC = new Date(Date.UTC(year, month - 1, day, 0, 0, 0, 0));
+  const startUTC = new Date(egyptMidnightUTC.getTime() - EGYPT_OFFSET_MS);
   
-  // Convert to UTC (subtract offset)
-  const utcMidnight = new Date(egyptMidnight.getTime() - EGYPT_OFFSET_MS);
-  
-  // End of day (23:59:59.999 in Egypt)
-  const utcEndOfDay = new Date(utcMidnight.getTime() + 24 * 60 * 60 * 1000 - 1);
+  // End of day in Egypt (23:59:59.999 Egypt) = UTC minus 2 hours
+  const egyptEndOfDayUTC = new Date(Date.UTC(year, month - 1, day, 23, 59, 59, 999));
+  const endUTC = new Date(egyptEndOfDayUTC.getTime() - EGYPT_OFFSET_MS);
   
   return {
-    start: utcMidnight,
-    end: utcEndOfDay,
+    start: startUTC,
+    end: endUTC,
   };
 }
 
@@ -89,10 +106,15 @@ export function isSameDayInEgypt(date1: Date, date2: Date): boolean {
  * Get yesterday's date in Egypt
  */
 export function getYesterdayInEgypt(): string {
-  const now = getNowInEgypt();
-  const yesterday = new Date(now);
-  yesterday.setDate(yesterday.getDate() - 1);
-  return yesterday.toISOString().split('T')[0]!;
+  const egyptNow = getNowInEgypt();
+  const yesterday = new Date(egyptNow);
+  yesterday.setUTCDate(yesterday.getUTCDate() - 1);
+  
+  const year = yesterday.getUTCFullYear();
+  const month = String(yesterday.getUTCMonth() + 1).padStart(2, '0');
+  const day = String(yesterday.getUTCDate()).padStart(2, '0');
+  
+  return `${year}-${month}-${day}`;
 }
 
 /**
@@ -108,22 +130,16 @@ export function formatArabicDate(date: Date): string {
     'يوليو', 'أغسطس', 'سبتمبر', 'أكتوبر', 'نوفمبر', 'ديسمبر'
   ];
 
-  const dayName = days[egyptDate.getDay()];
-  const day = egyptDate.getDate();
-  const month = months[egyptDate.getMonth()];
-  const year = egyptDate.getFullYear();
+  const dayName = days[egyptDate.getUTCDay()];
+  const day = egyptDate.getUTCDate();
+  const month = months[egyptDate.getUTCMonth()];
+  const year = egyptDate.getUTCFullYear();
 
   return `${dayName}، ${day} ${month} ${year}`;
 }
 
 /**
  * Format time duration in Arabic with proper plural rules
- * 
- * Arabic plural rules:
- * - 1: singular (ساعة / دقيقة)
- * - 2: dual (ساعتان / دقيقتان)
- * - 3-10: plural (ساعات / دقائق)
- * - 11+: singular + number (ساعة / دقيقة)
  */
 export function formatArabicTime(minutes: number): string {
   const hours = Math.floor(minutes / 60);
@@ -148,7 +164,6 @@ export function formatArabicTime(minutes: number): string {
 
 /**
  * Format streak duration in Arabic
- * Example: "5 أيام", "يوم واحد", "يومان"
  */
 export function formatArabicStreak(days: number): string {
   return formatArabicNumber(days, 'يوم', 'يومان', 'أيام', 'يوم');
@@ -156,12 +171,6 @@ export function formatArabicStreak(days: number): string {
 
 /**
  * Helper: Format number with Arabic plural rules
- * 
- * @param num - The number
- * @param singular - Form for 1 (e.g., "يوم")
- * @param dual - Form for 2 (e.g., "يومان")
- * @param plural - Form for 3-10 (e.g., "أيام")
- * @param singularLarge - Form for 11+ (e.g., "يوم")
  */
 function formatArabicNumber(
   num: number,
@@ -193,4 +202,25 @@ export function daysBetweenInEgypt(date1: Date, date2: Date): number {
   
   const diffMs = d2.getTime() - d1.getTime();
   return Math.floor(diffMs / (1000 * 60 * 60 * 24));
+}
+
+/**
+ * TEST FUNCTION - Verify timezone works correctly
+ */
+export function testTimezone() {
+  // Test case: 1:16 AM Egypt = 23:16 UTC previous day
+  const testUTC = new Date('2026-01-07T23:16:00Z'); // UTC
+  
+  console.log('Test: 1:16 AM Egypt (23:16 UTC Jan 7)');
+  console.log('UTC Date:', testUTC.toISOString());
+  console.log('Egypt Date String:', getEgyptDateString(testUTC));
+  console.log('Should be: 2026-01-08');
+  
+  const boundaries = getEgyptDayBoundaries('2026-01-08');
+  console.log('Jan 8 boundaries:');
+  console.log('  Start UTC:', boundaries.start.toISOString());
+  console.log('  End UTC:', boundaries.end.toISOString());
+  console.log('  Test time is after start:', testUTC >= boundaries.start);
+  console.log('  Test time is before end:', testUTC <= boundaries.end);
+  console.log('  Test time is IN Jan 8:', testUTC >= boundaries.start && testUTC <= boundaries.end);
 }

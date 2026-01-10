@@ -1,5 +1,5 @@
 // ============================================
-// Todoist Webhook Handler - FIXED VERSION
+// Todoist Webhook Handler - UPDATED VERSION
 // ============================================
 // FIXES APPLIED:
 // - Egypt timezone (UTC+2) for streak calculation
@@ -7,6 +7,7 @@
 // - Parent-child status tracking (complete/partial/failed)
 // - Enhanced notifications with description and Arabic streaks
 // - Proper Arabic plural rules
+// - NEW: Updates failed tasks instead of creating duplicates
 // ============================================
 
 import type { SupabaseClient } from '../database/client';
@@ -18,7 +19,6 @@ import { logError } from '../utils/errors';
 import { parseTaskMetadata } from '../utils/task-parser';
 import { 
   getEgyptDateString, 
-  formatArabicTime,
   formatArabicStreak
 } from '../utils/timezone';
 
@@ -58,7 +58,8 @@ export async function handleTodoistWebhook(
   const completedAt = new Date(completedAtString);
   
   // FIXED: Log Egypt date for debugging
-  console.log('📅 Egypt date:', getEgyptDateString(completedAt));
+  const egyptDate = getEgyptDateString(completedAt);
+  console.log('📅 Egypt date:', egyptDate);
 
   const isRecurring = event.event_data.due?.is_recurring || false;
   const isSubtask = !!event.event_data.parent_id;
@@ -68,6 +69,75 @@ export async function handleTodoistWebhook(
     isSubtask,
     content: event.event_data.content,
   });
+
+  // NEW: Check if this task was previously logged as failed TODAY
+  const existingFailure = await checkForFailedTask(
+    db,
+    event.event_data.content,
+    egyptDate
+  );
+
+  if (existingFailure) {
+    console.log('🔄 Found existing failed task - updating to completed');
+    
+    // FIXED: Parse task metadata with Arabic support
+    const metadata = parseTaskMetadata(event.event_data.content);
+    console.log('📊 Parsed metadata:', metadata);
+
+    // Extract category from labels
+    let category = metadata.category;
+    if (!category && event.event_data.labels && event.event_data.labels.length > 0) {
+      const firstLabel = event.event_data.labels[0];
+      if (firstLabel) {
+        category = firstLabel
+          .replace(/[^\w\s]/gi, '')
+          .replace(/\s+/g, '_')
+          .trim()
+          .toLowerCase();
+      }
+    }
+
+    // Update the failed task to completed
+    await db.update(
+      'tasks',
+      { id: op.eq(existingFailure.id as string) },
+      {
+        status: 'done',
+        completed_at: completedAt.toISOString(),
+        duration_minutes: metadata.duration_minutes || existingFailure.duration_minutes || 0,
+        quantity: metadata.quantity,
+        quantity_unit: metadata.quantity_unit,
+        category: category || existingFailure.category,
+        priority: event.event_data.priority,
+        description: event.event_data.description || existingFailure.description,
+      }
+    );
+
+    console.log('✅ Updated failed task to completed');
+
+    // Update streak if recurring
+    if (isRecurring) {
+      await updateStreakFromDueDate(
+        db,
+        event.event_data.content,
+        completedAt,
+        event.event_data.due?.string || '',
+        isSubtask
+      );
+    }
+
+    // Get updated task
+    const updatedTasks = await db.select<Task>('tasks', {
+      filter: { id: op.eq(existingFailure.id as string) },
+      limit: 1
+    });
+
+    return {
+      success: true,
+      message: `Task updated from failed to completed: ${event.event_data.content}`,
+      task: updatedTasks[0],
+    };
+  }
 
   // Check for duplicates (non-recurring only)
   if (!isRecurring) {
@@ -176,6 +246,37 @@ export async function handleTodoistWebhook(
 }
 
 /**
+ * NEW: Check if a task was previously logged as failed today
+ */
+async function checkForFailedTask(
+  db: SupabaseClient,
+  content: string,
+  egyptDate: string
+): Promise<Task | null> {
+  try {
+    // Get all tasks
+    const allTasks = await db.select<Task>('tasks', {});
+
+    // Filter for tasks with matching content, status=failed, and same Egypt date
+    for (const task of allTasks) {
+      if (task.content !== content) continue;
+      if (task.status !== 'failed') continue;
+
+      const taskEgyptDate = getEgyptDateString(new Date(task.completed_at));
+      if (taskEgyptDate === egyptDate) {
+        console.log('🔍 Found existing failed task:', task.id);
+        return task;
+      }
+    }
+
+    return null;
+  } catch (error) {
+    console.error('Error checking for failed task:', error);
+    return null;
+  }
+}
+
+/**
  * NEW: Update parent task status based on subtasks
  */
 async function updateParentTaskStatus(
@@ -199,19 +300,15 @@ async function updateParentTaskStatus(
 
     // Determine parent status
     let parentStatus: 'done' | 'partial' | 'failed';
-    let parentCompletionStatus: 'complete' | 'partial' | 'failed';
     
     if (doneCount === totalCount) {
       parentStatus = 'done';
-      parentCompletionStatus = 'complete';
       console.log(`✅ Parent ${parentId}: All subtasks complete`);
     } else if (doneCount > 0) {
       parentStatus = 'partial';
-      parentCompletionStatus = 'partial';
       console.log(`⚠️ Parent ${parentId}: ${doneCount}/${totalCount} subtasks done`);
     } else {
       parentStatus = 'failed';
-      parentCompletionStatus = 'failed';
       console.log(`❌ Parent ${parentId}: No subtasks completed`);
     }
 
@@ -219,13 +316,10 @@ async function updateParentTaskStatus(
     await db.update(
       'tasks',
       { task_id: op.eq(parentId) },
-      { 
-        status: parentStatus,
-        parent_completion_status: parentCompletionStatus 
-      }
+      { status: parentStatus }
     );
 
-    console.log(`✅ Updated parent ${parentId}: ${parentCompletionStatus}`);
+    console.log(`✅ Updated parent ${parentId}: ${parentStatus}`);
 
   } catch (error) {
     console.error('❌ Failed to update parent status:', error);
@@ -458,65 +552,44 @@ export async function sendTaskNotification(
 
 /**
  * ENHANCED: Format notification message with all details
- * Uses correct symbols and Arabic formatting
+ * Uses 3-line format: task name + duration/quantity, description, streak
  */
 function formatTaskNotification(task: Task, streak?: Streak): string {
-  // Determine symbol based on task status and hierarchy
-  let symbol = '✅'; // Default: Completed main task
+  // Line 1: Task name with duration and quantity
+  let line1 = `${getTaskSymbol(task)} ${task.content}`;
   
-  if (task.is_origin === false) {
-    // It's a subtask
-    symbol = task.status === 'done' ? '✓' : '✕';
-  } else {
-    // Main task
-    if (task.status === 'partial') {
-      symbol = '⚠️';
-    } else if (task.status === 'failed') {
-      symbol = '❌';
-    }
+  if (task.duration_minutes) {
+    line1 += ` [${task.duration_minutes}m]`;
   }
   
-  let message = `${symbol} ${task.content}\n`;
-  
-  // Add description if exists
-  if (task.description && task.description.trim().length > 0) {
-    message += `\n📝 ${task.description}\n`;
-  }
-  
-  // Add duration with Arabic formatting
-  if (task.duration_minutes && task.duration_minutes > 0) {
-    const timeStr = formatArabicTime(task.duration_minutes);
-    message += `\n⏱ المدة: ${timeStr}`;
-  }
-  
-  // Add quantity
   if (task.quantity) {
-    message += `\n📊 الكمية: ${task.quantity} ${task.quantity_unit || 'وحدات'}`;
+    line1 += ` [${task.quantity} ${task.quantity_unit || ''}]`;
   }
   
-  // Add category
-  if (task.category) {
-    message += `\n🏷 الفئة: ${task.category}`;
+  let message = line1;
+  
+  // Line 2: Description (if exists)
+  if (task.description && task.description.trim().length > 0) {
+    message += `\n📝 ${task.description}`;
   }
   
-  // Add streak info (if exists and active)
-  if (streak && streak.current_streak > 0) {
-    message += `\n\n🔥 السلسلة:\n`;
-    
-    // Streak type in Arabic
-    const typeText = streak.streak_type === 'daily' ? 'يومية' : 'أسبوعية';
-    message += `النوع: ${typeText}\n`;
-    
-    // Current streak with proper Arabic plurals
-    message += `المدة: ${formatArabicStreak(streak.current_streak)}`;
-    
-    // Check if it's a new record
-    if (streak.current_streak === streak.best_streak && streak.current_streak > 1) {
-      message += ' 🎉 (رقم قياسي جديد!)';
-    } else if (streak.best_streak > streak.current_streak) {
-      message += `\nالأفضل: ${formatArabicStreak(streak.best_streak)}`;
-    }
+  // Line 3: Streak (if exists and active and streak > 1)
+  if (streak && streak.current_streak > 1) {
+    message += `\n🔥 السلسلة: ${formatArabicStreak(streak.current_streak)}`;
   }
   
   return message;
+}
+
+/**
+ * Get correct symbol for task
+ */
+function getTaskSymbol(task: Task): string {
+  if (task.is_origin === false) {
+    return task.status === 'done' ? '✓' : '✕';
+  } else {
+    if (task.status === 'done') return '✅';
+    if (task.status === 'partial') return '⚠️';
+    return '❌';
+  }
 }

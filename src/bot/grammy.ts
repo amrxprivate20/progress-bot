@@ -57,6 +57,40 @@ export function createBot(
 }
 
 /**
+ * Send long message with splitting
+ */
+async function sendLongMessage(ctx: Context, message: string) {
+  const MAX_LENGTH = 4096;
+  
+  if (message.length <= MAX_LENGTH) {
+    await ctx.reply(message);
+    return;
+  }
+
+  const parts: string[] = [];
+  let currentPart = '';
+  const lines = message.split('\n');
+
+  for (const line of lines) {
+    if (currentPart.length + line.length + 1 > MAX_LENGTH) {
+      parts.push(currentPart);
+      currentPart = line + '\n';
+    } else {
+      currentPart += line + '\n';
+    }
+  }
+
+  if (currentPart) {
+    parts.push(currentPart);
+  }
+
+  for (const part of parts) {
+    await ctx.reply(part);
+    await new Promise(resolve => setTimeout(resolve, 100));
+  }
+}
+
+/**
  * Register all bot commands
  */
 function registerCommands(bot: Bot<BotContext>) {
@@ -116,34 +150,100 @@ function registerCommands(bot: Bot<BotContext>) {
     await ctx.reply(helpMessage);
   });
 
-  // Progress command (report preview)
-  bot.command('progress', async (ctx) => {
-    try {
-      await ctx.reply('🔄 جاري إعداد ملخص اليوم...');
+  /**
+ * Handle /progress command
+ * UPDATED: Syncs with Todoist first to detect failures
+ */
+bot.command('progress', async (ctx) => {
+  try {
+    // Step 1: Initial message
+    await ctx.reply('🔄 جاري إعداد ملخص اليوم...');
 
-      const reportGen = createReportGenerator(ctx.db, ctx.settings);
-      const conversationMgr = createConversationManager(ctx.db);
+    const reportGen = createReportGenerator(ctx.db, ctx.settings);
+    const conversationMgr = createConversationManager(ctx.db);
 
-      // Check for active conversation
-      const chatId = ctx.chat?.id.toString() || '';
-      const hasConversation = await conversationMgr.hasActiveConversation(chatId);
+    // Check for active conversation
+    const chatId = ctx.chat?.id.toString() || '';
+    const hasConversation = await conversationMgr.hasActiveConversation(chatId);
 
-      if (hasConversation) {
-        await ctx.reply('⚠️ لديك محادثة نشطة. استخدم /cancel لإلغائها أولاً.');
-        return;
-      }
-
-      // Generate preview (with full task breakdown)
-      const preview = await reportGen.generatePreview();
-
-      // Send preview
-      await sendLongMessage(ctx, preview.formatted_text);
-
-    } catch (error) {
-      console.error('Progress command error:', error);
-      await ctx.reply('❌ حدث خطأ أثناء إعداد الملخص. حاول مرة أخرى.');
+    if (hasConversation) {
+      await ctx.reply('⚠️ لديك محادثة نشطة. استخدم /cancel لإلغائها أولاً.');
+      return;
     }
-  });
+
+    // Step 2: NEW - Sync with Todoist to detect failures
+    await ctx.reply('🔄 جاري المزامنة مع Todoist...');
+    
+    const { syncAndDetectFailuresForDate } = await import('../services/failure-detection');
+    const syncResult = await syncAndDetectFailuresForDate(
+      ctx.db, 
+      ctx.settings,
+      undefined // Use today by default
+    );
+
+    // Notify user about sync results
+    if (syncResult.logged > 0) {
+      await ctx.reply(
+        `✅ تمت المزامنة مع Todoist\n` +
+        `❌ تم اكتشاف ${syncResult.logged} مهام لم يتم إنجازها`
+      );
+    } else if (syncResult.detected > 0 && syncResult.skipped > 0) {
+      await ctx.reply(
+        `✅ تمت المزامنة مع Todoist\n` +
+        `ℹ️ ${syncResult.skipped} مهام فاشلة مسجلة مسبقاً`
+      );
+    } else {
+      await ctx.reply('✅ تمت المزامنة مع Todoist - كل شيء على ما يرام!');
+    }
+
+    // Step 3: Generate preview (now includes failed tasks)
+    await ctx.reply('📊 جاري إعداد الملخص...');
+    const preview = await reportGen.generatePreview();
+
+    // Step 4: Send preview
+    await sendLongMessage(ctx, preview.formatted_text);
+
+  } catch (error) {
+    console.error('Progress command error:', error);
+    await ctx.reply('❌ حدث خطأ أثناء إعداد الملخص. حاول مرة أخرى.');
+  }
+});
+
+/**
+ * Helper: Send long message with splitting
+ */
+async function sendLongMessage(ctx: Context, message: string) {
+  const MAX_LENGTH = 4096;
+  
+  if (message.length <= MAX_LENGTH) {
+    await ctx.reply(message);
+    return;
+  }
+
+  // Split at paragraph breaks
+  const parts: string[] = [];
+  let currentPart = '';
+  const lines = message.split('\n');
+
+  for (const line of lines) {
+    if (currentPart.length + line.length + 1 > MAX_LENGTH) {
+      parts.push(currentPart);
+      currentPart = line + '\n';
+    } else {
+      currentPart += line + '\n';
+    }
+  }
+
+  if (currentPart) {
+    parts.push(currentPart);
+  }
+
+  // Send all parts
+  for (const part of parts) {
+    await ctx.reply(part);
+    await new Promise(resolve => setTimeout(resolve, 100));
+  }
+}
 
   // Confirm command
   bot.command('confirm', async (ctx) => {
@@ -384,40 +484,6 @@ function registerCommands(bot: Bot<BotContext>) {
       console.error('Text message handler error:', error);
     }
   });
-}
-
-/**
- * Send long message with splitting
- */
-async function sendLongMessage(ctx: Context, message: string) {
-  const MAX_LENGTH = 4096;
-  
-  if (message.length <= MAX_LENGTH) {
-    await ctx.reply(message);
-    return;
-  }
-
-  const parts: string[] = [];
-  let currentPart = '';
-  const lines = message.split('\n');
-
-  for (const line of lines) {
-    if (currentPart.length + line.length + 1 > MAX_LENGTH) {
-      parts.push(currentPart);
-      currentPart = line + '\n';
-    } else {
-      currentPart += line + '\n';
-    }
-  }
-
-  if (currentPart) {
-    parts.push(currentPart);
-  }
-
-  for (const part of parts) {
-    await ctx.reply(part);
-    await new Promise(resolve => setTimeout(resolve, 100));
-  }
 }
 
 /**
