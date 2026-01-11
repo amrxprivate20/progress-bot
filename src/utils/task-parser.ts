@@ -1,10 +1,11 @@
 // ============================================
-// Enhanced Task Metadata Parser - COMPLETELY FIXED
+// Enhanced Task Metadata Parser - FIXED v2
 // ============================================
 // CRITICAL FIXES:
 // 1. Support Arabic comma (،) in addition to English comma (,)
-// 2. Parse ONLY from brackets - ignore system-added metadata
-// 3. No duplicate duration/quantity in notifications
+// 2. Support FULL Arabic time words (دقيقة, ساعة, دقائق, ساعات)
+// 3. Parse ONLY from brackets - ignore system-added metadata
+// 4. No duplicate duration/quantity in notifications
 
 export interface ParsedTaskMetadata {
   duration_minutes?: number;
@@ -18,9 +19,11 @@ export interface ParsedTaskMetadata {
 /**
  * Parse task metadata from content
  * 
- * FIXED: Now supports both commas:
+ * FIXED v2: Enhanced to handle full Arabic formats:
+ * - [15 دقيقة، 5 مرات] ✅ (full words with Arabic comma)
  * - [30د, 4 مرات] ✅
  * - [30د، 4 مرات] ✅ (Arabic comma)
+ * - [2 ساعة، 10 صفحات] ✅
  * 
  * Duration (English):
  * - [30m] → 30 minutes
@@ -31,6 +34,8 @@ export interface ParsedTaskMetadata {
  * - [30د] → 30 دقيقة
  * - [3س] → 3 ساعات
  * - [1.5س] → 1.5 ساعة
+ * - [15 دقيقة] → 15 دقيقة (full word)
+ * - [2 ساعة] → 2 ساعات (full word)
  * 
  * Quantity (English):
  * - [5 pages] → 5 pages
@@ -47,6 +52,7 @@ export interface ParsedTaskMetadata {
  * - [30m، 5 pages] → duration + quantity (Arabic comma)
  * - [2س, 10 صفحات] → Arabic duration + quantity
  * - [2س، 10 صفحات] → Arabic duration + quantity (Arabic comma)
+ * - [15 دقيقة، 5 مرات] → Arabic duration + quantity (full words)
  * 
  * Category:
  * - @work → category
@@ -58,10 +64,10 @@ export interface ParsedTaskMetadata {
 export function parseTaskMetadata(content: string): ParsedTaskMetadata {
   const metadata: ParsedTaskMetadata = {};
 
-  // FIXED: Normalize Arabic comma (،) to English comma (,) before parsing
+  // FIXED v2: Normalize Arabic comma (،) to English comma (,) before parsing
   const normalizedContent = content.replace(/،/g, ',');
 
-  // Check for comma-separated format: [30m, 5 pages] or [2س, 10 صفحات]
+  // Check for comma-separated format: [30m, 5 pages] or [2س, 10 صفحات] or [15 دقيقة, 5 مرات]
   const comboMatch = normalizedContent.match(/\[([^\]]+),\s*([^\]]+)\]/);
   if (comboMatch && comboMatch[1] && comboMatch[2]) {
     const part1 = comboMatch[1].trim();
@@ -71,6 +77,13 @@ export function parseTaskMetadata(content: string): ParsedTaskMetadata {
     const duration1 = parseDuration(part1);
     if (duration1 !== null) {
       metadata.duration_minutes = duration1;
+    } else {
+      // Maybe it's quantity first, try parsing as quantity
+      const quantity1 = parseQuantity(part1);
+      if (quantity1) {
+        metadata.quantity = quantity1.value;
+        metadata.quantity_unit = quantity1.unit;
+      }
     }
 
     // Parse second part (usually quantity)
@@ -78,13 +91,19 @@ export function parseTaskMetadata(content: string): ParsedTaskMetadata {
     if (quantity2) {
       metadata.quantity = quantity2.value;
       metadata.quantity_unit = quantity2.unit;
+    } else {
+      // Maybe it's duration second, try parsing as duration
+      const duration2 = parseDuration(part2);
+      if (duration2 !== null) {
+        metadata.duration_minutes = duration2;
+      }
     }
     
     return metadata;
   }
 
   // Single bracket formats
-  // Try duration: [30m], [2h], [30د], [3س]
+  // Try duration: [30m], [2h], [30د], [3س], [15 دقيقة]
   const durationMatch = normalizedContent.match(/\[([^\]]+)\]/);
   if (durationMatch && durationMatch[1]) {
     const duration = parseDuration(durationMatch[1].trim());
@@ -116,7 +135,7 @@ export function parseTaskMetadata(content: string): ParsedTaskMetadata {
 
 /**
  * Parse duration from text
- * Supports both English and Arabic
+ * Supports both English and Arabic (short and full forms)
  * 
  * Returns minutes, or null if not a duration
  */
@@ -134,17 +153,20 @@ function parseDuration(text: string): number | null {
     }
   }
 
-  // Arabic patterns: 30د, 3س, 1.5س
-  // د = دقيقة (minute)
-  // س = ساعة (hour)
-  const arabicMatch = text.match(/^(\d+(?:\.\d+)?)(د|س|دقيقة|دقائق|ساعة|ساعات)$/);
+  // FIXED v2: Arabic patterns including FULL WORDS
+  // Short: 30د, 3س, 1.5س
+  // Full: 15 دقيقة, 2 ساعة, 10 دقائق, 3 ساعات
+  const arabicMatch = text.match(/^(\d+(?:\.\d+)?)\s*(د|س|دقيقة|دقائق|دقيقتان|ساعة|ساعات|ساعتان)$/);
   if (arabicMatch && arabicMatch[1] && arabicMatch[2]) {
     const value = parseFloat(arabicMatch[1]);
     const unit = arabicMatch[2];
     
-    if (unit === 'س' || unit === 'ساعة' || unit === 'ساعات') {
+    // Hour indicators
+    if (unit === 'س' || unit === 'ساعة' || unit === 'ساعات' || unit === 'ساعتان') {
       return Math.round(value * 60);
-    } else if (unit === 'د' || unit === 'دقيقة' || unit === 'دقائق') {
+    }
+    // Minute indicators  
+    else if (unit === 'د' || unit === 'دقيقة' || unit === 'دقائق' || unit === 'دقيقتان') {
       return Math.round(value);
     }
   }
@@ -199,12 +221,15 @@ export function extractCleanTaskName(content: string): string {
 }
 
 /**
- * NEW: Get display-friendly metadata string from raw task content
+ * Get display-friendly metadata string from raw task content
  * This preserves the user's original format from brackets ONLY
  * 
  * Example:
  * Input: "الاستيقاظ قبل شروق الشمس [30د، 4 مرات]"
  * Output: "[30د، 4 مرات]"
+ * 
+ * Input: "قراءة المسبعات مساءا [15 دقيقة، 5 مرات]"
+ * Output: "[15 دقيقة، 5 مرات]"
  * 
  * Input: "Task [2h, 5 pages]"
  * Output: "[2h, 5 pages]"

@@ -1,11 +1,10 @@
 /**
- * Report Generator Service - FIXED VERSION
+ * Report Generator Service - FIXED v3
  *
- * FIXES APPLIED:
- * - Egypt timezone (UTC+2) for all date operations
- * - Task breakdown in preview (✅/⚠️/❌ with subtasks)
- * - Arabic formatting with proper plural rules
- * - Hierarchy-aware task grouping
+ * FIXES APPLIED v3:
+ * - Simple task list format (no "achievements" or "losses" sections)
+ * - Full hierarchy shown (parent + all subtasks)
+ * - Clean symbols: ✅/⚠️/❌ for main, ✓/✕ for subtasks
  */
 
 import { SupabaseClient, op } from '../database/client';
@@ -18,6 +17,7 @@ import {
   formatArabicStreak, 
   formatArabicDate 
 } from '../utils/timezone';
+import { getOriginalMetadataString } from '../utils/task-parser';
 
 // ============================================
 // Types
@@ -141,7 +141,7 @@ export class ReportGenerator {
       ? this.checkChallengeCompletion(data.dailyChallenge, data.tasks)
       : 'لا يوجد تحدي';
 
-    // FIXED: Format preview text with full task breakdown
+    // FIXED v3: Format preview with simple task list (no sections)
     const formattedText = this.formatPreviewText(data, stats, topCategories, challengeStatus);
 
     return {
@@ -223,14 +223,14 @@ export class ReportGenerator {
   // ============================================
 
   /**
-   * FIXED: Get today's date as YYYY-MM-DD in Egypt timezone
+   * Get today's date as YYYY-MM-DD in Egypt timezone
    */
   private getTodayDateString(): string {
     return getTodayInEgypt();
   }
 
   /**
-   * FIXED: Get tasks for a specific date using Egypt timezone boundaries
+   * Get tasks for a specific date using Egypt timezone boundaries
    */
   private async getTasksForDate(date: string): Promise<Task[]> {
     const { start, end } = getEgyptDayBoundaries(date);
@@ -353,279 +353,115 @@ export class ReportGenerator {
     return isCompleted ? '✅ منجز' : '❌ غير منجز';
   }
 
- /**
- * UPDATED: Format preview text with detailed Arabic formatting
- * Matches the desired output format with categories, hierarchies, and streaks
- */
-private formatPreviewText(
-  data: ReportData,
-  stats: ReportStatistics,
-  _topCategories: Array<{ name: string; count: number }>,
-  challengeStatus: string
-): string {
-  const date = new Date(data.date);
-  const arabicDate = formatArabicDate(date);
+  /**
+   * FIXED v3: Format preview text with SIMPLE TASK LIST
+   * - No "achievements" or "losses" sections
+   * - Just a flat list of all tasks with hierarchy
+   * - Main tasks show their subtasks immediately after
+   */
+  private formatPreviewText(
+    data: ReportData,
+    stats: ReportStatistics,
+    _topCategories: Array<{ name: string; count: number }>,
+    challengeStatus: string
+  ): string {
+    const date = new Date(data.date);
+    const arabicDate = formatArabicDate(date);
 
-  let text = `# 📝 تقرير الإنجاز اليومي - ${data.date}\n\n`;
-  text += `تقرير الإنجاز اليومي\n`;
-  text += `${arabicDate}\n\n`;
+    let text = `📊 التقرير اليومي - ${arabicDate}\n\n`;
 
-  // Rating based on success rate
-  const rating = this.getPerformanceRating(stats.success_rate);
-  text += `التقدير: ${rating}\n`;
-  text += `معدل النجاح: ${stats.success_rate.toFixed(1)} %\n\n`;
+    // Statistics
+    text += `📈 الإحصائيات:\n`;
+    text += `- إجمالي المهام: ${stats.total_tasks}\n`;
+    text += `- المنجزة: ${stats.completed_tasks}\n`;
+    text += `- الفاشلة: ${stats.failed_tasks}\n`;
+    text += `- معدل النجاح: ${stats.success_rate.toFixed(1)}%\n`;
+    text += `- وقت الإنجاز: ${formatArabicTime(stats.total_time_minutes)}\n\n`;
 
-  text += `وقت الإنجاز اليوم: ${formatArabicTime(stats.total_time_minutes)}\n\n`;
-
-  text += `عدد مهام اليوم: ${stats.total_tasks}\n\n`;
-
-  // Completed tasks by category
-  if (stats.completed_tasks > 0) {
-    const completedByCategory = this.groupTasksByCategory(
-      data.tasks.filter(t => t.status === 'done')
-    );
-    
-    text += `عدد المهام المكتملة اليوم: ${stats.completed_tasks}\n`;
-    for (const [category, info] of Object.entries(completedByCategory)) {
-      const emoji = this.getCategoryEmoji(category);
-      const timeStr = info.time > 0 ? ` - ${formatArabicTime(info.time)}` : '';
-      text += `${category}${emoji} ${info.count} ${this.getTaskWord(info.count)}${timeStr}\n`;
-    }
-    text += '\n';
-  }
-
-  // Partial tasks by category
-  if (stats.partial_tasks > 0) {
-    const partialByCategory = this.groupTasksByCategory(
-      data.tasks.filter(t => t.status === 'partial')
-    );
-    
-    text += `عدد المهام المكتملة جزئيا اليوم: ${stats.partial_tasks}\n`;
-    for (const [category, info] of Object.entries(partialByCategory)) {
-      const emoji = this.getCategoryEmoji(category);
-      const timeStr = info.time > 0 ? ` - ${formatArabicTime(info.time)}` : '';
-      text += `${category}${emoji} ${info.count} ${this.getTaskWord(info.count)}${timeStr}\n`;
-    }
-    text += '\n';
-  }
-
-  // Failed tasks
-  if (stats.failed_tasks > 0) {
-    text += `عدد المهام المتروكة اليوم: ${stats.failed_tasks}\n\n`;
-  }
-
-  // Achievements section
-  text += `ـــــــــــــــــــــــــــــــــــــــــــــــــــ\n`;
-  text += `🎯 الإنجاز:\n`;
-  text += `ـــــــــــــــــــــــ\n`;
-  text += this.formatTasksWithHierarchy(
-    data.tasks.filter(t => t.status === 'done'),
-    data.streaks,
-    '✅'
-  );
-
-  // Partial tasks section
-  if (stats.partial_tasks > 0) {
-    text += `⚠️ مكتملة جزئيا:\n`;
+    // FIXED v3: Simple task list with full hierarchy
+    text += `🎯 مهام اليوم:\n`;
     text += `ـــــــــــــــــــــــ\n`;
-    text += this.formatTasksWithHierarchy(
-      data.tasks.filter(t => t.status === 'partial'),
-      data.streaks,
-      '⚠️'
-    );
-  }
-
-  // Losses section
-  if (stats.failed_tasks > 0) {
-    text += `ـــــــــــــــــــــــــــــــــــــــــــــــــــ\n`;
-    text += `🏳 خسائر:\n`;
-    text += `ـــــــــــــــــــــــ\n`;
-    text += this.formatTasksWithHierarchy(
-      data.tasks.filter(t => t.status === 'failed'),
-      data.streaks,
-      '❌'
-    );
-  }
-
-  // Challenge
-  if (data.dailyChallenge) {
-    text += `\n🎯 **التحدي اليومي:** ${challengeStatus}\n`;
-    text += `"${data.dailyChallenge.challenge_text}"\n\n`;
-  }
-
-  // Weekly goals
-  if (data.weeklyGoals) {
-    text += `🎯 **الأهداف الأسبوعية:**\n`;
-    text += `${data.weeklyGoals.goals_text}\n\n`;
-  }
-
-  text += `\nهل تريد إكمال التحليل بالذكاء الاصطناعي؟\n`;
-  text += `استخدم /confirm للمتابعة أو /cancel للإلغاء`;
-
-  return text;
-}
-
-/**
- * Format tasks with full hierarchy (parent + subtasks)
- */
-private formatTasksWithHierarchy(
-  tasks: Task[],
-  streaks: Streak[],
-  mainSymbol: string
-): string {
-  if (tasks.length === 0) return '';
-
-  let output = '';
-  
-  // Separate main tasks and subtasks
-  const mainTasks = tasks.filter(t => !t.origin_task);
-  const subtasksByParent = new Map<string, Task[]>();
-  
-  // Group subtasks by parent task_id
-  tasks.filter(t => t.origin_task).forEach(subtask => {
-    if (!subtask.origin_task) return;
-    if (!subtasksByParent.has(subtask.origin_task)) {
-      subtasksByParent.set(subtask.origin_task, []);
-    }
-    subtasksByParent.get(subtask.origin_task)!.push(subtask);
-  });
-
-  for (const task of mainTasks) {
-    // Main task line
-    output += `${mainSymbol} ${task.content}`;
     
-    // Add streak info if exists
-    const streak = streaks.find(s => s.task_name === task.content);
-    if (streak && streak.current_streak > 1) {
-      // Show streak start date if available
-      if (streak.last_completed_date) {
-        const streakStartDate = this.calculateStreakStartDate(
-          streak.last_completed_date?.toString() || '',
-          streak.current_streak
-        );
-        output += ` -  منذ ${streakStartDate}`;
+    // Group tasks by parent
+    const mainTasks = data.tasks.filter(t => !t.origin_task);
+    const subtasksByParent = new Map<string, Task[]>();
+    
+    data.tasks.filter(t => t.origin_task).forEach(subtask => {
+      if (!subtask.origin_task) return;
+      if (!subtasksByParent.has(subtask.origin_task)) {
+        subtasksByParent.set(subtask.origin_task, []);
       }
-      output += ` [${formatArabicStreak(streak.current_streak)} بدون إنقطاع]`;
-    }
-    
-    // Add duration if exists
-    if (task.duration_minutes && task.duration_minutes > 0) {
-      output += ` [${formatArabicTime(task.duration_minutes)}]`;
-    }
-    
-    // Add quantity if exists
-    if (task.quantity) {
-      output += ` [${task.quantity} ${task.quantity_unit || ''}]`;
-    }
-    
-    output += '\n';
-    
-    // Add subtasks
-    const subtasks = subtasksByParent.get(task.task_id) || [];
-    for (const subtask of subtasks) {
-      const subSymbol = subtask.status === 'done' ? '✓' : '✕';
-      output += `${subSymbol} ${subtask.content}`;
+      subtasksByParent.get(subtask.origin_task)!.push(subtask);
+    });
+
+    // Display each main task with its subtasks
+    for (const task of mainTasks) {
+      const symbol = this.getTaskSymbol(task);
+      const cleanName = task.content.replace(/\[([^\]]+)\]/g, '').trim();
+      const metadata = getOriginalMetadataString(task.content);
       
-      if (subtask.duration_minutes && subtask.duration_minutes > 0) {
-        output += ` [${formatArabicTime(subtask.duration_minutes)}]`;
+      text += `${symbol} ${cleanName}`;
+      if (metadata) {
+        text += ` ${metadata}`;
       }
       
-      if (subtask.quantity) {
-        output += ` [${subtask.quantity} ${subtask.quantity_unit || ''}]`;
+      // Add streak info
+      const streak = data.streaks.find(s => s.task_name === task.content);
+      if (streak && streak.current_streak > 1) {
+        text += ` [${formatArabicStreak(streak.current_streak)} بدون إنقطاع]`;
       }
       
-      output += '\n';
+      text += '\n';
+      
+      // Add subtasks immediately after parent
+      const subtasks = subtasksByParent.get(task.task_id) || [];
+      for (const subtask of subtasks) {
+        const subSymbol = subtask.status === 'done' ? '✓' : '✕';
+        const subCleanName = subtask.content.replace(/\[([^\]]+)\]/g, '').trim();
+        const subMetadata = getOriginalMetadataString(subtask.content);
+        
+        text += `${subSymbol} ${subCleanName}`;
+        if (subMetadata) {
+          text += ` ${subMetadata}`;
+        }
+        text += '\n';
+      }
+      
+      text += '\n'; // Space between task groups
     }
-    
-    // Add spacing between main tasks
-    output += ' \n';
+
+    // Challenge
+    if (data.dailyChallenge) {
+      text += `\n🎯 التحدي اليومي: ${challengeStatus}\n`;
+      text += `"${data.dailyChallenge.challenge_text}"\n\n`;
+    }
+
+    // Weekly goals
+    if (data.weeklyGoals) {
+      text += `🎯 الأهداف الأسبوعية:\n`;
+      text += `${data.weeklyGoals.goals_text}\n\n`;
+    }
+
+    text += `\nهل تريد إكمال التحليل بالذكاء الاصطناعي؟\n`;
+    text += `استخدم /confirm للمتابعة أو /cancel للإلغاء`;
+
+    return text;
   }
 
-  return output;
-}
-
-/**
- * Group tasks by category with counts and time
- */
-private groupTasksByCategory(tasks: Task[]): Record<string, { count: number; time: number }> {
-  const grouped: Record<string, { count: number; time: number }> = {};
-
-  for (const task of tasks) {
-    const category = task.category || 'غير_مصنف';
-    
-    if (!grouped[category]) {
-      grouped[category] = { count: 0, time: 0 };
+  /**
+   * Get task symbol based on status
+   */
+  private getTaskSymbol(task: Task): string {
+    if (task.origin_task) {
+      // Subtask
+      return task.status === 'done' ? '✓' : '✕';
+    } else {
+      // Main task
+      if (task.status === 'done') return '✅';
+      if (task.status === 'partial') return '⚠️';
+      return '❌';
     }
-    
-    grouped[category].count++;
-    grouped[category].time += task.duration_minutes || 0;
   }
-
-  return grouped;
-}
-
-/**
- * Get emoji for category
- */
-private getCategoryEmoji(category: string): string {
-  const emojiMap: Record<string, string> = {
-    'religion': '🕋',
-    'الدين': '🕋',
-    'self_care': '🫶🏻',
-    'العناية_بالذات': '🫶🏻',
-    'recovery': '🏞️',
-    'التعافي': '🏞️',
-    'work': '💼',
-    'العمل': '💼',
-    'health': '🏃',
-    'الصحة': '🏃',
-    'learning': '📚',
-    'التعلم': '📚',
-  };
-  
-  return emojiMap[category] || '';
-}
-
-/**
- * Get correct Arabic word for task count
- */
-private getTaskWord(count: number): string {
-  if (count === 1) return 'مهمة';
-  if (count === 2) return 'مهمتان';
-  if (count >= 3 && count <= 10) return 'مهمات';
-  return 'مهمة';
-}
-
-/**
- * Get performance rating based on success rate
- */
-private getPerformanceRating(successRate: number): string {
-  if (successRate >= 90) return '(م) ممتاز';
-  if (successRate >= 75) return '(ج) جيد جدا';
-  if (successRate >= 60) return '(ج) جيد';
-  if (successRate >= 50) return '(م) مقبول';
-  return '(ض) ضعيف';
-}
-
-/**
- * Calculate streak start date from last completed date and streak count
- */
-private calculateStreakStartDate(lastCompletedDate: string, streakCount: number): string {
-  const lastDate = new Date(lastCompletedDate + 'T00:00:00Z');
-  const startDate = new Date(lastDate);
-  startDate.setDate(startDate.getDate() - (streakCount - 1));
-  
-  const day = startDate.getDate();
-  const month = startDate.getMonth() + 1;
-  const year = startDate.getFullYear();
-  
-  const months = [
-    'يناير', 'فبراير', 'مارس', 'إبريل', 'مايو', 'يونيو',
-    'يوليو', 'أغسطس', 'سبتمبر', 'أكتوبر', 'نوفمبر', 'ديسمبر'
-  ];
-  
-  return `${day} ${months[month - 1]} ${year}`;
-}
 }
 
 // ============================================

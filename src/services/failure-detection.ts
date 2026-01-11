@@ -1,10 +1,10 @@
 // ============================================
-// Failure Detection - COMPLETELY FIXED
+// Failure Detection - FIXED v2
 // ============================================
 // CRITICAL FIXES:
-// 1. Selective failure detection by priority
-// 2. Configurable via settings: failure_priority_threshold
-// 3. Only priorities <= threshold are considered failures
+// 1. Priority filtering ONLY applies to uncompleted tasks
+// 2. Completed tasks are NEVER filtered by priority
+// 3. Configurable via settings: failure_priority_threshold
 
 import type { SupabaseClient } from '../database/client';
 import type { SettingsManager } from '../database/settings';
@@ -76,16 +76,26 @@ function isTaskDueOnDate(task: TodoistTask, dateString: string): boolean {
 }
 
 /**
- * FIXED: Sync and detect failures with priority filtering
+ * FIXED v2: Sync and detect failures with priority filtering ONLY for failures
+ * 
+ * CRITICAL FIX: Priority threshold applies ONLY to uncompleted tasks
+ * - Completed tasks: Show in report regardless of priority ✅
+ * - Uncompleted tasks: Apply priority filter ✅
  * 
  * NEW SETTING: failure_priority_threshold
  * - Default: 2 (only P1 and P2 tasks)
  * - Set to 4 to include all priorities
  * - Set to 1 to only include P1 (highest priority)
  * 
+ * Priority Mapping:
+ * Todoist → Our System
+ * 4 → P1 (highest)
+ * 3 → P2
+ * 2 → P3
+ * 1 → P4 (lowest)
+ * 
  * Examples:
- * - threshold = 2: P1 (priority 4), P2 (priority 3) → failures
- *                  P3 (priority 2), P4 (priority 1) → ignored
+ * - threshold = 2: P1, P2 → failures; P3, P4 → ignored
  * - threshold = 3: P1, P2, P3 → failures; P4 → ignored
  * - threshold = 4: All priorities → failures
  */
@@ -111,12 +121,12 @@ export async function syncAndDetectFailuresForDate(
     return { detected: 0, logged: 0, skipped: 0, ignoredByPriority: 0 };
   }
 
-  // CRITICAL: Get priority threshold from settings
+  // Get priority threshold from settings
   const thresholdStr = await settings.get('failure_priority_threshold');
   const priorityThreshold = thresholdStr ? parseInt(thresholdStr) : 2; // Default: P1 and P2 only
   
-  console.log(`🎯 Priority threshold: ${priorityThreshold}`);
-  console.log(`   Only tasks with Todoist priority >= ${5 - priorityThreshold} will be considered failures`);
+  console.log(`🎯 Priority threshold: P1-P${priorityThreshold}`);
+  console.log(`   (Only failures from these priorities will be logged)`);
 
   try {
     const todoist = new TodoistAPIClient(todoistToken);
@@ -131,7 +141,7 @@ export async function syncAndDetectFailuresForDate(
 
     console.log(`🔄 Found ${recurringDueOnDate.length} recurring tasks due on ${targetDate}`);
 
-    // Get completed tasks from database for target date
+    // FIXED v2: Get ALL completed tasks for target date (NO priority filter)
     const completedTasks = await db.select('tasks', {});
     
     const completedOnDate = completedTasks.filter(task => {
@@ -146,9 +156,9 @@ export async function syncAndDetectFailuresForDate(
       completedOnDate.map(t => t.content)
     );
 
-    console.log(`✅ Found ${completedOnDate.length} tasks completed on ${targetDate}`);
+    console.log(`✅ Found ${completedOnDate.length} tasks completed on ${targetDate} (all priorities)`);
 
-    // Detect failures with priority filter
+    // FIXED v2: Detect failures with priority filter ONLY for uncompleted tasks
     const failedTasks: TodoistTask[] = [];
     let ignoredByPriority = 0;
     
@@ -158,22 +168,24 @@ export async function syncAndDetectFailuresForDate(
         completedContents.has(task.content);
       
       if (!isCompleted) {
-        // CRITICAL: Check priority threshold
+        // CRITICAL FIX: Check priority threshold ONLY for failed tasks
         // Todoist: 1 (lowest) to 4 (highest)
-        // threshold=2 means: only priority 3,4 (P2, P1)
-        const todoistPriorityLevel = 5 - task.priority; // Convert: 1→4, 2→3, 3→2, 4→1
+        // Our system: P1 (highest) to P4 (lowest)
+        const todoistPriorityLevel = 5 - task.priority; // Convert: 4→1(P1), 3→2(P2), 2→3(P3), 1→4(P4)
         
         if (todoistPriorityLevel <= priorityThreshold) {
           failedTasks.push(task);
-          console.log(`❌ Detected failure: ${task.content} (Priority ${todoistPriorityLevel})`);
+          console.log(`❌ Detected failure: ${task.content} (P${todoistPriorityLevel})`);
         } else {
           ignoredByPriority++;
-          console.log(`⏭️ Ignored by priority: ${task.content} (Priority ${todoistPriorityLevel})`);
+          console.log(`⏭️ Ignored by priority: ${task.content} (P${todoistPriorityLevel} > P${priorityThreshold})`);
         }
       }
     }
 
-    console.log(`📊 Detected ${failedTasks.length} failed tasks (${ignoredByPriority} ignored by priority)`);
+    console.log(`📊 Summary:`);
+    console.log(`   - Failed tasks (meeting threshold): ${failedTasks.length}`);
+    console.log(`   - Ignored by priority threshold: ${ignoredByPriority}`);
 
     let logged = 0;
     let skipped = 0;
@@ -201,14 +213,17 @@ export async function syncAndDetectFailuresForDate(
           created_at: new Date().toISOString(),
         });
         
-        console.log(`✅ Logged failure: ${task.content} (Priority ${5 - task.priority})`);
+        console.log(`✅ Logged failure: ${task.content} (P${5 - task.priority})`);
         logged++;
       } catch (error) {
         console.error(`❌ Failed to log task: ${task.content}`, error);
       }
     }
 
-    console.log(`✅ Logged ${logged} new failures, skipped ${skipped} existing, ignored ${ignoredByPriority} by priority`);
+    console.log(`✅ Final result:`);
+    console.log(`   - Logged: ${logged} new failures`);
+    console.log(`   - Skipped: ${skipped} existing`);
+    console.log(`   - Ignored: ${ignoredByPriority} by priority threshold`);
 
     return {
       detected: failedTasks.length,

@@ -1,12 +1,12 @@
 // ============================================
-// Todoist Webhook Handler - COMPLETELY FIXED
+// Todoist Webhook Handler - COMPLETE FIX v5
 // ============================================
-// CRITICAL FIXES:
-// 1. Arabic comma (،) support
-// 2. No duplicate metadata in notifications
-// 3. Full hierarchy display (main + all subtasks)
-// 4. Sync on every completion (not just reports)
-// 5. Selective failure detection by priority
+// CRITICAL FIXES v5:
+// 1. Sync parent task from Todoist API BEFORE saving subtask
+// 2. Create parent as "failed" if it doesn't exist
+// 3. Update parent to "partial" when first subtask completes
+// 4. Update parent to "done" when all subtasks complete
+// 5. Show complete hierarchy in notifications
 // ============================================
 
 import type { SupabaseClient } from '../database/client';
@@ -21,16 +21,17 @@ import {
   formatArabicStreak
 } from '../utils/timezone';
 
-/**
- * Todoist task interface
- */
-interface TodoistTaskResponse {
+// ============================================
+// Todoist API Types
+// ============================================
+
+interface TodoistTask {
   id: string;
   content: string;
+  description?: string;
   project_id: string;
   parent_id?: string;
   priority: number;
-  description?: string;
   labels?: string[];
   due?: {
     date: string;
@@ -40,87 +41,105 @@ interface TodoistTaskResponse {
 }
 
 /**
- * Todoist API client for hierarchy sync
+ * Sync parent task from Todoist API and save to database
+ * This ensures parent exists before we save the subtask
  */
-class TodoistAPIClient {
-  constructor(private apiToken: string) {}
+async function syncParentTaskFromTodoist(
+  db: SupabaseClient,
+  settings: SettingsManager,
+  parentId: string,
+  egyptDate: string
+): Promise<void> {
+  try {
+    console.log(`🔍 Checking if parent ${parentId} exists in DB...`);
+    
+    // Check if parent already exists in DB for today
+    const existingParent = await db.select<Task>('tasks', {
+      filter: { task_id: op.eq(parentId) }
+    });
 
-  /**
-   * Get task details including parent and children
-   */
-  async getTaskHierarchy(taskId: string): Promise<{
-    task: TodoistTaskResponse | null;
-    parent: TodoistTaskResponse | null;
-    siblings: TodoistTaskResponse[];
-  }> {
-    try {
-      // Get the task itself
-      const taskResponse = await fetch(
-        `https://api.todoist.com/rest/v2/tasks/${taskId}`,
-        {
-          headers: { 'Authorization': `Bearer ${this.apiToken}` }
-        }
-      );
+    // Filter for today's Egypt date
+    const todayParent = existingParent.filter(task => {
+      const taskEgyptDate = getEgyptDateString(new Date(task.completed_at));
+      return taskEgyptDate === egyptDate;
+    });
 
-      if (!taskResponse.ok) {
-        throw new Error(`Failed to fetch task: ${taskResponse.status}`);
-      }
-
-      const task = await taskResponse.json() as TodoistTaskResponse;
-
-      let parent: TodoistTaskResponse | null = null;
-      let siblings: TodoistTaskResponse[] = [];
-
-      // If this is a subtask, get parent and siblings
-      if (task.parent_id) {
-        // Get parent
-        const parentResponse = await fetch(
-          `https://api.todoist.com/rest/v2/tasks/${task.parent_id}`,
-          {
-            headers: { 'Authorization': `Bearer ${this.apiToken}` }
-          }
-        );
-
-        if (parentResponse.ok) {
-          parent = await parentResponse.json() as TodoistTaskResponse;
-        }
-
-        // Get all tasks in project to find siblings
-        const projectResponse = await fetch(
-          `https://api.todoist.com/rest/v2/tasks?project_id=${task.project_id}`,
-          {
-            headers: { 'Authorization': `Bearer ${this.apiToken}` }
-          }
-        );
-
-        if (projectResponse.ok) {
-          const allTasks = await projectResponse.json() as TodoistTaskResponse[];
-          siblings = allTasks.filter((t: TodoistTaskResponse) => 
-            t.parent_id === task.parent_id && t.id !== task.id
-          );
-        }
-      } else {
-        // If this is a parent, get children
-        const projectResponse = await fetch(
-          `https://api.todoist.com/rest/v2/tasks?project_id=${task.project_id}`,
-          {
-            headers: { 'Authorization': `Bearer ${this.apiToken}` }
-          }
-        );
-
-        if (projectResponse.ok) {
-          const allTasks = await projectResponse.json() as TodoistTaskResponse[];
-          siblings = allTasks.filter((t: TodoistTaskResponse) => t.parent_id === task.id);
-        }
-      }
-
-      return { task, parent, siblings };
-    } catch (error) {
-      console.error('Failed to get task hierarchy:', error);
-      return { task: null, parent: null, siblings: [] };
+    if (todayParent.length > 0) {
+      console.log(`✅ Parent already exists in DB for today`);
+      return;
     }
+
+    console.log(`🌐 Fetching parent task from Todoist API...`);
+    
+    // Fetch parent from Todoist API
+    const todoistToken = await settings.get(SETTINGS_KEYS.TODOIST_API_TOKEN);
+    if (!todoistToken) {
+      console.error('❌ No Todoist API token - cannot sync parent');
+      return;
+    }
+
+    const response = await fetch(
+      `https://api.todoist.com/rest/v2/tasks/${parentId}`,
+      {
+        headers: {
+          'Authorization': `Bearer ${todoistToken}`,
+        },
+      }
+    );
+
+    if (!response.ok) {
+      console.error(`❌ Failed to fetch parent from Todoist: ${response.status}`);
+      return;
+    }
+
+    const parentTask = await response.json() as TodoistTask;
+    console.log(`✅ Fetched parent from Todoist: ${parentTask.content}`);
+
+    // Parse metadata
+    const metadata = parseTaskMetadata(parentTask.content);
+    
+    // Extract category from labels
+    let category = metadata.category;
+    if (!category && parentTask.labels && parentTask.labels.length > 0) {
+      const firstLabel = parentTask.labels[0];
+      if (firstLabel) {
+        category = firstLabel
+          .replace(/[^\w\s]/gi, '')
+          .replace(/\s+/g, '_')
+          .trim()
+          .toLowerCase();
+      }
+    }
+
+    // Create parent task as FAILED (will update to partial/done as subtasks complete)
+    // CRITICAL: Use ORIGINAL task_id (without timestamp) so subtasks can find it
+    const isRecurring = parentTask.due?.is_recurring || false;
+
+    await db.insert<Task>('tasks', {
+      task_id: parentTask.id, // Use original ID so subtasks match!
+      content: parentTask.content,
+      category: category,
+      priority: parentTask.priority,
+      description: parentTask.description,
+      completed_at: new Date().toISOString(), // Use current time as placeholder
+      duration_minutes: metadata.duration_minutes || 0,
+      quantity: metadata.quantity,
+      quantity_unit: metadata.quantity_unit,
+      is_origin: isRecurring,
+      status: 'failed', // Start as failed, will update based on subtasks
+      created_at: new Date().toISOString(),
+    });
+
+    console.log(`✅ Created parent task in DB as FAILED with ID: ${parentTask.id}`);
+
+  } catch (error) {
+    console.error('❌ Failed to sync parent from Todoist:', error);
   }
 }
+
+// ============================================
+// Main Webhook Handler
+// ============================================
 
 export async function handleTodoistWebhook(
   payload: any,
@@ -150,19 +169,6 @@ export async function handleTodoistWebhook(
     };
   }
 
-  // CRITICAL FIX: Sync with Todoist FIRST to get hierarchy
-  const todoistToken = await settings.get(SETTINGS_KEYS.TODOIST_API_TOKEN);
-  let hierarchyInfo: { task: any; parent: any | null; siblings: any[] } | null = null;
-  
-  if (todoistToken) {
-    const todoist = new TodoistAPIClient(todoistToken);
-    hierarchyInfo = await todoist.getTaskHierarchy(event.event_data.id);
-    console.log('🔗 Hierarchy synced:', {
-      hasParent: !!hierarchyInfo.parent,
-      siblingsCount: hierarchyInfo.siblings.length
-    });
-  }
-
   // Get completion time
   let completedAtString = event.event_data.completed_at || new Date().toISOString();
   
@@ -180,7 +186,14 @@ export async function handleTodoistWebhook(
     isRecurring,
     isSubtask,
     content: event.event_data.content,
+    parent_id: event.event_data.parent_id || 'none'
   });
+
+  // CRITICAL: If this is a subtask, sync parent from Todoist FIRST
+  if (isSubtask && event.event_data.parent_id) {
+    console.log('🔄 Subtask detected - syncing parent from Todoist API...');
+    await syncParentTaskFromTodoist(db, settings, event.event_data.parent_id, egyptDate);
+  }
 
   // Check if this task was previously logged as failed TODAY
   const existingFailure = await checkForFailedTask(
@@ -192,7 +205,7 @@ export async function handleTodoistWebhook(
   if (existingFailure) {
     console.log('🔄 Found existing failed task - updating to completed');
     
-    // FIXED: Parse with original metadata string
+    // Parse metadata
     const metadata = parseTaskMetadata(event.event_data.content);
     console.log('📊 Parsed metadata:', metadata);
 
@@ -238,6 +251,12 @@ export async function handleTodoistWebhook(
       );
     }
 
+    // If this is a subtask, update parent status
+    if (isSubtask && event.event_data.parent_id) {
+      console.log('🔗 Updating parent task status...');
+      await updateParentTaskStatus(db, event.event_data.parent_id);
+    }
+
     // Get updated task
     const updatedTasks = await db.select<Task>('tasks', {
       filter: { id: op.eq(existingFailure.id as string) },
@@ -260,7 +279,7 @@ export async function handleTodoistWebhook(
     }
   }
 
-  // FIXED: Parse metadata (supports Arabic comma)
+  // Parse metadata
   const metadata = parseTaskMetadata(event.event_data.content);
   console.log('📊 Parsed metadata:', metadata);
 
@@ -295,11 +314,11 @@ export async function handleTodoistWebhook(
   try {
     let savedTask: Task | undefined;
 
-    if (isRecurring) {
-      // For recurring tasks, create unique ID with timestamp
+    if (isRecurring && !isSubtask) {
+      // Main recurring task - use timestamped ID
       const uniqueTaskId = `${event.event_data.id}_${completedAt.getTime()}`;
 
-      console.log('🔄 Recurring task - unique ID:', uniqueTaskId);
+      console.log('🔄 Recurring main task - unique ID:', uniqueTaskId);
 
       const inserted = await db.insert<Task>('tasks', {
         ...task,
@@ -307,6 +326,29 @@ export async function handleTodoistWebhook(
         created_at: new Date().toISOString(),
       });
       savedTask = inserted[0];
+
+      // Update streak
+      await updateStreakFromDueDate(
+        db,
+        task.content,
+        completedAt,
+        event.event_data.due?.string || '',
+        isSubtask
+      );
+    } else if (isRecurring && isSubtask) {
+      // Recurring SUBTASK - UPSERT with original ID to match parent
+      console.log('🔄 Recurring subtask - upserting with original ID:', event.event_data.id);
+
+      const upserted = await db.upsert<Task>(
+        'tasks',
+        {
+          ...task,
+          task_id: event.event_data.id, // Original ID to match parent!
+          created_at: new Date().toISOString(),
+        },
+        'task_id' // Upsert on task_id to avoid duplicates
+      );
+      savedTask = upserted[0];
 
       // Update streak
       await updateStreakFromDueDate(
@@ -337,6 +379,19 @@ export async function handleTodoistWebhook(
     }
 
     console.log('✅ Task saved successfully');
+
+    // Fire-and-forget Todoist sync after each completion
+    console.log('🔄 Triggering background Todoist sync...');
+    
+    import('../services/failure-detection').then(module => {
+      module.syncAndDetectFailuresForDate(db, settings, undefined).then(result => {
+        console.log(`✅ Background sync complete: ${result.logged} failures logged, ${result.ignoredByPriority} ignored by priority`);
+      }).catch(err => {
+        console.error('❌ Background sync failed:', err);
+      });
+    }).catch(err => {
+      console.error('❌ Failed to import failure-detection:', err);
+    });
 
     return {
       success: true,
@@ -387,13 +442,17 @@ async function checkForFailedTask(
 }
 
 /**
- * Update parent task status based on subtasks
+ * Update parent task status based on ALL subtasks
+ * Uses the ACTUAL parent_id from the subtask's task_id (before the underscore)
  */
 async function updateParentTaskStatus(
   db: SupabaseClient,
   parentId: string
 ): Promise<void> {
   try {
+    console.log(`🔍 Updating status for parent: ${parentId}`);
+    
+    // Get ALL subtasks with this origin_task
     const subtasks = await db.select<Task>('tasks', {
       filter: { origin_task: op.eq(parentId) },
     });
@@ -410,7 +469,7 @@ async function updateParentTaskStatus(
     
     if (doneCount === totalCount) {
       parentStatus = 'done';
-      console.log(`✅ Parent ${parentId}: All subtasks complete`);
+      console.log(`✅ Parent ${parentId}: All ${totalCount} subtasks complete`);
     } else if (doneCount > 0) {
       parentStatus = 'partial';
       console.log(`⚠️ Parent ${parentId}: ${doneCount}/${totalCount} subtasks done`);
@@ -419,13 +478,34 @@ async function updateParentTaskStatus(
       console.log(`❌ Parent ${parentId}: No subtasks completed`);
     }
 
+    // Find parent task (could have timestamp suffix for recurring tasks)
+    const allTasks = await db.select<Task>('tasks', {});
+    const parentTasks = allTasks.filter(t => 
+      t.task_id === parentId || t.task_id.startsWith(parentId + '_')
+    );
+
+    if (parentTasks.length === 0) {
+      console.warn(`⚠️ Parent task ${parentId} not found in database`);
+      return;
+    }
+
+    // Update the most recent parent task
+    const latestParent = parentTasks.sort((a, b) => 
+      new Date(b.completed_at).getTime() - new Date(a.completed_at).getTime()
+    )[0];
+
+    if (!latestParent) {
+      console.warn(`⚠️ No valid parent task found`);
+      return;
+    }
+
     await db.update(
       'tasks',
-      { task_id: op.eq(parentId) },
+      { id: op.eq(latestParent.id as string) },
       { status: parentStatus }
     );
 
-    console.log(`✅ Updated parent ${parentId}: ${parentStatus}`);
+    console.log(`✅ Updated parent ${latestParent.task_id}: ${parentStatus}`);
 
   } catch (error) {
     console.error('❌ Failed to update parent status:', error);
@@ -605,10 +685,7 @@ async function checkDuplicate(
 }
 
 /**
- * COMPLETELY FIXED: Send notification with FULL HIERARCHY
- * - Main task + ALL subtasks (completed/failed)
- * - Only original metadata from brackets
- * - No duplicates
+ * Send notification with COMPLETE hierarchy from DATABASE
  */
 export async function sendTaskNotification(
   task: Task,
@@ -617,71 +694,115 @@ export async function sendTaskNotification(
   db: SupabaseClient
 ): Promise<void> {
   try {
-    console.log('📤 Preparing hierarchical notification...');
+    console.log('📤 Building complete hierarchy notification from DATABASE...');
     
     let message = '';
-
-    // CRITICAL: Get hierarchy info
     let mainTask: Task | null = null;
-    let subtasks: Task[] = [];
+    let allSubtasks: Task[] = [];
 
-    if (task.is_origin === false && task.origin_task) {
-      // This is a subtask - get parent and siblings
-      const parentTasks = await db.select<Task>('tasks', {
-        filter: { task_id: op.eq(task.origin_task) },
-        limit: 1
-      });
+    // STEP 1: Determine parent task
+    if (task.origin_task) {
+      // This completed task is a subtask - find parent in DB
+      console.log(`🔍 Subtask completed, finding parent: ${task.origin_task}`);
+      
+      // Parent could have timestamp suffix for recurring tasks
+      const allTasks = await db.select<Task>('tasks', {});
+      const parentTasks = allTasks.filter(t => 
+        t.task_id === task.origin_task || t.task_id?.startsWith(task.origin_task + '_')
+      );
 
       if (parentTasks.length > 0) {
-        mainTask = parentTasks[0] || null;
+        // Get the most recent parent
+        mainTask = parentTasks.sort((a, b) => 
+          new Date(b.completed_at).getTime() - new Date(a.completed_at).getTime()
+        )[0] || null;
+        
+        console.log(`✅ Found parent in DB: ${mainTask?.content}`);
+      } else {
+        console.warn(`⚠️ Parent ${task.origin_task} not found in DB`);
       }
-
-      // Get all subtasks
-      subtasks = await db.select<Task>('tasks', {
-        filter: { origin_task: op.eq(task.origin_task) }
-      });
-
     } else {
-      // This is a main task - get children
+      // This is a parent task
+      console.log(`📌 Main task completed: ${task.content}`);
       mainTask = task;
-      subtasks = await db.select<Task>('tasks', {
-        filter: { origin_task: op.eq(task.task_id) }
-      });
     }
 
-    // Format message with full hierarchy
+    // STEP 2: Get ALL subtasks for this parent from database
     if (mainTask) {
+      const parentId = task.origin_task || task.task_id;
+      
+      allSubtasks = await db.select<Task>('tasks', {
+        filter: { origin_task: op.eq(parentId) }
+      });
+      
+      console.log(`📋 Found ${allSubtasks.length} total subtasks in DB for parent ${parentId}`);
+    }
+
+    // STEP 3: Build notification message
+    if (mainTask) {
+      // Main task line
       const mainSymbol = getTaskSymbol(mainTask);
+      const cleanName = mainTask.content.replace(/\[([^\]]+)\]/g, '').trim();
       const mainMetadata = getOriginalMetadataString(mainTask.content);
       
-      message = `${mainSymbol} ${mainTask.content.replace(/\[([^\]]+)\]/, '').trim()} ${mainMetadata}\n`;
-
-      // Add description if exists
-      if (mainTask.description) {
-        message += `📝 ${mainTask.description}\n`;
-      }
-
-      // Add streak if exists
-      const streaks = await db.select<Streak>('streaks', {
-        filter: { task_name: op.eq(mainTask.content) },
-        limit: 1,
-      });
+      message = `${mainSymbol} ${cleanName}`;
       
-      if (streaks.length > 0 && streaks[0] && streaks[0].current_streak > 1) {
-        message += `🔥 السلسلة: ${formatArabicStreak(streaks[0].current_streak)}\n`;
+      if (mainMetadata) {
+        message += ` ${mainMetadata}`;
+      }
+      message += '\n';
+
+      // Add streak for parent (if exists and > 1)
+      if (!mainTask.origin_task) {
+        const streaks = await db.select<Streak>('streaks', {
+          filter: { task_name: op.eq(mainTask.content) },
+          limit: 1,
+        });
+        
+        if (streaks.length > 0 && streaks[0] && streaks[0].current_streak > 1) {
+          message += `🔥 السلسلة: ${formatArabicStreak(streaks[0].current_streak)}`;
+          
+          if (streaks[0].current_streak === streaks[0].best_streak) {
+            message += ' 🎉 (رقم قياسي جديد!)';
+          }
+          
+          message += '\n';
+        }
       }
 
-      // Add subtasks
-      if (subtasks.length > 0) {
-        for (const sub of subtasks) {
+      // Add ALL subtasks
+      if (allSubtasks.length > 0) {
+        message += '\n';
+        
+        for (const sub of allSubtasks) {
           const subSymbol = sub.status === 'done' ? '✓' : '✕';
+          const subCleanName = sub.content.replace(/\[([^\]]+)\]/g, '').trim();
           const subMetadata = getOriginalMetadataString(sub.content);
-          message += `${subSymbol} ${sub.content.replace(/\[([^\]]+)\]/, '').trim()} ${subMetadata}\n`;
+          
+          message += `${subSymbol} ${subCleanName}`;
+          
+          if (subMetadata) {
+            message += ` ${subMetadata}`;
+          }
+          
+          message += '\n';
         }
+      }
+    } else {
+      // Fallback: show just the subtask if parent not found
+      console.warn('⚠️ Parent not found - showing subtask only');
+      const subSymbol = task.status === 'done' ? '✓' : '✕';
+      const cleanName = task.content.replace(/\[([^\]]+)\]/g, '').trim();
+      const metadata = getOriginalMetadataString(task.content);
+      
+      message = `${subSymbol} ${cleanName}`;
+      if (metadata) {
+        message += ` ${metadata}`;
       }
     }
 
-    console.log('📨 Sending hierarchical notification...');
+    console.log('📨 Sending notification:');
+    console.log(message);
 
     const response = await fetch(
       `https://api.telegram.org/bot${botToken}/sendMessage`,
@@ -699,7 +820,7 @@ export async function sendTaskNotification(
       const error = await response.text();
       console.error('❌ Telegram API error:', error);
     } else {
-      console.log('✅ Hierarchical notification sent successfully');
+      console.log('✅ Notification sent successfully');
     }
   } catch (error) {
     console.error('❌ Notification failed:', error);
@@ -710,9 +831,11 @@ export async function sendTaskNotification(
  * Get correct symbol for task
  */
 function getTaskSymbol(task: Task): string {
-  if (task.is_origin === false) {
+  if (task.origin_task) {
+    // Subtask
     return task.status === 'done' ? '✓' : '✕';
   } else {
+    // Main task
     if (task.status === 'done') return '✅';
     if (task.status === 'partial') return '⚠️';
     return '❌';
