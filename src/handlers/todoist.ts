@@ -116,7 +116,7 @@ async function syncParentTaskFromTodoist(
     const isRecurring = parentTask.due?.is_recurring || false;
 
     await db.insert<Task>('tasks', {
-      task_id: parentTask.id, // Use original ID so subtasks match!
+      task_id: parentId, // ✅ CORRECT - uses webhook parent_id
       content: parentTask.content,
       category: category,
       priority: parentTask.priority,
@@ -130,7 +130,7 @@ async function syncParentTaskFromTodoist(
       created_at: new Date().toISOString(),
     });
 
-    console.log(`✅ Created parent task in DB as FAILED with ID: ${parentTask.id}`);
+    console.log(`✅ Created parent task in DB as FAILED with ID: ${parentId}`);
 
   } catch (error) {
     console.error('❌ Failed to sync parent from Todoist:', error);
@@ -196,79 +196,82 @@ export async function handleTodoistWebhook(
   }
 
   // Check if this task was previously logged as failed TODAY
-  const existingFailure = await checkForFailedTask(
-    db,
-    event.event_data.content,
-    egyptDate
+const existingFailure = await checkForFailedTask(
+  db,
+  event.event_data.content,
+  egyptDate
+);
+
+if (existingFailure) {
+  console.log('🔄 Found existing failed task - updating to completed');
+  
+  // Parse metadata
+  const metadata = parseTaskMetadata(event.event_data.content);
+  
+  // Extract category from labels
+  let category = metadata.category;
+  if (!category && event.event_data.labels && event.event_data.labels.length > 0) {
+    const firstLabel = event.event_data.labels[0];
+    if (firstLabel) {
+      category = firstLabel
+        .replace(/[^\w\s]/gi, '')
+        .replace(/\s+/g, '_')
+        .trim()
+        .toLowerCase();
+    }
+  }
+
+  // Update the failed task to completed
+  await db.update(
+    'tasks',
+    { id: op.eq(existingFailure.id as string) },
+    {
+      status: 'done',
+      completed_at: completedAt.toISOString(),
+      duration_minutes: metadata.duration_minutes || existingFailure.duration_minutes || 0,
+      quantity: metadata.quantity,
+      quantity_unit: metadata.quantity_unit,
+      category: category || existingFailure.category,
+      priority: event.event_data.priority,
+      description: event.event_data.description || existingFailure.description,
+      // ✅ FIX: Update origin_task if this is a subtask!
+      origin_task: isSubtask && event.event_data.parent_id 
+        ? event.event_data.parent_id 
+        : existingFailure.origin_task,
+    }
   );
 
-  if (existingFailure) {
-    console.log('🔄 Found existing failed task - updating to completed');
-    
-    // Parse metadata
-    const metadata = parseTaskMetadata(event.event_data.content);
-    console.log('📊 Parsed metadata:', metadata);
+  console.log('✅ Updated failed task to completed');
 
-    // Extract category from labels
-    let category = metadata.category;
-    if (!category && event.event_data.labels && event.event_data.labels.length > 0) {
-      const firstLabel = event.event_data.labels[0];
-      if (firstLabel) {
-        category = firstLabel
-          .replace(/[^\w\s]/gi, '')
-          .replace(/\s+/g, '_')
-          .trim()
-          .toLowerCase();
-      }
-    }
-
-    // Update the failed task to completed
-    await db.update(
-      'tasks',
-      { id: op.eq(existingFailure.id as string) },
-      {
-        status: 'done',
-        completed_at: completedAt.toISOString(),
-        duration_minutes: metadata.duration_minutes || existingFailure.duration_minutes || 0,
-        quantity: metadata.quantity,
-        quantity_unit: metadata.quantity_unit,
-        category: category || existingFailure.category,
-        priority: event.event_data.priority,
-        description: event.event_data.description || existingFailure.description,
-      }
+  // Update streak if recurring
+  if (isRecurring) {
+    await updateStreakFromDueDate(
+      db,
+      event.event_data.content,
+      completedAt,
+      event.event_data.due?.string || '',
+      isSubtask
     );
-
-    console.log('✅ Updated failed task to completed');
-
-    // Update streak if recurring
-    if (isRecurring) {
-      await updateStreakFromDueDate(
-        db,
-        event.event_data.content,
-        completedAt,
-        event.event_data.due?.string || '',
-        isSubtask
-      );
-    }
-
-    // If this is a subtask, update parent status
-    if (isSubtask && event.event_data.parent_id) {
-      console.log('🔗 Updating parent task status...');
-      await updateParentTaskStatus(db, event.event_data.parent_id);
-    }
-
-    // Get updated task
-    const updatedTasks = await db.select<Task>('tasks', {
-      filter: { id: op.eq(existingFailure.id as string) },
-      limit: 1
-    });
-
-    return {
-      success: true,
-      message: `Task updated from failed to completed: ${event.event_data.content}`,
-      task: updatedTasks[0],
-    };
   }
+
+  // If this is a subtask, update parent status
+  if (isSubtask && event.event_data.parent_id) {
+    console.log('🔗 Updating parent task status...');
+    await updateParentTaskStatus(db, event.event_data.parent_id);
+  }
+
+  // Get updated task
+  const updatedTasks = await db.select<Task>('tasks', {
+    filter: { id: op.eq(existingFailure.id as string) },
+    limit: 1
+  });
+
+  return {
+    success: true,
+    message: `Task updated from failed to completed: ${event.event_data.content}`,
+    task: updatedTasks[0],
+  };
+}
 
   // Check for duplicates (non-recurring only)
   if (!isRecurring) {
@@ -685,34 +688,39 @@ async function checkDuplicate(
 }
 
 /**
- * Send notification with COMPLETE hierarchy from DATABASE
+ * Send notification with COMPLETE hierarchy INCLUDING FAILED SUBTASKS from Todoist
  */
 export async function sendTaskNotification(
   task: Task,
   chatId: string,
   botToken: string,
-  db: SupabaseClient
+  db: SupabaseClient,
+  settings: SettingsManager
 ): Promise<void> {
   try {
-    console.log('📤 Building complete hierarchy notification from DATABASE...');
+    console.log('📤 Building complete hierarchy notification from DATABASE + TODOIST...');
     
     let message = '';
     let mainTask: Task | null = null;
-    let allSubtasks: Task[] = [];
+    let completedSubtasks: Task[] = [];
+    let failedSubtasks: { id: string; content: string; priority: number }[] = [];
+
+    // Get Todoist API token
+    const todoistToken = await settings.get('todoist_api_token');
+    const priorityThresholdStr = await settings.get('failure_priority_threshold');
+    const priorityThreshold = priorityThresholdStr ? parseInt(priorityThresholdStr) : 2;
 
     // STEP 1: Determine parent task
     if (task.origin_task) {
       // This completed task is a subtask - find parent in DB
       console.log(`🔍 Subtask completed, finding parent: ${task.origin_task}`);
       
-      // Parent could have timestamp suffix for recurring tasks
       const allTasks = await db.select<Task>('tasks', {});
       const parentTasks = allTasks.filter(t => 
         t.task_id === task.origin_task || t.task_id?.startsWith(task.origin_task + '_')
       );
 
       if (parentTasks.length > 0) {
-        // Get the most recent parent
         mainTask = parentTasks.sort((a, b) => 
           new Date(b.completed_at).getTime() - new Date(a.completed_at).getTime()
         )[0] || null;
@@ -727,21 +735,100 @@ export async function sendTaskNotification(
       mainTask = task;
     }
 
-    // STEP 2: Get ALL subtasks for this parent from database
+    // STEP 2: Get completed subtasks from DATABASE
     if (mainTask) {
       const parentId = task.origin_task || task.task_id;
       
-      allSubtasks = await db.select<Task>('tasks', {
+      completedSubtasks = await db.select<Task>('tasks', {
         filter: { origin_task: op.eq(parentId) }
       });
       
-      console.log(`📋 Found ${allSubtasks.length} total subtasks in DB for parent ${parentId}`);
+      console.log(`📋 Found ${completedSubtasks.length} completed subtasks in DB`);
     }
 
-    // STEP 3: Build notification message
+    // STEP 3: Fetch ALL subtasks from Todoist API (including failed ones)
+    if (mainTask && todoistToken) {
+      const parentIdForTodoist = task.origin_task || task.task_id;
+      
+      try {
+        console.log(`🌐 Fetching ALL subtasks from Todoist for parent: ${parentIdForTodoist}`);
+        
+        const response = await fetch(
+          `https://api.todoist.com/rest/v2/tasks?project_id=${await settings.get('todoist_project_id')}`,
+          {
+            headers: {
+              'Authorization': `Bearer ${todoistToken}`,
+            },
+          }
+        );
+
+        if (response.ok) {
+          const allTodoistTasks = await response.json() as any[];
+          
+          // Filter for subtasks of this parent
+          const todoistSubtasks = allTodoistTasks.filter(t => 
+            t.parent_id === parentIdForTodoist
+          );
+          
+          console.log(`🌐 Found ${todoistSubtasks.length} total subtasks in Todoist`);
+          
+          // Identify which ones are NOT completed (failed)
+          const completedIds = new Set(completedSubtasks.map(t => t.task_id.split('_')[0]));
+          const completedContents = new Set(completedSubtasks.map(t => t.content));
+          
+          for (const todoistSub of todoistSubtasks) {
+            const isCompleted = 
+              completedIds.has(todoistSub.id) || 
+              completedContents.has(todoistSub.content);
+            
+            if (!isCompleted) {
+              // Check priority threshold (same logic as failure detection)
+              const todoistPriorityLevel = 5 - todoistSub.priority; // 4→P1, 3→P2, 2→P3, 1→P4
+              
+              if (todoistPriorityLevel <= priorityThreshold) {
+                failedSubtasks.push({
+                  id: todoistSub.id,
+                  content: todoistSub.content,
+                  priority: todoistSub.priority,
+                });
+                console.log(`✕ Failed subtask: ${todoistSub.content} (P${todoistPriorityLevel})`);
+              } else {
+                console.log(`⏭️ Ignored subtask by priority: ${todoistSub.content} (P${todoistPriorityLevel} > P${priorityThreshold})`);
+              }
+            }
+          }
+          
+          console.log(`📊 Summary: ${completedSubtasks.length} completed, ${failedSubtasks.length} failed`);
+          
+        } else {
+          console.error('❌ Failed to fetch Todoist tasks');
+        }
+      } catch (error) {
+        console.error('❌ Error fetching Todoist subtasks:', error);
+      }
+    }
+
+    // STEP 4: Build notification message
     if (mainTask) {
-      // Main task line
-      const mainSymbol = getTaskSymbol(mainTask);
+      const totalSubtasks = completedSubtasks.length + failedSubtasks.length;
+      const completedCount = completedSubtasks.length;
+      
+      // Determine parent symbol based on completion
+      let mainSymbol: string;
+      if (totalSubtasks === 0) {
+        // No subtasks - main task itself
+        mainSymbol = mainTask.status === 'done' ? '✅' : '❌';
+      } else if (completedCount === totalSubtasks) {
+        // All subtasks done
+        mainSymbol = '✅';
+      } else if (completedCount > 0) {
+        // Some subtasks done
+        mainSymbol = '⚠️';
+      } else {
+        // No subtasks done
+        mainSymbol = '❌';
+      }
+      
       const cleanName = mainTask.content.replace(/\[([^\]]+)\]/g, '').trim();
       const mainMetadata = getOriginalMetadataString(mainTask.content);
       
@@ -770,16 +857,30 @@ export async function sendTaskNotification(
         }
       }
 
-      // Add ALL subtasks
-      if (allSubtasks.length > 0) {
+      // Add ALL subtasks (completed first, then failed)
+      if (totalSubtasks > 0) {
         message += '\n';
         
-        for (const sub of allSubtasks) {
-          const subSymbol = sub.status === 'done' ? '✓' : '✕';
+        // Completed subtasks
+        for (const sub of completedSubtasks) {
           const subCleanName = sub.content.replace(/\[([^\]]+)\]/g, '').trim();
           const subMetadata = getOriginalMetadataString(sub.content);
           
-          message += `${subSymbol} ${subCleanName}`;
+          message += `✓ ${subCleanName}`;
+          
+          if (subMetadata) {
+            message += ` ${subMetadata}`;
+          }
+          
+          message += '\n';
+        }
+        
+        // Failed subtasks
+        for (const sub of failedSubtasks) {
+          const subCleanName = sub.content.replace(/\[([^\]]+)\]/g, '').trim();
+          const subMetadata = getOriginalMetadataString(sub.content);
+          
+          message += `✕ ${subCleanName}`;
           
           if (subMetadata) {
             message += ` ${subMetadata}`;
