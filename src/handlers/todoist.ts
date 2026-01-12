@@ -697,8 +697,8 @@ export async function sendTaskNotification(
   db: SupabaseClient,
   settings: SettingsManager
 ): Promise<void> {
-  try {
-    console.log('📤 Building complete hierarchy notification from DATABASE + TODOIST...');
+  try {  // ← ADD at line ~666
+    console.log('📤 Building complete hierarchy...');
     
     let message = '';
     let mainTask: Task | null = null;
@@ -709,12 +709,10 @@ export async function sendTaskNotification(
     const todoistToken = await settings.get('todoist_api_token');
     const priorityThresholdStr = await settings.get('failure_priority_threshold');
     const priorityThreshold = priorityThresholdStr ? parseInt(priorityThresholdStr) : 2;
-    // Get Egypt date for filtering
     const egyptDate = getEgyptDateString(new Date());
 
     // STEP 1: Determine parent task
     if (task.origin_task) {
-      // This completed task is a subtask - find parent in DB
       console.log(`🔍 Subtask completed, finding parent: ${task.origin_task}`);
       
       const allTasks = await db.select<Task>('tasks', {});
@@ -732,7 +730,6 @@ export async function sendTaskNotification(
         console.warn(`⚠️ Parent ${task.origin_task} not found in DB`);
       }
     } else {
-      // This is a parent task
       console.log(`📌 Main task completed: ${task.content}`);
       mainTask = task;
     }
@@ -748,67 +745,59 @@ export async function sendTaskNotification(
       console.log(`📋 Found ${completedSubtasks.length} completed subtasks in DB`);
     }
 
-    // ✅ NEW: Fetch subtasks by parent CONTENT
-if (mainTask) {
-  console.log(`📊 Fetching subtasks for parent: ${mainTask.content}`);
-  
-  const allSubtasks = await db.select<Task>('tasks', {});
-  
-  // Filter for today + matching parent by content
-  const subtasksForParent = allSubtasks.filter(t => {
-    // Check Egypt date
-    const taskEgyptDate = getEgyptDateString(new Date(t.completed_at));
-    if (taskEgyptDate !== egyptDate) return false;
-    
-    // Check if this is a subtask of our parent (by CONTENT)
-    const originMatch = t.description?.match(/Origin:([^\n]+)/);
-    if (!originMatch) return false;
-    
-    const parentName = originMatch[1].trim();
-    return parentName === mainTask.content;
-  });
-  
-  console.log(`📊 Found ${subtasksForParent.length} subtasks for parent "${mainTask.content}"`);
-  
-  // Separate into completed and failed
-  for (const subtask of subtasksForParent) {
-    if (subtask.status === 'done') {
-      console.log(`✓ Completed: ${subtask.content}`);
-    } else {
-      failedSubtasks.push({
-        id: subtask.task_id,
-        content: subtask.content,
-        priority: subtask.priority || 1,
-      });
-      console.log(`✕ Failed: ${subtask.content}`);
+    // STEP 3: Fetch subtasks by parent CONTENT
+    if (mainTask) {
+      console.log(`📊 Fetching subtasks for parent: ${mainTask.content}`);
+      
+      try {  // ← Inner try for subtask fetching
+        const allSubtasks = await db.select<Task>('tasks', {});
+        
+        const subtasksForParent = allSubtasks.filter(t => {
+          const taskEgyptDate = getEgyptDateString(new Date(t.completed_at));
+          if (taskEgyptDate !== egyptDate) return false;
+          
+          const originMatch = t.description?.match(/Origin:([^\n]+)/);
+          if (!originMatch) return false;
+          
+          const parentName = originMatch[1].trim();
+          return parentName === mainTask.content;
+        });
+        
+        console.log(`📊 Found ${subtasksForParent.length} subtasks for parent "${mainTask.content}"`);
+        
+        for (const subtask of subtasksForParent) {
+          if (subtask.status === 'done') {
+            console.log(`✓ Completed: ${subtask.content}`);
+          } else {
+            failedSubtasks.push({
+              id: subtask.task_id,
+              content: subtask.content,
+              priority: subtask.priority || 1,
+            });
+            console.log(`✕ Failed: ${subtask.content}`);
+          }
+        }
+        
+        console.log(`📊 Summary: ${completedSubtasks.length} completed, ${failedSubtasks.length} failed`);
+        
+      } catch (error) {  // Line 909 - matches inner try
+        console.error('❌ Error fetching subtasks from database:', error);
+      }
     }
-  }
-    
-    console.log(`📊 Summary: ${completedSubtasks.length} completed, ${failedSubtasks.length} failed`);
-    
-  } catch (error) {
-    console.error('❌ Error fetching subtasks from database:', error);
-  }
-}
 
     // STEP 4: Build notification message
     if (mainTask) {
       const totalSubtasks = completedSubtasks.length + failedSubtasks.length;
       const completedCount = completedSubtasks.length;
       
-      // Determine parent symbol based on completion
       let mainSymbol: string;
       if (totalSubtasks === 0) {
-        // No subtasks - main task itself
         mainSymbol = mainTask.status === 'done' ? '✅' : '❌';
       } else if (completedCount === totalSubtasks) {
-        // All subtasks done
         mainSymbol = '✅';
       } else if (completedCount > 0) {
-        // Some subtasks done
         mainSymbol = '⚠️';
       } else {
-        // No subtasks done
         mainSymbol = '❌';
       }
       
@@ -822,7 +811,6 @@ if (mainTask) {
       }
       message += '\n';
 
-      // Add streak for parent (if exists and > 1)
       if (!mainTask.origin_task) {
         const streaks = await db.select<Streak>('streaks', {
           filter: { task_name: op.eq(mainTask.content) },
@@ -840,11 +828,9 @@ if (mainTask) {
         }
       }
 
-      // Add ALL subtasks (completed first, then failed)
       if (totalSubtasks > 0) {
         message += '\n';
         
-        // Completed subtasks
         for (const sub of completedSubtasks) {
           const subCleanName = sub.content.replace(/\[([^\]]+)\]/g, '').trim();
           const subMetadata = getOriginalMetadataString(sub.content);
@@ -858,7 +844,6 @@ if (mainTask) {
           message += '\n';
         }
         
-        // Failed subtasks
         for (const sub of failedSubtasks) {
           const subCleanName = sub.content.replace(/\[([^\]]+)\]/g, '').trim();
           const subMetadata = getOriginalMetadataString(sub.content);
@@ -873,7 +858,6 @@ if (mainTask) {
         }
       }
     } else {
-      // Fallback: show just the subtask if parent not found
       console.warn('⚠️ Parent not found - showing subtask only');
       const subSymbol = task.status === 'done' ? '✓' : '✕';
       const cleanName = task.content.replace(/\[([^\]]+)\]/g, '').trim();
@@ -906,20 +890,16 @@ if (mainTask) {
     } else {
       console.log('✅ Notification sent successfully');
     }
-  } catch (error) {
+  } catch (error) {  // Line 789 - matches outer try at line 666
     console.error('❌ Notification failed:', error);
   }
-}
+}  // ← Function ends here
 
-/**
- * Get correct symbol for task
- */
+// Next function starts here
 function getTaskSymbol(task: Task): string {
   if (task.origin_task) {
-    // Subtask
     return task.status === 'done' ? '✓' : '✕';
   } else {
-    // Main task
     if (task.status === 'done') return '✅';
     if (task.status === 'partial') return '⚠️';
     return '❌';

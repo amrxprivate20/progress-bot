@@ -169,21 +169,22 @@ export async function syncAndDetectFailuresForDate(
     let skipped = 0;
     
     for (const task of failedTasks) {
-  // ✅ Parse Origin from description
-  const originMatch = task.description?.match(/Origin:([^\n]+)/);
-  const parentTaskName = originMatch ? originMatch[1].trim() : null;
-  
-  const parentId = task.parent_id || null;
-  const isOrigin = !parentId;
-  
-  await db.insert('tasks', {
-    task_id: `auto_fail_${task.id}_${Date.now()}`,
-    content: task.content,
-    description: task.description,  // ✅ Store full description
-    completed_at: end.toISOString(),
-    status: 'failed',
-    is_origin: isOrigin,
-    origin_task: parentId,  // Keep this but don't rely on it
+      try {
+        // ✅ Parse Origin from description
+        const originMatch = task.description?.match(/Origin:([^\n]+)/);
+        const parentTaskName = originMatch ? originMatch[1].trim() : null;
+        
+        const parentId = task.parent_id || null;
+        const isOrigin = !parentId;
+        
+        await db.insert('tasks', {
+          task_id: `auto_fail_${task.id}_${Date.now()}`,
+          content: task.content,
+          description: task.description,
+          completed_at: end.toISOString(),
+          status: 'failed',
+          is_origin: isOrigin,
+          origin_task: parentId,
           duration_minutes: 0,
           priority: task.priority,
           created_at: new Date().toISOString(),
@@ -193,13 +194,9 @@ export async function syncAndDetectFailuresForDate(
         logged++;
       } catch (error) {
         console.error(`❌ Failed to log task: ${task.content}`, error);
+        skipped++;
       }
     }
-
-    console.log(`✅ Final result:`);
-    console.log(`   - Logged: ${logged} new failures`);
-    console.log(`   - Skipped: ${skipped} existing`);
-    console.log(`   - Ignored: ${ignoredByPriority} by priority threshold`);
 
     return {
       detected: failedTasks.length,
@@ -207,10 +204,9 @@ export async function syncAndDetectFailuresForDate(
       skipped,
       ignoredByPriority,
     };
-    
   } catch (error) {
-    console.error('❌ Todoist sync error:', error);
-    return { detected: 0, logged: 0, skipped: 0, ignoredByPriority: 0 };
+    console.error('Error in syncAndDetectFailuresForDate:', error);
+    throw error;
   }
 }
 
