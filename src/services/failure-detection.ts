@@ -1,10 +1,10 @@
 // ============================================
-// Failure Detection - FIXED v2
+// Failure Detection - FIXED v3
 // ============================================
-// CRITICAL FIXES:
-// 1. Priority filtering ONLY applies to uncompleted tasks
-// 2. Completed tasks are NEVER filtered by priority
-// 3. Configurable via settings: failure_priority_threshold
+// CRITICAL FIXES v3:
+// 1. Priority filtering ONLY applies to uncompleted tasks ✅
+// 2. Completed tasks are NEVER filtered by priority ✅
+// 3. Auto-logged failures now include parent_id/origin_task ✅ NEW!
 
 import type { SupabaseClient } from '../database/client';
 import type { SettingsManager } from '../database/settings';
@@ -34,7 +34,8 @@ class TodoistAPIClient {
 interface TodoistTask {
   id: string;
   content: string;
-  project_id: string;
+  description?: string;  // ✅ ADD THIS
+  parent_id?: string;  // ✅ Important for subtask relationship
   priority: number; // 1 (lowest) to 4 (highest)
   due?: {
     date: string;
@@ -76,28 +77,7 @@ function isTaskDueOnDate(task: TodoistTask, dateString: string): boolean {
 }
 
 /**
- * FIXED v2: Sync and detect failures with priority filtering ONLY for failures
- * 
- * CRITICAL FIX: Priority threshold applies ONLY to uncompleted tasks
- * - Completed tasks: Show in report regardless of priority ✅
- * - Uncompleted tasks: Apply priority filter ✅
- * 
- * NEW SETTING: failure_priority_threshold
- * - Default: 2 (only P1 and P2 tasks)
- * - Set to 4 to include all priorities
- * - Set to 1 to only include P1 (highest priority)
- * 
- * Priority Mapping:
- * Todoist → Our System
- * 4 → P1 (highest)
- * 3 → P2
- * 2 → P3
- * 1 → P4 (lowest)
- * 
- * Examples:
- * - threshold = 2: P1, P2 → failures; P3, P4 → ignored
- * - threshold = 3: P1, P2, P3 → failures; P4 → ignored
- * - threshold = 4: All priorities → failures
+ * FIXED v3: Auto-logged failures now include parent_id relationship
  */
 export async function syncAndDetectFailuresForDate(
   db: SupabaseClient,
@@ -141,7 +121,7 @@ export async function syncAndDetectFailuresForDate(
 
     console.log(`🔄 Found ${recurringDueOnDate.length} recurring tasks due on ${targetDate}`);
 
-    // FIXED v2: Get ALL completed tasks for target date (NO priority filter)
+    // Get ALL completed tasks for target date (NO priority filter)
     const completedTasks = await db.select('tasks', {});
     
     const completedOnDate = completedTasks.filter(task => {
@@ -158,7 +138,7 @@ export async function syncAndDetectFailuresForDate(
 
     console.log(`✅ Found ${completedOnDate.length} tasks completed on ${targetDate} (all priorities)`);
 
-    // FIXED v2: Detect failures with priority filter ONLY for uncompleted tasks
+    // Detect failures with priority filter ONLY for uncompleted tasks
     const failedTasks: TodoistTask[] = [];
     let ignoredByPriority = 0;
     
@@ -168,14 +148,12 @@ export async function syncAndDetectFailuresForDate(
         completedContents.has(task.content);
       
       if (!isCompleted) {
-        // CRITICAL FIX: Check priority threshold ONLY for failed tasks
-        // Todoist: 1 (lowest) to 4 (highest)
-        // Our system: P1 (highest) to P4 (lowest)
+        // Check priority threshold ONLY for failed tasks
         const todoistPriorityLevel = 5 - task.priority; // Convert: 4→1(P1), 3→2(P2), 2→3(P3), 1→4(P4)
         
         if (todoistPriorityLevel <= priorityThreshold) {
           failedTasks.push(task);
-          console.log(`❌ Detected failure: ${task.content} (P${todoistPriorityLevel})`);
+          console.log(`❌ Detected failure: ${task.content} (P${todoistPriorityLevel})${task.parent_id ? ' [subtask]' : ''}`);
         } else {
           ignoredByPriority++;
           console.log(`⏭️ Ignored by priority: ${task.content} (P${todoistPriorityLevel} > P${priorityThreshold})`);
@@ -191,29 +169,27 @@ export async function syncAndDetectFailuresForDate(
     let skipped = 0;
     
     for (const task of failedTasks) {
-      const existingFailure = completedOnDate.find(
-        t => t.content === task.content && t.status === 'failed'
-      );
-      
-      if (existingFailure) {
-        console.log(`⏭️ Already logged: ${task.content}`);
-        skipped++;
-        continue;
-      }
-
-      try {
-        await db.insert('tasks', {
-          task_id: `auto_fail_${task.id}_${Date.now()}`,
-          content: task.content,
-          completed_at: end.toISOString(),
-          status: 'failed',
-          is_origin: true,
+  // ✅ Parse Origin from description
+  const originMatch = task.description?.match(/Origin:([^\n]+)/);
+  const parentTaskName = originMatch ? originMatch[1].trim() : null;
+  
+  const parentId = task.parent_id || null;
+  const isOrigin = !parentId;
+  
+  await db.insert('tasks', {
+    task_id: `auto_fail_${task.id}_${Date.now()}`,
+    content: task.content,
+    description: task.description,  // ✅ Store full description
+    completed_at: end.toISOString(),
+    status: 'failed',
+    is_origin: isOrigin,
+    origin_task: parentId,  // Keep this but don't rely on it
           duration_minutes: 0,
           priority: task.priority,
           created_at: new Date().toISOString(),
         });
         
-        console.log(`✅ Logged failure: ${task.content} (P${5 - task.priority})`);
+        console.log(`✅ Logged failure: ${task.content} (P${5 - task.priority})${parentId ? ' [subtask of ' + parentId + ']' : ''}`);
         logged++;
       } catch (error) {
         console.error(`❌ Failed to log task: ${task.content}`, error);

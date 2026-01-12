@@ -353,100 +353,125 @@ export class ReportGenerator {
     return isCompleted ? '✅ منجز' : '❌ غير منجز';
   }
 
-  /**
-   * FIXED v3: Format preview text with SIMPLE TASK LIST
-   * - No "achievements" or "losses" sections
-   * - Just a flat list of all tasks with hierarchy
-   * - Main tasks show their subtasks immediately after
-   */
-  private formatPreviewText(
-    data: ReportData,
-    stats: ReportStatistics,
-    _topCategories: Array<{ name: string; count: number }>,
-    challengeStatus: string
-  ): string {
-    const date = new Date(data.date);
-    const arabicDate = formatArabicDate(date);
+ /**
+ * FIXED v4: Format preview text with CONTENT-BASED subtask matching
+ */
+private formatPreviewText(
+  data: ReportData,
+  stats: ReportStatistics,
+  _topCategories: Array<{ name: string; count: number }>,
+  challengeStatus: string
+): string {
+  const date = new Date(data.date);
+  const arabicDate = formatArabicDate(date);
 
-    let text = `📊 التقرير اليومي - ${arabicDate}\n\n`;
+  let text = `📊 التقرير اليومي - ${arabicDate}\n\n`;
 
-    // Statistics
-    text += `📈 الإحصائيات:\n`;
-    text += `- إجمالي المهام: ${stats.total_tasks}\n`;
-    text += `- المنجزة: ${stats.completed_tasks}\n`;
-    text += `- الفاشلة: ${stats.failed_tasks}\n`;
-    text += `- معدل النجاح: ${stats.success_rate.toFixed(1)}%\n`;
-    text += `- وقت الإنجاز: ${formatArabicTime(stats.total_time_minutes)}\n\n`;
+  // Statistics
+  text += `📈 الإحصائيات:\n`;
+  text += `- إجمالي المهام: ${stats.total_tasks}\n`;
+  text += `- المنجزة: ${stats.completed_tasks}\n`;
+  text += `- الفاشلة: ${stats.failed_tasks}\n`;
+  text += `- معدل النجاح: ${stats.success_rate.toFixed(1)}%\n`;
+  text += `- وقت الإنجاز: ${formatArabicTime(stats.total_time_minutes)}\n\n`;
 
-    // FIXED v3: Simple task list with full hierarchy
-    text += `🎯 مهام اليوم:\n`;
-    text += `ـــــــــــــــــــــــ\n`;
+  // ✅ FIXED v4: Group tasks using CONTENT-BASED matching for subtasks
+  text += `🎯 مهام اليوم:\n`;
+  text += `ـــــــــــــــــــــــ\n`;
+
+  // Identify main tasks (no Origin: in description, OR no description)
+  const mainTasks = data.tasks.filter(t => {
+    if (!t.description) return true;  // No description = main task
+    return !t.description.includes('Origin:');  // Has description but no Origin: = main task
+  });
+
+  // Group subtasks by parent CONTENT (not ID!)
+  const subtasksByParentContent = new Map<string, Task[]>();
+
+  for (const task of data.tasks) {
+    // Skip if not a subtask
+    if (!task.description?.includes('Origin:')) continue;
     
-    // Group tasks by parent
-    const mainTasks = data.tasks.filter(t => !t.origin_task);
-    const subtasksByParent = new Map<string, Task[]>();
+    // Extract parent name from description
+    const originMatch = task.description.match(/Origin:([^\nDuration]+)/);
+    if (!originMatch) {
+      console.warn(`Could not parse Origin from: ${task.description}`);
+      continue;
+    }
     
-    data.tasks.filter(t => t.origin_task).forEach(subtask => {
-      if (!subtask.origin_task) return;
-      if (!subtasksByParent.has(subtask.origin_task)) {
-        subtasksByParent.set(subtask.origin_task, []);
-      }
-      subtasksByParent.get(subtask.origin_task)!.push(subtask);
-    });
-
-    // Display each main task with its subtasks
-    for (const task of mainTasks) {
-      const symbol = this.getTaskSymbol(task);
-      const cleanName = task.content.replace(/\[([^\]]+)\]/g, '').trim();
-      const metadata = getOriginalMetadataString(task.content);
-      
-      text += `${symbol} ${cleanName}`;
-      if (metadata) {
-        text += ` ${metadata}`;
-      }
-      
-      // Add streak info
-      const streak = data.streaks.find(s => s.task_name === task.content);
-      if (streak && streak.current_streak > 1) {
-        text += ` [${formatArabicStreak(streak.current_streak)} بدون إنقطاع]`;
-      }
-      
-      text += '\n';
-      
-      // Add subtasks immediately after parent
-      const subtasks = subtasksByParent.get(task.task_id) || [];
-      for (const subtask of subtasks) {
-        const subSymbol = subtask.status === 'done' ? '✓' : '✕';
-        const subCleanName = subtask.content.replace(/\[([^\]]+)\]/g, '').trim();
-        const subMetadata = getOriginalMetadataString(subtask.content);
-        
-        text += `${subSymbol} ${subCleanName}`;
-        if (subMetadata) {
-          text += ` ${subMetadata}`;
-        }
-        text += '\n';
-      }
-      
-      text += '\n'; // Space between task groups
+    const parentName = originMatch[1].trim().replace(/❗/g, '').trim();
+    
+    // Store subtask grouped by parent name
+    if (!subtasksByParentContent.has(parentName)) {
+      subtasksByParentContent.set(parentName, []);
     }
-
-    // Challenge
-    if (data.dailyChallenge) {
-      text += `\n🎯 التحدي اليومي: ${challengeStatus}\n`;
-      text += `"${data.dailyChallenge.challenge_text}"\n\n`;
-    }
-
-    // Weekly goals
-    if (data.weeklyGoals) {
-      text += `🎯 الأهداف الأسبوعية:\n`;
-      text += `${data.weeklyGoals.goals_text}\n\n`;
-    }
-
-    text += `\nهل تريد إكمال التحليل بالذكاء الاصطناعي؟\n`;
-    text += `استخدم /confirm للمتابعة أو /cancel للإلغاء`;
-
-    return text;
+    subtasksByParentContent.get(parentName)!.push(task);
   }
+
+  console.log(`📊 Main tasks: ${mainTasks.length}`);
+  console.log(`📊 Subtasks grouped: ${subtasksByParentContent.size} parents`);
+
+  // Display each main task with its subtasks
+  for (const task of mainTasks) {
+    const symbol = this.getTaskSymbol(task);
+    const cleanName = task.content.replace(/\[([^\]]+)\]/g, '').trim();
+    const metadata = getOriginalMetadataString(task.content);
+    
+    text += `${symbol} ${cleanName}`;
+    if (metadata) {
+      text += ` ${metadata}`;
+    }
+    
+    // Add streak info
+    const streak = data.streaks.find(s => s.task_name === task.content);
+    if (streak && streak.current_streak > 1) {
+      text += ` [${formatArabicStreak(streak.current_streak)} بدون إنقطاع]`;
+    }
+    
+    text += '\n';
+    
+    // ✅ FIX: Find subtasks by CONTENT matching (try both with and without ❗)
+    const cleanTaskName = task.content.replace(/❗/g, '').trim();
+    const subtasks = subtasksByParentContent.get(cleanTaskName) || 
+                     subtasksByParentContent.get(task.content) || [];
+    
+    if (subtasks.length > 0) {
+      console.log(`📋 Found ${subtasks.length} subtasks for "${cleanTaskName}"`);
+    }
+    
+    // Display subtasks
+    for (const subtask of subtasks) {
+      const subSymbol = subtask.status === 'done' ? '✓' : '✕';
+      const subCleanName = subtask.content.replace(/\[([^\]]+)\]/g, '').trim();
+      const subMetadata = getOriginalMetadataString(subtask.content);
+      
+      text += `${subSymbol} ${subCleanName}`;
+      if (subMetadata) {
+        text += ` ${subMetadata}`;
+      }
+      text += '\n';
+    }
+    
+    text += '\n'; // Space between task groups
+  }
+
+  // Challenge
+  if (data.dailyChallenge) {
+    text += `\n🎯 التحدي اليومي: ${challengeStatus}\n`;
+    text += `"${data.dailyChallenge.challenge_text}"\n\n`;
+  }
+
+  // Weekly goals
+  if (data.weeklyGoals) {
+    text += `🎯 الأهداف الأسبوعية:\n`;
+    text += `${data.weeklyGoals.goals_text}\n\n`;
+  }
+
+  text += `\nهل تريد إكمال التحليل بالذكاء الاصطناعي؟\n`;
+  text += `استخدم /confirm للمتابعة أو /cancel للإلغاء`;
+
+  return text;
+}
 
   /**
    * Get task symbol based on status

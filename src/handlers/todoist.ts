@@ -709,6 +709,8 @@ export async function sendTaskNotification(
     const todoistToken = await settings.get('todoist_api_token');
     const priorityThresholdStr = await settings.get('failure_priority_threshold');
     const priorityThreshold = priorityThresholdStr ? parseInt(priorityThresholdStr) : 2;
+    // Get Egypt date for filtering
+    const egyptDate = getEgyptDateString(new Date());
 
     // STEP 1: Determine parent task
     if (task.origin_task) {
@@ -746,67 +748,48 @@ export async function sendTaskNotification(
       console.log(`📋 Found ${completedSubtasks.length} completed subtasks in DB`);
     }
 
-    // STEP 3: Fetch ALL subtasks from Todoist API (including failed ones)
-    if (mainTask && todoistToken) {
-      const parentIdForTodoist = task.origin_task || task.task_id;
-      
-      try {
-        console.log(`🌐 Fetching ALL subtasks from Todoist for parent: ${parentIdForTodoist}`);
-        
-        const response = await fetch(
-          `https://api.todoist.com/rest/v2/tasks?project_id=${await settings.get('todoist_project_id')}`,
-          {
-            headers: {
-              'Authorization': `Bearer ${todoistToken}`,
-            },
-          }
-        );
-
-        if (response.ok) {
-          const allTodoistTasks = await response.json() as any[];
-          
-          // Filter for subtasks of this parent
-          const todoistSubtasks = allTodoistTasks.filter(t => 
-            t.parent_id === parentIdForTodoist
-          );
-          
-          console.log(`🌐 Found ${todoistSubtasks.length} total subtasks in Todoist`);
-          
-          // Identify which ones are NOT completed (failed)
-          const completedIds = new Set(completedSubtasks.map(t => t.task_id.split('_')[0]));
-          const completedContents = new Set(completedSubtasks.map(t => t.content));
-          
-          for (const todoistSub of todoistSubtasks) {
-            const isCompleted = 
-              completedIds.has(todoistSub.id) || 
-              completedContents.has(todoistSub.content);
-            
-            if (!isCompleted) {
-              // Check priority threshold (same logic as failure detection)
-              const todoistPriorityLevel = 5 - todoistSub.priority; // 4→P1, 3→P2, 2→P3, 1→P4
-              
-              if (todoistPriorityLevel <= priorityThreshold) {
-                failedSubtasks.push({
-                  id: todoistSub.id,
-                  content: todoistSub.content,
-                  priority: todoistSub.priority,
-                });
-                console.log(`✕ Failed subtask: ${todoistSub.content} (P${todoistPriorityLevel})`);
-              } else {
-                console.log(`⏭️ Ignored subtask by priority: ${todoistSub.content} (P${todoistPriorityLevel} > P${priorityThreshold})`);
-              }
-            }
-          }
-          
-          console.log(`📊 Summary: ${completedSubtasks.length} completed, ${failedSubtasks.length} failed`);
-          
-        } else {
-          console.error('❌ Failed to fetch Todoist tasks');
-        }
-      } catch (error) {
-        console.error('❌ Error fetching Todoist subtasks:', error);
-      }
+    // ✅ NEW: Fetch subtasks by parent CONTENT
+if (mainTask) {
+  console.log(`📊 Fetching subtasks for parent: ${mainTask.content}`);
+  
+  const allSubtasks = await db.select<Task>('tasks', {});
+  
+  // Filter for today + matching parent by content
+  const subtasksForParent = allSubtasks.filter(t => {
+    // Check Egypt date
+    const taskEgyptDate = getEgyptDateString(new Date(t.completed_at));
+    if (taskEgyptDate !== egyptDate) return false;
+    
+    // Check if this is a subtask of our parent (by CONTENT)
+    const originMatch = t.description?.match(/Origin:([^\n]+)/);
+    if (!originMatch) return false;
+    
+    const parentName = originMatch[1].trim();
+    return parentName === mainTask.content;
+  });
+  
+  console.log(`📊 Found ${subtasksForParent.length} subtasks for parent "${mainTask.content}"`);
+  
+  // Separate into completed and failed
+  for (const subtask of subtasksForParent) {
+    if (subtask.status === 'done') {
+      console.log(`✓ Completed: ${subtask.content}`);
+    } else {
+      failedSubtasks.push({
+        id: subtask.task_id,
+        content: subtask.content,
+        priority: subtask.priority || 1,
+      });
+      console.log(`✕ Failed: ${subtask.content}`);
     }
+  }
+    
+    console.log(`📊 Summary: ${completedSubtasks.length} completed, ${failedSubtasks.length} failed`);
+    
+  } catch (error) {
+    console.error('❌ Error fetching subtasks from database:', error);
+  }
+}
 
     // STEP 4: Build notification message
     if (mainTask) {
