@@ -17,6 +17,11 @@ import {
   formatArabicStreak, 
   formatArabicDate 
 } from '../utils/timezone';
+import {
+  getDailyFailures,
+  type FailedTask,
+  type DailyFailures,
+} from './failure-manager';
 import { getOriginalMetadataString } from '../utils/task-parser';
 
 // ============================================
@@ -24,8 +29,9 @@ import { getOriginalMetadataString } from '../utils/task-parser';
 // ============================================
 
 export interface ReportData {
-  date: string; // YYYY-MM-DD (Egypt date)
+  date: string;
   tasks: Task[];
+  failedTasksJson: DailyFailures | null;  // ✅ NEW
   streaks: Streak[];
   weeklyGoals: WeeklyGoals | null;
   dailyChallenge: DailyChallenge | null;
@@ -78,6 +84,9 @@ export class ReportGenerator {
     // Collect tasks for the day (using Egypt timezone)
     const tasks = await this.getTasksForDate(reportDate);
 
+    // ✅ NEW: Get failed tasks from JSON
+    const failedTasksJson = await getDailyFailures(db, date);
+
     // Get streaks for all recurring tasks
     const streaks = await this.getStreaks();
 
@@ -99,6 +108,7 @@ export class ReportGenerator {
     return {
       date: reportDate,
       tasks,
+      failedTasksJson,
       streaks,
       weeklyGoals,
       dailyChallenge,
@@ -326,7 +336,10 @@ export class ReportGenerator {
   /**
    * Group tasks by category
    */
-  private groupByCategory(tasks: Task[]): Record<string, number> {
+  private groupByCategory(
+  tasks: Task[],
+  failedTasksJson: DailyFailures | null
+): Record<string, number> {
     const categories: Record<string, number> = {};
 
     for (const task of tasks) {
@@ -353,121 +366,188 @@ export class ReportGenerator {
     return isCompleted ? '✅ منجز' : '❌ غير منجز';
   }
 
- /**
- * FIXED v4: Format preview text with CONTENT-BASED subtask matching
+/**
+ * FIXED v5: Match subtasks to parents using origin_task field
+ * Works even when description is NULL
  */
-private formatPreviewText(
-  data: ReportData,
-  stats: ReportStatistics,
-  _topCategories: Array<{ name: string; count: number }>,
-  challengeStatus: string
-): string {
-  const date = new Date(data.date);
-  const arabicDate = formatArabicDate(date);
+function formatPreviewText(data: ReportData): string {
+  let text = '';
 
-  let text = `📊 التقرير اليومي - ${arabicDate}\n\n`;
+  // Header
+  text += `📊 التقرير اليومي - ${formatArabicDate(data.date)}\n\n`;
 
   // Statistics
   text += `📈 الإحصائيات:\n`;
-  text += `- إجمالي المهام: ${stats.total_tasks}\n`;
-  text += `- المنجزة: ${stats.completed_tasks}\n`;
-  text += `- الفاشلة: ${stats.failed_tasks}\n`;
-  text += `- معدل النجاح: ${stats.success_rate.toFixed(1)}%\n`;
-  text += `- وقت الإنجاز: ${formatArabicTime(stats.total_time_minutes)}\n\n`;
+  text += `- إجمالي المهام: ${data.statistics.total_tasks}\n`;
+  text += `- المنجزة: ${data.statistics.completed_tasks}\n`;
+  text += `- الفاشلة: ${data.statistics.failed_tasks}\n`;
+  text += `- معدل النجاح: ${data.statistics.success_rate}%\n`;
+  text += `- وقت الإنجاز: ${formatArabicTime(data.statistics.achievement_time_minutes)}\n\n`;
 
-  // ✅ FIXED v4: Group tasks using CONTENT-BASED matching for subtasks
+  // Task breakdown section
   text += `🎯 مهام اليوم:\n`;
-  text += `ـــــــــــــــــــــــ\n`;
+  text += `${'ـ'.repeat(20)}\n`;
 
-  // Identify main tasks (no Origin: in description, OR no description)
-  const mainTasks = data.tasks.filter(t => {
-    if (!t.description) return true;  // No description = main task
-    return !t.description.includes('Origin:');  // Has description but no Origin: = main task
-  });
-
-  // Group subtasks by parent CONTENT (not ID!)
-  const subtasksByParentContent = new Map<string, Task[]>();
-
-  for (const task of data.tasks) {
-    // Skip if not a subtask
-    if (!task.description?.includes('Origin:')) continue;
-    
-    // Extract parent name from description
-    const originMatch = task.description.match(/Origin:([^\nDuration]+)/);
-    if (!originMatch) {
-      console.warn(`Could not parse Origin from: ${task.description}`);
-      continue;
+  // ✅ NEW: Build hierarchical structure using JSON failures
+  
+  // Step 1: Get all failed tasks from JSON
+  const failedTasksMap = new Map<string, FailedTask>();
+  const failedSubtasksByParent = new Map<string, FailedTask[]>();
+  
+  if (data.failedTasksJson) {
+    for (const failed of data.failedTasksJson.failed_tasks) {
+      failedTasksMap.set(failed.id, failed);
+      
+      if (failed.is_subtask && failed.parent_id) {
+        // Group by base parent ID
+        const parentBaseId = failed.parent_id.split('_')[0];
+        if (!failedSubtasksByParent.has(parentBaseId)) {
+          failedSubtasksByParent.set(parentBaseId, []);
+        }
+        failedSubtasksByParent.get(parentBaseId)!.push(failed);
+      }
     }
-    
-    const parentName = originMatch[1].trim().replace(/❗/g, '').trim();
-    
-    // Store subtask grouped by parent name
-    if (!subtasksByParentContent.has(parentName)) {
-      subtasksByParentContent.set(parentName, []);
-    }
-    subtasksByParentContent.get(parentName)!.push(task);
   }
 
-  console.log(`📊 Main tasks: ${mainTasks.length}`);
-  console.log(`📊 Subtasks grouped: ${subtasksByParentContent.size} parents`);
+  // Step 2: Build parent task lookup from completed tasks
+  const taskById = new Map<string, Task>();
+  const taskByBaseId = new Map<string, Task>();
+  
+  for (const task of data.tasks) {
+    if (!task.task_id) continue;
+    
+    taskById.set(task.task_id, task);
+    
+    const baseId = task.task_id.split('_')[0];
+    if (!taskByBaseId.has(baseId)) {
+      taskByBaseId.set(baseId, task);
+    }
+  }
 
-  // Display each main task with its subtasks
-  for (const task of mainTasks) {
-    const symbol = this.getTaskSymbol(task);
-    const cleanName = task.content.replace(/\[([^\]]+)\]/g, '').trim();
-    const metadata = getOriginalMetadataString(task.content);
+  // Step 3: Group completed subtasks by parent
+  const completedSubtasksByParent = new Map<string, Task[]>();
+  const processedSubtasks = new Set<string>();
+
+  for (const task of data.tasks) {
+    if (!task.origin_task) continue;  // Not a subtask
     
-    text += `${symbol} ${cleanName}`;
-    if (metadata) {
-      text += ` ${metadata}`;
-    }
+    // Find parent by ID (exact or base match)
+    const originBase = task.origin_task.split('_')[0];
+    const parent = taskById.get(task.origin_task) || taskByBaseId.get(originBase);
     
-    // Add streak info
-    const streak = data.streaks.find(s => s.task_name === task.content);
-    if (streak && streak.current_streak > 1) {
-      text += ` [${formatArabicStreak(streak.current_streak)} بدون إنقطاع]`;
-    }
-    
-    text += '\n';
-    
-    // ✅ FIX: Find subtasks by CONTENT matching (try both with and without ❗)
-    const cleanTaskName = task.content.replace(/❗/g, '').trim();
-    const subtasks = subtasksByParentContent.get(cleanTaskName) || 
-                     subtasksByParentContent.get(task.content) || [];
-    
-    if (subtasks.length > 0) {
-      console.log(`📋 Found ${subtasks.length} subtasks for "${cleanTaskName}"`);
-    }
-    
-    // Display subtasks
-    for (const subtask of subtasks) {
-      const subSymbol = subtask.status === 'done' ? '✓' : '✕';
-      const subCleanName = subtask.content.replace(/\[([^\]]+)\]/g, '').trim();
-      const subMetadata = getOriginalMetadataString(subtask.content);
+    if (parent) {
+      const parentBaseId = parent.task_id.split('_')[0];
       
-      text += `${subSymbol} ${subCleanName}`;
-      if (subMetadata) {
-        text += ` ${subMetadata}`;
+      if (!completedSubtasksByParent.has(parentBaseId)) {
+        completedSubtasksByParent.set(parentBaseId, []);
+      }
+      completedSubtasksByParent.get(parentBaseId)!.push(task);
+      processedSubtasks.add(task.task_id);
+    }
+  }
+
+  // Step 4: Build output - process main tasks
+  const processedParents = new Set<string>();
+  
+  for (const task of data.tasks) {
+    if (processedSubtasks.has(task.task_id)) continue;  // Skip subtasks
+    
+    const taskBaseId = task.task_id.split('_')[0];
+    
+    // Get subtasks for this parent
+    const completedSubs = completedSubtasksByParent.get(taskBaseId) || [];
+    const failedSubs = failedSubtasksByParent.get(taskBaseId) || [];
+    const totalSubs = completedSubs.length + failedSubs.length;
+    
+    // Determine status symbol
+    let symbol: string;
+    if (totalSubs === 0) {
+      // No subtasks - use task status
+      symbol = task.status === 'done' ? '✅' : '❌';
+    } else {
+      // Has subtasks - determine by completion
+      if (failedSubs.length === 0) {
+        symbol = '✅';  // All complete
+      } else if (completedSubs.length === 0) {
+        symbol = '❌';  // All failed
+      } else {
+        symbol = '⚠️';  // Partial
+      }
+    }
+    
+    // Add main task
+    text += `${symbol} ${task.content}\n`;
+    
+    // Add completed subtasks
+    for (const sub of completedSubs) {
+      text += `✓ ${sub.content}\n`;
+    }
+    
+    // Add failed subtasks
+    for (const sub of failedSubs) {
+      text += `✕ ${sub.content}\n`;
+    }
+    
+    processedParents.add(taskBaseId);
+  }
+  
+  // Step 5: Add standalone failed tasks (no parent exists)
+  if (data.failedTasksJson) {
+    for (const failed of data.failedTasksJson.failed_tasks) {
+      if (failed.is_subtask) continue;  // Only main tasks
+      
+      // Check if already shown (parent was completed)
+      const baseId = failed.id.split('_')[0];
+      if (processedParents.has(baseId)) continue;
+      
+      // Check if parent exists in completed tasks
+      const parentExists = taskById.has(failed.id) || taskByBaseId.has(baseId);
+      if (parentExists) continue;
+      
+      // Add as standalone failed task
+      const failedSubs = failedSubtasksByParent.get(baseId) || [];
+      
+      text += `❌ ${failed.content}\n`;
+      
+      // Add its failed subtasks
+      for (const sub of failedSubs) {
+        text += `✕ ${sub.content}\n`;
+      }
+      
+      processedParents.add(baseId);
+    }
+  }
+
+  // Active streaks
+  if (data.streaks.length > 0) {
+    text += `\n🔥 السلاسل النشطة:\n`;
+    for (const streak of data.streaks.slice(0, 5)) {
+      text += `- ${streak.task_name}: ${formatArabicStreak(streak.current_streak)}`;
+      if (streak.current_streak === streak.best_streak && streak.current_streak > 1) {
+        text += ' 🎉 (رقم قياسي!)';
       }
       text += '\n';
     }
-    
-    text += '\n'; // Space between task groups
+    text += '\n';
   }
 
-  // Challenge
-  if (data.dailyChallenge) {
-    text += `\n🎯 التحدي اليومي: ${challengeStatus}\n`;
-    text += `"${data.dailyChallenge.challenge_text}"\n\n`;
+  // Daily challenge
+  if (data.challenge) {
+    const challengeStatus = data.challengeCompleted ? '✅' : '❌';
+    text += `🎯 التحدي اليومي: ${challengeStatus}\n`;
+    text += `"${data.challenge.challenge_text}"\n\n`;
   }
 
   // Weekly goals
   if (data.weeklyGoals) {
     text += `🎯 الأهداف الأسبوعية:\n`;
     text += `${data.weeklyGoals.goals_text}\n\n`;
+  } else {
+    text += `🎯 الأهداف الأسبوعية: لا توجد أهداف محددة\n\n`;
   }
 
-  text += `\nهل تريد إكمال التحليل بالذكاء الاصطناعي؟\n`;
+  // Call to action
+  text += `هل تريد إكمال التحليل بالذكاء الاصطناعي؟\n`;
   text += `استخدم /confirm للمتابعة أو /cancel للإلغاء`;
 
   return text;

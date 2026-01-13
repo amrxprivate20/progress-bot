@@ -216,7 +216,7 @@ async function handleTodoistWebhookEndpoint(
       
       try {
         // FIXED: Added db as 4th parameter
-        await sendTaskNotification(result.task, chatId, botToken, db, settings);
+        await sendTaskNotification(result.task, chatId, botToken, db);
         console.log('✅ Notification sent successfully');
       } catch (err) {
         console.error('❌ Notification failed:', err);

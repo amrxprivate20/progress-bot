@@ -168,35 +168,31 @@ export async function syncAndDetectFailuresForDate(
     let logged = 0;
     let skipped = 0;
     
-    for (const task of failedTasks) {
-      try {
-        // ✅ Parse Origin from description
-        const originMatch = task.description?.match(/Origin:([^\n]+)/);
-        const parentTaskName = originMatch ? originMatch[1].trim() : null;
-        
-        const parentId = task.parent_id || null;
-        const isOrigin = !parentId;
-        
-        await db.insert('tasks', {
-          task_id: `auto_fail_${task.id}_${Date.now()}`,
-          content: task.content,
-          description: task.description,
-          completed_at: end.toISOString(),
-          status: 'failed',
-          is_origin: isOrigin,
-          origin_task: parentId,
-          duration_minutes: 0,
-          priority: task.priority,
-          created_at: new Date().toISOString(),
-        });
-        
-        console.log(`✅ Logged failure: ${task.content} (P${5 - task.priority})${parentId ? ' [subtask of ' + parentId + ']' : ''}`);
-        logged++;
-      } catch (error) {
-        console.error(`❌ Failed to log task: ${task.content}`, error);
-        skipped++;
-      }
-    }
+for (const task of failedTasks) {
+  try {
+    const parentId = task.parent_id || null;
+    const isOrigin = !parentId;
+    
+    await db.insert('tasks', {
+      task_id: `auto_fail_${task.id}_${Date.now()}`,
+      content: task.content,
+      description: task.description,
+      completed_at: end.toISOString(),
+      status: 'failed',
+      is_origin: isOrigin,
+      origin_task: parentId,
+      duration_minutes: 0,
+      priority: task.priority,
+      created_at: new Date().toISOString(),
+    });
+    
+    console.log(`✅ Logged failure: ${task.content} (P${5 - task.priority})${parentId ? ' [subtask of ' + parentId + ']' : ''}`);
+    logged++;
+  } catch (error) {
+    console.error(`❌ Failed to log task: ${task.content}`, error);
+    skipped++;
+  }
+}
 
     return {
       detected: failedTasks.length,
