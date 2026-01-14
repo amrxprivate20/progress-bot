@@ -2,7 +2,7 @@
 // ============================================
 // Daily Failures Manager (JSON-based)
 // ============================================
-// FIXED VERSION - Compatible with your SupabaseClient
+// CLEAN VERSION - No duplicates
 
 import { SupabaseClient, op } from '../database/client';
 import { getEgyptDayBoundaries } from '../utils/timezone';
@@ -124,10 +124,9 @@ export async function upsertDailyFailures(
   dailyFailures: DailyFailures
 ): Promise<void> {
   try {
-    // ✅ FIXED: Use filter object instead of direct property
     const existing = await db.select('daily_failures', {
-  filter: { failure_date: op.eq(dailyFailures.date) },  // ← CORRECT
-});
+      filter: { failure_date: op.eq(dailyFailures.date) },
+    });
     
     const failuresJson = JSON.stringify(dailyFailures);
     
@@ -135,7 +134,7 @@ export async function upsertDailyFailures(
       // Update existing
       await db.update(
         'daily_failures',
-        { failure_date: dailyFailures.date }, // WHERE clause
+        { failure_date: dailyFailures.date },
         {
           failures_json: failuresJson,
           last_synced_at: new Date().toISOString(),
@@ -188,11 +187,12 @@ export async function getDailyFailures(
 
 /**
  * Get failed subtasks for a specific parent
+ * ✅ FIXED: Now supports BOTH ID-based and NAME-based matching
  */
 export async function getFailedSubtasksForParent(
   db: SupabaseClient,
   date: string,
-  parentName: string  // ← Changed from parentId to parentName
+  parentIdentifier: string  // Can be ID or name
 ): Promise<FailedTask[]> {
   const dailyFailures = await getDailyFailures(db, date);
   
@@ -200,19 +200,55 @@ export async function getFailedSubtasksForParent(
     return [];
   }
   
-  // Match by parent_id (exact or base ID)
-  const parentBaseId = parentId.split('_')[0];
+  // Try to match by parent_id first (for ID-based calls)
+  const parentBaseId = parentIdentifier.split('_')[0];
   
   return dailyFailures.failed_tasks.filter(task => {
     if (!task.parent_id) return false;
     
     const taskParentBase = task.parent_id.split('_')[0];
     
+    // Match by full ID, base ID, or parent name
     return (
-      task.parent_id === parentId ||
+      task.parent_id === parentIdentifier ||
       task.parent_id === parentBaseId ||
-      taskParentBase === parentBaseId
+      taskParentBase === parentBaseId ||
+      task.parent_content === parentIdentifier
     );
+  });
+}
+/**
+ * Get failed subtasks by parent NAME (recommended for recurring tasks)
+ * This is the ONLY definition of this function - no duplicates!
+ */
+export async function getFailedSubtasksByParentName(
+  db: SupabaseClient,
+  date: string,
+  parentName: string
+): Promise<FailedTask[]> {
+  const dailyFailures = await getDailyFailures(db, date);
+  
+  if (!dailyFailures) {
+    return [];
+  }
+  
+  // Helper to extract clean name
+  const getCleanTaskName = (content: string): string => {
+    return content
+      .replace(/\[([^\]]+)\]/g, '') // Remove brackets
+      .replace(/\(origin:[^)]+\)/gi, '') // Remove origin reference
+      .replace(/❗/g, '') // Remove origin marker
+      .trim();
+  };
+  
+  const cleanParentName = getCleanTaskName(parentName);
+  
+  return dailyFailures.failed_tasks.filter(task => {
+    if (!task.is_subtask || !task.parent_content) return false;
+    
+    const taskParentName = getCleanTaskName(task.parent_content);
+    
+    return taskParentName === cleanParentName;
   });
 }
 

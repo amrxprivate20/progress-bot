@@ -137,31 +137,6 @@ bot.command('progress', async (ctx) => {
       return;
     }
 
-    // Step 2: NEW - Sync with Todoist to detect failures
-    await ctx.reply('🔄 جاري المزامنة مع Todoist...');
-    
-    const { syncAndDetectFailuresForDate } = await import('../services/failure-detection');
-    const syncResult = await syncAndDetectFailuresForDate(
-      ctx.db, 
-      ctx.settings,
-      undefined // Use today by default
-    );
-
-    // Notify user about sync results
-    if (syncResult.logged > 0) {
-      await ctx.reply(
-        `✅ تمت المزامنة مع Todoist\n` +
-        `❌ تم اكتشاف ${syncResult.logged} مهام لم يتم إنجازها`
-      );
-    } else if (syncResult.detected > 0 && syncResult.skipped > 0) {
-      await ctx.reply(
-        `✅ تمت المزامنة مع Todoist\n` +
-        `ℹ️ ${syncResult.skipped} مهام فاشلة مسجلة مسبقاً`
-      );
-    } else {
-      await ctx.reply('✅ تمت المزامنة مع Todoist - كل شيء على ما يرام!');
-    }
-
     // Step 3: Generate preview (now includes failed tasks)
     await ctx.reply('📊 جاري إعداد الملخص...');
     const preview = await reportGen.generatePreview();
