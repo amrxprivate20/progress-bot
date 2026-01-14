@@ -4,7 +4,7 @@
 // ============================================
 // FIXED VERSION - Compatible with your SupabaseClient
 
-import { SupabaseClient } from '../database/client';
+import { SupabaseClient, op } from '../database/client';
 import { getEgyptDayBoundaries } from '../utils/timezone';
 
 /**
@@ -126,8 +126,8 @@ export async function upsertDailyFailures(
   try {
     // ✅ FIXED: Use filter object instead of direct property
     const existing = await db.select('daily_failures', {
-      filter: { failure_date: dailyFailures.date },
-    });
+  filter: { failure_date: op.eq(dailyFailures.date) },  // ← CORRECT
+});
     
     const failuresJson = JSON.stringify(dailyFailures);
     
@@ -166,9 +166,8 @@ export async function getDailyFailures(
   date: string
 ): Promise<DailyFailures | null> {
   try {
-    // ✅ FIXED: Use filter object
     const result = await db.select('daily_failures', {
-      filter: { failure_date: date },
+      filter: { failure_date: op.eq(date) }, 
     });
     
     if (!result || result.length === 0) {
@@ -193,7 +192,7 @@ export async function getDailyFailures(
 export async function getFailedSubtasksForParent(
   db: SupabaseClient,
   date: string,
-  parentId: string
+  parentName: string  // ← Changed from parentId to parentName
 ): Promise<FailedTask[]> {
   const dailyFailures = await getDailyFailures(db, date);
   

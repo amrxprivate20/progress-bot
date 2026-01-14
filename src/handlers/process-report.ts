@@ -246,7 +246,7 @@ async function processFullReport(
     // Save report to database
     console.log('💾 Saving report to database...');
     await sendTelegramMessage(chatId, botToken, '💾 جاري حفظ التقرير...');
-    const stats = reportGen.calculateStatistics(reportData.tasks);
+    const stats = reportGen.calculateStatistics(reportData.tasks, reportData.failedTasksJson);
 
     await db.insert('daily_reports', {
       report_date: reportData.date,

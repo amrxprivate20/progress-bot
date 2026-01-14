@@ -179,7 +179,7 @@ export class ReportProcessor extends DurableObject<Env> {
 
       // Save report to database
       console.log(`💾 [Job ${jobId}] Saving report to database...`);
-      const stats = reportGen.calculateStatistics(reportData.tasks);
+      const stats = reportGen.calculateStatistics(reportData.tasks, reportData.failedTasksJson);
 
       await db.upsert('daily_reports', {
         report_date: reportData.date,
