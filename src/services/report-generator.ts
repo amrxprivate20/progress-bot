@@ -556,20 +556,25 @@ export class ReportGenerator {
       console.log(`   Failed subs: ${failedSubs.length}`);
 
       const totalSubs = completedSubs.length + failedSubs.length;
-      
+
       // Determine status symbol
       let symbol: string;
+      const mainCompleted = task.status === 'done';
+
       if (totalSubs === 0) {
         // No subtasks - use task status
-        symbol = task.status === 'done' ? '✅' : '❌';
+        symbol = mainCompleted ? '✅' : '❌';
       } else {
-        // Has subtasks - determine by completion
-        if (failedSubs.length === 0) {
-          symbol = '✅';  // All complete
-        } else if (completedSubs.length === 0) {
-          symbol = '❌';  // All failed
+        // Has subtasks - determine by subtask completion
+        const allSubsComplete = failedSubs.length === 0;
+        const allSubsFailed = completedSubs.length === 0;
+
+        if (allSubsComplete) {
+          symbol = '✅';  // All subtasks complete
+        } else if (allSubsFailed) {
+          symbol = '❌';  // All subtasks failed (even if main completed)
         } else {
-          symbol = '⚠️';  // Partial
+          symbol = '⚠️';  // Partial (some subs complete, some failed)
         }
       }
       
@@ -617,22 +622,31 @@ export class ReportGenerator {
     }
     
     // ===============================================================================
-    // Step 5: Add standalone failed tasks (no parent exists)
+    // Step 5: Add standalone failed tasks (with their failed subtasks)
     // ===============================================================================
     if (data.failedTasksJson) {
       console.log(`📊 Checking for standalone failed tasks...`);
-      
+
       for (const failed of data.failedTasksJson.failed_tasks) {
-        if (failed.is_subtask) continue; // Skip subtasks, they're already shown
-        
+        if (failed.is_subtask) continue; // Skip subtasks, they're handled with their parents
+
         const cleanName = extractCleanTaskName(failed.content);
-        
+
         // Only show if not already processed as completed
         if (!processedParentNames.has(cleanName)) {
           console.log(`   ❌ Standalone failed: "${cleanName}"`);
-          
+
           text += '\n';
           text += `❌ ${cleanName}\n`;
+
+          // Also show failed subtasks for this failed main task
+          const failedSubs = failedSubtasksByParentName.get(cleanName) || [];
+          for (const sub of failedSubs) {
+            const subCleanName = extractCleanTaskName(sub.content);
+            text += `   ✕ ${subCleanName}\n`;
+            console.log(`      ✕ Failed subtask: "${subCleanName}"`);
+          }
+
           processedParentNames.add(cleanName);
         }
       }

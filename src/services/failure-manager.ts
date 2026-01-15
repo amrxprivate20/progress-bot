@@ -39,41 +39,45 @@ export async function syncFailuresForDate(
   date: string,
   todoistTasks: any[],
   completedTaskIds: Set<string>,
-  priorityThreshold: number = 2
+  priorityThreshold: number = 2,
+  allTasks?: any[]  // All tasks for parent lookup (not just filtered)
 ): Promise<DailyFailures> {
   console.log(`🔄 Syncing failures for date: ${date}`);
-  
+
+  // Use allTasks for parent lookup if provided, otherwise fall back to todoistTasks
+  const tasksForParentLookup = allTasks || todoistTasks;
+
   const failedTasks: FailedTask[] = [];
-  
+
   // Filter for failed recurring tasks
   const { start, end } = getEgyptDayBoundaries(date);
-  
+
   for (const task of todoistTasks) {
     // Skip if not recurring or already completed
     if (!task.due?.is_recurring) continue;
     if (completedTaskIds.has(task.id)) continue;
-    
+
     // Check due date falls on this day
     const dueDate = new Date(task.due.date);
     if (dueDate < start || dueDate > end) continue;
-    
+
     // Check priority threshold (Todoist: 1=lowest, 4=highest)
     // Our threshold: 2 means P1-P2 only (priority 3-4 in Todoist)
     const todoistPriority = task.priority || 1;
     const ourPriority = 5 - todoistPriority; // Convert: Todoist 4 → Our P1
-    
+
     if (ourPriority > priorityThreshold) {
       console.log(`⏭️ Ignored by priority: ${task.content} (P${ourPriority} > P${priorityThreshold})`);
       continue;
     }
-    
+
     // Determine if subtask
     const isSubtask = !!task.parent_id;
-    
-    // Get parent info if subtask
+
+    // Get parent info if subtask - search in ALL tasks, not just filtered
     let parentContent: string | null = null;
     if (isSubtask && task.parent_id) {
-      const parentTask = todoistTasks.find(t => t.id === task.parent_id);
+      const parentTask = tasksForParentLookup.find(t => t.id === task.parent_id);
       if (parentTask) {
         parentContent = parentTask.content;
       }
@@ -134,7 +138,7 @@ export async function upsertDailyFailures(
       // Update existing
       await db.update(
         'daily_failures',
-        { failure_date: dailyFailures.date },
+        { failure_date: op.eq(dailyFailures.date) },
         {
           failures_json: failuresJson,
           last_synced_at: new Date().toISOString(),
