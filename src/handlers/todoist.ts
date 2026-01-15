@@ -9,12 +9,10 @@
 // ============================================
 
 import type { SupabaseClient } from '../database/client';
-import type { SettingsManager } from '../database/settings';
+import { SETTINGS_KEYS, SettingsManager } from '../database/settings';
 import type { TodoistWebhookEvent, Task, Streak } from '../types';
 import { op } from '../database/client';
-import { SETTINGS_KEYS } from '../database/settings';
 import { logError } from '../utils/errors';
-import { parseTaskMetadata, getOriginalMetadataString } from '../utils/task-parser';
 import {
   syncFailuresForDate,
   getDailyFailures,
@@ -22,6 +20,11 @@ import {
   removeFromFailedTasks,
   type FailedTask,
 } from '../services/failure-manager';
+import {
+  parseTaskMetadata,
+  getOriginalMetadataString,
+  extractCleanTaskName, 
+} from '../utils/task-parser';
 import { 
   getEgyptDateString, 
   getEgyptDayBoundaries,
@@ -768,7 +771,17 @@ export async function syncFailuresFromTodoist(
 }
 
 /**
- * ✅ FIX 3: Improved notification with ALL subtasks (completed + failed)
+ * ✅ FIX 3: FIXED - NAME-BASED notification with ALL subtasks
+ * 
+ * WHAT CHANGED:
+ * - Old: Matched failed subtasks by parent_id (IDs change daily!)
+ * - New: Matches by parent_content (names are stable!)
+ * 
+ * HOW IT WORKS:
+ * 1. Get main task (completed or parent)
+ * 2. Get completed subtasks from DB (by origin_task relationship)
+ * 3. Get failed subtasks from JSON BY MATCHING CLEAN NAMES ✅ NEW!
+ * 4. Build notification with ALL subtasks
  */
 export async function sendTaskNotification(
   task: Task,
@@ -816,7 +829,7 @@ export async function sendTaskNotification(
       mainTask = task;
     }
 
-    // STEP 2: Get completed subtasks from DATABASE
+    // STEP 2: Get completed subtasks from DATABASE (unchanged)
     if (mainTask) {
       const parentId = task.origin_task || task.task_id;
       const parentBaseId = parentId.split('_')[0];
@@ -831,29 +844,33 @@ export async function sendTaskNotification(
       console.log(`📋 Found ${completedSubtasks.length} completed subtasks in DB`);
     }
 
-    // ✅ STEP 3: Get failed subtasks from JSON - IMPROVED MATCHING
+   // ✅ STEP 3: Get failed subtasks from JSON - NAME-BASED MATCHING
     if (mainTask) {
       const parentId = mainTask.task_id;
       const parentBaseId = parentId.split('_')[0];
       
-      console.log(`📊 Fetching failed subtasks for parent ID: ${parentId} (base: ${parentBaseId})`);
+      // ✅ NEW: Extract clean name for matching
+      const mainTaskCleanName = extractCleanTaskName(mainTask.content);
+      
+      console.log(`📊 Fetching failed subtasks for parent: "${mainTaskCleanName}"`);
+      console.log(`   (ID: ${parentId}, base: ${parentBaseId})`);
       
       try {
         const dailyFailures = await getDailyFailures(db, egyptDate);
         
         if (dailyFailures) {
-          // ✅ Match failed subtasks by parent_id (with base ID fallback)
+          // ✅ NEW: Match by CLEAN NAME instead of ID
           for (const failed of dailyFailures.failed_tasks) {
-            if (!failed.is_subtask || !failed.parent_id) continue;
+            if (!failed.is_subtask || !failed.parent_content) continue;
             
-            const failedParentBase = failed.parent_id.split('_')[0];
+            // Clean the parent name from JSON
+            const failedParentCleanName = extractCleanTaskName(failed.parent_content);
             
-            // Match by full ID or base ID
-            if (failed.parent_id === parentId || 
-                failed.parent_id === parentBaseId ||
-                failedParentBase === parentBaseId) {
+            // ✅ CRITICAL: Match by NAME, not ID!
+            if (failedParentCleanName === mainTaskCleanName) {
               failedSubtasks.push(failed);
               console.log(`  ✕ Matched failed subtask: ${failed.content}`);
+              console.log(`     (parent name: "${failedParentCleanName}" === "${mainTaskCleanName}" ✅)`);
             }
           }
         }
@@ -867,69 +884,69 @@ export async function sendTaskNotification(
 
     console.log(`📊 Summary: ${completedSubtasks.length} completed, ${failedSubtasks.length} failed`);
 
-    // STEP 4: Build notification message
-const totalSubtasks = completedSubtasks.length + failedSubtasks.length;
+    // STEP 4: Build notification message (unchanged)
+    const totalSubtasks = completedSubtasks.length + failedSubtasks.length;
 
-// Helper to clean task name (remove all metadata)
-const cleanTaskName = (content: string): string => {
-  return content
-    .replace(/\[([^\]]+)\]/g, '') // Remove brackets
-    .replace(/❗/g, '') // Remove origin marker
-    .replace(/\(origin:[^)]+\)/gi, '') // Remove origin reference
-    .trim();
-};
+    // Helper to clean task name (remove all metadata)
+    const cleanTaskName = (content: string): string => {
+      return content
+        .replace(/\[([^\]]+)\]/g, '') // Remove brackets
+        .replace(/❗/g, '') // Remove origin marker
+        .replace(/\(origin:[^)]+\)/gi, '') // Remove origin reference
+        .trim();
+    };
 
-if (totalSubtasks === 0) {
-  // No subtasks - simple task
-  const symbol = mainTask.status === 'done' ? '✅' : '❌';
-  const cleanName = cleanTaskName(mainTask.content);
-  const metadata = getOriginalMetadataString(mainTask.content);
-  
-  message = `${symbol} ${cleanName}`;
-  if (metadata) {
-    message += ` ${metadata}`;
-  }
-} else {
-  // Has subtasks - determine parent symbol
-  const allComplete = failedSubtasks.length === 0;
-  const allFailed = completedSubtasks.length === 0;
-  
-  let symbol: string;
-  if (allComplete) {
-    symbol = '✅';
-  } else if (allFailed) {
-    symbol = '❌';
-  } else {
-    symbol = '⚠️';
-  }
-  
-  // Clean parent name but keep metadata separate
-  const cleanName = cleanTaskName(mainTask.content);
-  const metadata = getOriginalMetadataString(mainTask.content);
-  
-  message = `${symbol} ${cleanName}`;
-  if (metadata) {
-    message += ` ${metadata}`;
-  }
-  message += '\n';
-  
-  // Add completed subtasks (cleaned)
-  for (const sub of completedSubtasks) {
-    const subClean = cleanTaskName(sub.content);
-    const subMetadata = getOriginalMetadataString(sub.content);
-    
-    message += `\n✓ ${subClean}`;
-    if (subMetadata) {
-      message += ` ${subMetadata}`;
+    if (totalSubtasks === 0) {
+      // No subtasks - simple task
+      const symbol = mainTask.status === 'done' ? '✅' : '❌';
+      const cleanName = cleanTaskName(mainTask.content);
+      const metadata = getOriginalMetadataString(mainTask.content);
+      
+      message = `${symbol} ${cleanName}`;
+      if (metadata) {
+        message += ` ${metadata}`;
+      }
+    } else {
+      // Has subtasks - determine parent symbol
+      const allComplete = failedSubtasks.length === 0;
+      const allFailed = completedSubtasks.length === 0;
+      
+      let symbol: string;
+      if (allComplete) {
+        symbol = '✅';
+      } else if (allFailed) {
+        symbol = '❌';
+      } else {
+        symbol = '⚠️';
+      }
+      
+      // Clean parent name but keep metadata separate
+      const cleanName = cleanTaskName(mainTask.content);
+      const metadata = getOriginalMetadataString(mainTask.content);
+      
+      message = `${symbol} ${cleanName}`;
+      if (metadata) {
+        message += ` ${metadata}`;
+      }
+      message += '\n';
+      
+      // Add completed subtasks (cleaned)
+      for (const sub of completedSubtasks) {
+        const subClean = cleanTaskName(sub.content);
+        const subMetadata = getOriginalMetadataString(sub.content);
+        
+        message += `\n✓ ${subClean}`;
+        if (subMetadata) {
+          message += ` ${subMetadata}`;
+        }
+      }
+      
+      // Add failed subtasks (cleaned)
+      for (const sub of failedSubtasks) {
+        const subClean = cleanTaskName(sub.content);
+        message += `\n✕ ${subClean}`;
+      }
     }
-  }
-  
-  // Add failed subtasks (cleaned)
-  for (const sub of failedSubtasks) {
-    const subClean = cleanTaskName(sub.content);
-    message += `\n✕ ${subClean}`;
-  }
-}
 
     // Add task details
     const displayTask = mainTask;
@@ -978,7 +995,6 @@ if (totalSubtasks === 0) {
     throw error;
   }
 }
-
 async function sendTelegramMessage(
   botToken: string,
   chatId: string,
