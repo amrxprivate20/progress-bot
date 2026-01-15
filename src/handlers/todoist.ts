@@ -264,6 +264,14 @@ export async function handleTodoistWebhook(
       limit: 1
     });
 
+    // ✅ FIX: Trigger background sync to rebuild failed JSON
+    console.log('🔄 Triggering background Todoist sync...');
+    syncFailuresFromTodoist(egyptDate, db, settings).then(() => {
+      console.log(`✅ Background sync complete - failures updated in JSON`);
+    }).catch(err => {
+      console.error('❌ Background sync failed (non-critical):', err);
+    });
+
     return {
       success: true,
       message: `Task updated from failed to completed: ${event.event_data.content}`,
