@@ -544,39 +544,93 @@ export class ReportGenerator {
     }
     
     // Step 5: Add standalone failed tasks (no parent exists)
-    if (data.failedTasksJson) {
-      for (const failed of data.failedTasksJson.failed_tasks) {
-        if (failed.is_subtask) continue;  // Only main tasks
-        
-        const cleanName = getCleanTaskName(failed.content);
-        
-        // Check if already shown (parent was completed)
-        if (processedParentNames.has(cleanName)) continue;
-        
-        // Check if parent exists in completed tasks
-        const parentExists = tasksByName.has(cleanName);
-        if (parentExists) continue;
-        
-        // ✅ FIX: Add line break BEFORE failed task (except first)
-        if (!isFirstTask) {
-          text += '\n';
-        }
-        isFirstTask = false;
-        
-        // Add as standalone failed task
-        const failedSubs = failedSubtasksByParentName.get(cleanName) || [];
-        
-        text += `❌ ${failed.content}\n`;
-        
-        // Add its failed subtasks
-        for (const sub of failedSubs) {
-          const subCleanName = getCleanTaskName(sub.content);
-          text += `   ✕ ${subCleanName}\n`;
-        }
-        
-        processedParentNames.add(cleanName);
-      }
+if (data.failedTasksJson) {
+  console.log(`📊 Checking for standalone failed tasks...`);
+  
+  for (const failed of data.failedTasksJson.failed_tasks) {
+    const cleanName = getCleanTaskName(failed.content);
+    
+    // Check if already shown (parent was completed)
+    if (processedParentNames.has(cleanName)) {
+      console.log(`  ⏭️ Already shown: ${cleanName}`);
+      continue;
     }
+    
+    // ✅ For subtasks, check if parent was shown
+    if (failed.is_subtask && failed.parent_content) {
+      const parentCleanName = getCleanTaskName(failed.parent_content);
+      
+      if (processedParentNames.has(parentCleanName)) {
+        console.log(`  ⏭️ Parent shown for: ${cleanName} (parent: ${parentCleanName})`);
+        continue; // Already shown under parent
+      }
+      
+      // Parent not shown - need to show parent + subtasks
+      console.log(`  🆕 Showing orphaned subtask's parent: ${parentCleanName}`);
+      
+      // ✅ Add line break before task (except first)
+      if (!isFirstTask) {
+        text += '\n';
+      }
+      isFirstTask = false;
+      
+      // Check if parent exists in failed tasks (as main task)
+      const parentInFailed = data.failedTasksJson.failed_tasks.find(
+        t => !t.is_subtask && getCleanTaskName(t.content) === parentCleanName
+      );
+      
+      if (parentInFailed) {
+        // Show parent with its original content (with metadata)
+        text += `❌ ${parentInFailed.content}\n`;
+      } else {
+        // Parent not in failed list - create from parent_content
+        text += `❌ ${failed.parent_content}\n`;
+      }
+      
+      // Show ALL subtasks for this parent
+      const allSubsForParent = data.failedTasksJson.failed_tasks.filter(
+        t => t.is_subtask && t.parent_content && 
+        getCleanTaskName(t.parent_content) === parentCleanName
+      );
+      
+      for (const sub of allSubsForParent) {
+        const subCleanName = getCleanTaskName(sub.content);
+        text += `   ✕ ${subCleanName}\n`;
+      }
+      
+      processedParentNames.add(parentCleanName);
+      continue;
+    }
+    
+    // ✅ Main task without parent or subtasks
+    if (!failed.is_subtask) {
+      console.log(`  🆕 Showing standalone failed main task: ${cleanName}`);
+      
+      // Check if this task has subtasks
+      const subsForThisTask = data.failedTasksJson.failed_tasks.filter(
+        t => t.is_subtask && t.parent_content && 
+        getCleanTaskName(t.parent_content) === cleanName
+      );
+      
+      // ✅ Add line break before task (except first)
+      if (!isFirstTask) {
+        text += '\n';
+      }
+      isFirstTask = false;
+      
+      // Show task with original content (preserves metadata)
+      text += `❌ ${failed.content}\n`;
+      
+      // Add its subtasks
+      for (const sub of subsForThisTask) {
+        const subCleanName = getCleanTaskName(sub.content);
+        text += `   ✕ ${subCleanName}\n`;
+      }
+      
+      processedParentNames.add(cleanName);
+    }
+  }
+}
 
     // Challenge
     if (data.dailyChallenge) {

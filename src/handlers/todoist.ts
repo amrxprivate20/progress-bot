@@ -868,43 +868,68 @@ export async function sendTaskNotification(
     console.log(`📊 Summary: ${completedSubtasks.length} completed, ${failedSubtasks.length} failed`);
 
     // STEP 4: Build notification message
-    const totalSubtasks = completedSubtasks.length + failedSubtasks.length;
+const totalSubtasks = completedSubtasks.length + failedSubtasks.length;
+
+// Helper to clean task name (remove all metadata)
+const cleanTaskName = (content: string): string => {
+  return content
+    .replace(/\[([^\]]+)\]/g, '') // Remove brackets
+    .replace(/❗/g, '') // Remove origin marker
+    .replace(/\(origin:[^)]+\)/gi, '') // Remove origin reference
+    .trim();
+};
+
+if (totalSubtasks === 0) {
+  // No subtasks - simple task
+  const symbol = mainTask.status === 'done' ? '✅' : '❌';
+  const cleanName = cleanTaskName(mainTask.content);
+  const metadata = getOriginalMetadataString(mainTask.content);
+  
+  message = `${symbol} ${cleanName}`;
+  if (metadata) {
+    message += ` ${metadata}`;
+  }
+} else {
+  // Has subtasks - determine parent symbol
+  const allComplete = failedSubtasks.length === 0;
+  const allFailed = completedSubtasks.length === 0;
+  
+  let symbol: string;
+  if (allComplete) {
+    symbol = '✅';
+  } else if (allFailed) {
+    symbol = '❌';
+  } else {
+    symbol = '⚠️';
+  }
+  
+  // Clean parent name but keep metadata separate
+  const cleanName = cleanTaskName(mainTask.content);
+  const metadata = getOriginalMetadataString(mainTask.content);
+  
+  message = `${symbol} ${cleanName}`;
+  if (metadata) {
+    message += ` ${metadata}`;
+  }
+  message += '\n';
+  
+  // Add completed subtasks (cleaned)
+  for (const sub of completedSubtasks) {
+    const subClean = cleanTaskName(sub.content);
+    const subMetadata = getOriginalMetadataString(sub.content);
     
-    if (totalSubtasks === 0) {
-      // No subtasks - simple task
-      const symbol = mainTask.status === 'done' ? '✅' : '❌';
-      message = `${symbol} ${mainTask.content}`;
-    } else {
-      // Has subtasks - determine parent symbol
-      const allComplete = failedSubtasks.length === 0;
-      const allFailed = completedSubtasks.length === 0;
-      
-      let symbol: string;
-      if (allComplete) {
-        symbol = '✅';
-      } else if (allFailed) {
-        symbol = '❌';
-      } else {
-        symbol = '⚠️';
-      }
-      
-      message = `${symbol} ${mainTask.content}\n`;
-      
-      // Add completed subtasks
-      for (const sub of completedSubtasks) {
-        const subMetadata = getOriginalMetadataString(sub.content);
-        const subClean = sub.content.replace(/\[([^\]]+)\]/g, '').trim();
-        message += `\n✓ ${subClean}`;
-        if (subMetadata) {
-          message += ` ${subMetadata}`;
-        }
-      }
-      
-      // ✅ ADD FAILED SUBTASKS
-      for (const sub of failedSubtasks) {
-        message += `\n✕ ${sub.content}`;
-      }
+    message += `\n✓ ${subClean}`;
+    if (subMetadata) {
+      message += ` ${subMetadata}`;
     }
+  }
+  
+  // Add failed subtasks (cleaned)
+  for (const sub of failedSubtasks) {
+    const subClean = cleanTaskName(sub.content);
+    message += `\n✕ ${subClean}`;
+  }
+}
 
     // Add task details
     const displayTask = mainTask;
