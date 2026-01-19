@@ -195,22 +195,30 @@ const aiResponse = await aiClient.generateDailyReport({
       // Send results to user
       await this.sendReportResults(chatId, botToken, reportData, aiResponse);
 
-      // Update memory (REMOVED noisy messages)
+      // Update memory with detailed logging
 if (aiResponse.memoryUpdates && Object.keys(aiResponse.memoryUpdates).length > 0) {
   console.log(`🧠 [Job ${jobId}] Updating memory with ${Object.keys(aiResponse.memoryUpdates).length} categories...`);
+  console.log(`🧠 [Job ${jobId}] Memory updates object:`, JSON.stringify(aiResponse.memoryUpdates));
   
   try {
     // Log what we're updating
     for (const [category, content] of Object.entries(aiResponse.memoryUpdates)) {
-      console.log(`  📝 ${category}: ${content.substring(0, 100)}...`);
+      console.log(`  📝 Category: "${category}"`);
+      console.log(`  📝 Content preview: ${content.substring(0, 100)}...`);
     }
     
     await memoryMgr.updateMemory(aiResponse.memoryUpdates);
     console.log(`✅ [Job ${jobId}] Memory updated successfully`);
+    
+    // Send notification to user
+    await this.sendTelegramMessage(chatId, botToken, '🧠 تم تحديث الذاكرة بنجاح');
   } catch (memError) {
     console.error(`❌ [Job ${jobId}] Memory update failed:`, memError);
-    // Don't throw - continue with report
+    console.error(`❌ [Job ${jobId}] Memory error stack:`, (memError as Error).stack);
+    await this.sendTelegramMessage(chatId, botToken, '⚠️ فشل تحديث الذاكرة: ' + (memError as Error).message);
   }
+} else {
+  console.log(`ℹ️ [Job ${jobId}] No memory updates in AI response`);
 }
 
       // Check memory optimization
