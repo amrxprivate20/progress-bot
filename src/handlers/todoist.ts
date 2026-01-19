@@ -322,10 +322,14 @@ export async function handleTodoistWebhook(
 
     if (isSubtask && event.event_data.parent_id) {
   console.log('🔗 Updating parent task status...');
-  await updateParentTaskStatus(db, event.event_data.parent_id);
   
-  // ✅ NEW: Auto-complete parent in Todoist if all subtasks are done
-  await completeParentInTodoistIfAllDone(db, settings, event.event_data.parent_id, egyptDate);
+  const { withLock } = await import('../utils/locks');
+  const lockKey = `parent_update_${event.event_data.parent_id}`;
+  
+  await withLock(db, lockKey, async () => {
+    await updateParentTaskStatus(db, event.event_data.parent_id!);
+    await completeParentInTodoistIfAllDone(db, settings, event.event_data.parent_id!, egyptDate);
+  });
 }
 
     const updatedTasks = await db.select<Task>('tasks', {
@@ -489,10 +493,14 @@ export async function handleTodoistWebhook(
 
     if (isSubtask && event.event_data.parent_id) {
   console.log('🔗 Updating parent task status...');
-  await updateParentTaskStatus(db, event.event_data.parent_id);
   
-  // ✅ NEW: Auto-complete parent in Todoist if all subtasks are done
-  await completeParentInTodoistIfAllDone(db, settings, event.event_data.parent_id, egyptDate);
+  const { withLock } = await import('../utils/locks');
+  const lockKey = `parent_update_${event.event_data.parent_id}`;
+  
+  await withLock(db, lockKey, async () => {
+    await updateParentTaskStatus(db, event.event_data.parent_id!);
+    await completeParentInTodoistIfAllDone(db, settings, event.event_data.parent_id!, egyptDate);
+  });
 }
 
     if (!savedTask) {

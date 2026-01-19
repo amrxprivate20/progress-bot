@@ -135,16 +135,18 @@ constructor(apiKey: string, model: string = 'anthropic/claude-sonnet-4') {
    * Generate daily report analysis with unified prompt
    */
   async generateDailyReport(context: {
-    reportDate: string;
-    tasks: any[];
-    streaks: any[];
-    weeklyGoals: string | null;
-    dailyChallenge: string | null;
-    memory: Record<string, string>;
-    pastWeekSummary: string;
-    strategicGoals: string;
-    userAnswers?: Record<string, string>; // If Q&A was done
-  }): Promise<UnifiedAIResponse> {
+  reportDate: string;
+  tasks: any[];
+  failedTasksJson?: any; // ✅ ADD THIS
+  streaks: any[];
+  weeklyGoals: string | null;
+  dailyChallenge: string | null;
+  memory: Record<string, string>;
+  pastWeekSummary: string;
+  strategicGoals: string;
+  userAnswers?: Record<string, string>;
+  journalContent?: string;
+}): Promise<UnifiedAIResponse> {
     const prompt = this.buildUnifiedPrompt(context);
 
     const messages: AIMessage[] = [
@@ -269,51 +271,69 @@ Q: ما التحدي الرئيسي اللي واجهته النهاردة؟
   // Private Methods
   // ============================================
 
-  /**
-   * Build the unified prompt for daily report analysis
-   */
-  private buildUnifiedPrompt(context: {
-    reportDate: string;
-    tasks: any[];
-    streaks: any[];
-    weeklyGoals: string | null;
-    dailyChallenge: string | null;
-    memory: Record<string, string>;
-    pastWeekSummary: string;
-    strategicGoals: string;
-    userAnswers?: Record<string, string>;
-  }): string {
-    const {
-      reportDate,
-      tasks,
-      streaks,
-      weeklyGoals,
-      dailyChallenge,
-      memory,
-      pastWeekSummary,
-      strategicGoals,
-      userAnswers,
-    } = context;
+ /**
+ * Build the unified prompt for daily report analysis
+ */
+private buildUnifiedPrompt(context: {
+  reportDate: string;
+  tasks: any[];
+  failedTasksJson?: any;
+  streaks: any[];
+  weeklyGoals: string | null;
+  dailyChallenge: string | null;
+  memory: Record<string, string>;
+  pastWeekSummary: string;
+  strategicGoals: string;
+  userAnswers?: Record<string, string>;
+  journalContent?: string;
+}): string {
+  const {
+    reportDate,
+    tasks,
+    failedTasksJson,
+    streaks,
+    weeklyGoals,
+    dailyChallenge,
+    memory,
+    pastWeekSummary,
+    strategicGoals,
+    userAnswers,
+    journalContent,
+  } = context;
 
-    // Separate completed and failed tasks
-    const completedTasks = tasks.filter(t => t.status === 'done');
-    const failedTasks = tasks.filter(t => t.status === 'failed');
+  // ✅ Calculate proper statistics
+  const completedTasks = tasks.filter(t => t.status === 'done');
+  const completedMainTasks = completedTasks.filter(t => !t.origin_task);
 
-    // Calculate statistics
-    const totalTasks = tasks.length;
-    const completedCount = completedTasks.length;
-    const successRate = totalTasks > 0 ? (completedCount / totalTasks) * 100 : 0;
-    const totalMinutes = completedTasks.reduce((sum, t) => sum + (t.duration_minutes || 0), 0);
+  // Get failed tasks from JSON
+  const failedMainTasks = failedTasksJson?.failed_tasks?.filter((t: any) => !t.is_subtask) || [];
+  const failedSubtasks = failedTasksJson?.failed_tasks?.filter((t: any) => t.is_subtask) || [];
 
-    const prompt = `
+  // Calculate totals
+  const totalMainTasks = completedMainTasks.length + failedMainTasks.length;
+
+  // Count fully completed main tasks (no failed subtasks)
+  const fullyCompletedCount = completedMainTasks.filter((main: any) => {
+    const mainName = main.content.replace(/\s*\[[^\]]+\]/g, '').trim();
+    const hasFailedSubs = failedSubtasks.some((sub: any) => {
+      const parentName = sub.parent_content?.replace(/\s*\[[^\]]+\]/g, '').trim();
+      return parentName === mainName;
+    });
+    return !hasFailedSubs;
+  }).length;
+
+  const successRate = totalMainTasks > 0 ? (fullyCompletedCount / totalMainTasks) * 100 : 0;
+  const totalMinutes = completedTasks.reduce((sum, t) => sum + (t.duration_minutes || 0), 0);
+
+  const prompt = `
 # تحليل التقدم اليومي - ${reportDate}
 
 ${userAnswers ? `## إجابات المستخدم:\n${Object.entries(userAnswers).map(([q, a]) => `**س:** ${q}\n**ج:** ${a}`).join('\n\n')}\n` : ''}
 
 ## الإحصائيات:
-- إجمالي المهام: ${totalTasks}
-- المنجزة: ${completedCount}
-- الفاشلة: ${failedTasks.length}
+- إجمالي المهام الرئيسية: ${totalMainTasks}
+- المكتملة بالكامل: ${fullyCompletedCount}
+- الفاشلة: ${failedMainTasks.length}
 - معدل النجاح: ${successRate.toFixed(1)}%
 - الوقت الإجمالي: ${totalMinutes} دقيقة (${(totalMinutes / 60).toFixed(1)} ساعة)
 
@@ -326,13 +346,15 @@ ${completedTasks.map(t => {
   return `- ${t.content}${streakText}${durationText}${quantityText}`;
 }).join('\n')}
 
-${failedTasks.length > 0 ? `## المهام الفاشلة:\n${failedTasks.map(t => `- ${t.content}`).join('\n')}` : ''}
+${failedMainTasks.length > 0 ? `## المهام الفاشلة:\n${failedMainTasks.map((t: any) => `- ${t.content}`).join('\n')}` : ''}
 
 ## التحدي اليومي:
 ${dailyChallenge || 'لا يوجد تحدي محدد لهذا اليوم'}
 
 ## الأهداف الأسبوعية:
 ${weeklyGoals || 'لا توجد أهداف محددة لهذا الأسبوع'}
+
+${journalContent ? `## يوميات اليوم:\n${journalContent}\n` : ''}
 
 ## ملخص الأسبوع الماضي:
 ${pastWeekSummary}
@@ -413,8 +435,8 @@ CONTENT: يعمل بشكل أفضل في الصباح الباكر، تركيز�
 تذكر: كن صادقاً ومحفزاً، واستخدم اللهجة المصرية بطبيعية، وركز على التطوير المستمر.
 `;
 
-    return prompt;
-  }
+  return prompt;
+}
 
   /**
    * Parse the unified AI response
@@ -572,11 +594,17 @@ if (memoryUpdatesMatch && memoryUpdatesMatch[1]) {
       }
       
       if (content && content.length > 0) {
-        matchCount++;
-        console.log(`  ✅ [${matchCount}] Category: "${category}"`);
-        console.log(`     Content: "${content.substring(0, 100)}${content.length > 100 ? '...' : ''}"`);
-        result.memoryUpdates[category] = content;
-      } else {
+  matchCount++;
+  console.log(`  ✅ [${matchCount}] Category: "${category}"`);
+  console.log(`     Content preview: "${content.substring(0, 100)}${content.length > 100 ? '...' : ''}"`);
+  
+  // ✅ APPEND instead of overwrite
+  if (result.memoryUpdates[category]) {
+    result.memoryUpdates[category] += '\n\n' + content;
+  } else {
+    result.memoryUpdates[category] = content;
+  }
+} else {
         console.log(`  ⚠️ Category found but no content: "${category}"`);
       }
     }
@@ -804,17 +832,18 @@ export class UnifiedAIClient {
    * Generate daily report analysis with unified prompt
    */
   async generateDailyReport(context: {
-    reportDate: string;
-    tasks: any[];
-    streaks: any[];
-    weeklyGoals: string | null;
-    dailyChallenge: string | null;
-    memory: Record<string, string>;
-    pastWeekSummary: string;
-    strategicGoals: string;
-    userAnswers?: Record<string, string>;
-    journalContent?: string;
-  }): Promise<UnifiedAIResponse> {
+  reportDate: string;
+  tasks: any[];
+  failedTasksJson?: any; // ✅ ADD THIS
+  streaks: any[];
+  weeklyGoals: string | null;
+  dailyChallenge: string | null;
+  memory: Record<string, string>;
+  pastWeekSummary: string;
+  strategicGoals: string;
+  userAnswers?: Record<string, string>;
+  journalContent?: string;
+}): Promise<UnifiedAIResponse> {
     const prompt = this.buildUnifiedPrompt(context);
 
     const messages: AIMessage[] = [
@@ -939,53 +968,69 @@ Q: ما التحدي الرئيسي اللي واجهته النهاردة؟
   // Private Methods
   // ============================================
 
-  /**
-   * Build the unified prompt for daily report analysis
-   */
-  private buildUnifiedPrompt(context: {
-    reportDate: string;
-    tasks: any[];
-    streaks: any[];
-    weeklyGoals: string | null;
-    dailyChallenge: string | null;
-    memory: Record<string, string>;
-    pastWeekSummary: string;
-    strategicGoals: string;
-    userAnswers?: Record<string, string>;
-    journalContent?: string;
-  }): string {
-    const {
-      reportDate,
-      tasks,
-      streaks,
-      weeklyGoals,
-      dailyChallenge,
-      memory,
-      pastWeekSummary,
-      strategicGoals,
-      userAnswers,
-      journalContent,
-    } = context;
+/**
+ * Build the unified prompt for daily report analysis
+ */
+private buildUnifiedPrompt(context: {
+  reportDate: string;
+  tasks: any[];
+  failedTasksJson?: any;
+  streaks: any[];
+  weeklyGoals: string | null;
+  dailyChallenge: string | null;
+  memory: Record<string, string>;
+  pastWeekSummary: string;
+  strategicGoals: string;
+  userAnswers?: Record<string, string>;
+  journalContent?: string;
+}): string {
+  const {
+    reportDate,
+    tasks,
+    failedTasksJson,
+    streaks,
+    weeklyGoals,
+    dailyChallenge,
+    memory,
+    pastWeekSummary,
+    strategicGoals,
+    userAnswers,
+    journalContent,
+  } = context;
 
-    // Separate completed and failed tasks
-    const completedTasks = tasks.filter(t => t.status === 'done');
-    const failedTasks = tasks.filter(t => t.status === 'failed');
+  // ✅ Calculate proper statistics
+  const completedTasks = tasks.filter(t => t.status === 'done');
+  const completedMainTasks = completedTasks.filter(t => !t.origin_task);
 
-    // Calculate statistics
-    const totalTasks = tasks.length;
-    const completedCount = completedTasks.length;
-    const successRate = totalTasks > 0 ? (completedCount / totalTasks) * 100 : 0;
-    const totalMinutes = completedTasks.reduce((sum, t) => sum + (t.duration_minutes || 0), 0);
+  // Get failed tasks from JSON
+  const failedMainTasks = failedTasksJson?.failed_tasks?.filter((t: any) => !t.is_subtask) || [];
+  const failedSubtasks = failedTasksJson?.failed_tasks?.filter((t: any) => t.is_subtask) || [];
 
-    const prompt = `
+  // Calculate totals
+  const totalMainTasks = completedMainTasks.length + failedMainTasks.length;
+
+  // Count fully completed main tasks (no failed subtasks)
+  const fullyCompletedCount = completedMainTasks.filter((main: any) => {
+    const mainName = main.content.replace(/\s*\[[^\]]+\]/g, '').trim();
+    const hasFailedSubs = failedSubtasks.some((sub: any) => {
+      const parentName = sub.parent_content?.replace(/\s*\[[^\]]+\]/g, '').trim();
+      return parentName === mainName;
+    });
+    return !hasFailedSubs;
+  }).length;
+
+  const successRate = totalMainTasks > 0 ? (fullyCompletedCount / totalMainTasks) * 100 : 0;
+  const totalMinutes = completedTasks.reduce((sum, t) => sum + (t.duration_minutes || 0), 0);
+
+  const prompt = `
 # تحليل التقدم اليومي - ${reportDate}
 
 ${userAnswers ? `## إجابات المستخدم:\n${Object.entries(userAnswers).map(([q, a]) => `**س:** ${q}\n**ج:** ${a}`).join('\n\n')}\n` : ''}
 
 ## الإحصائيات:
-- إجمالي المهام: ${totalTasks}
-- المنجزة: ${completedCount}
-- الفاشلة: ${failedTasks.length}
+- إجمالي المهام الرئيسية: ${totalMainTasks}
+- المكتملة بالكامل: ${fullyCompletedCount}
+- الفاشلة: ${failedMainTasks.length}
 - معدل النجاح: ${successRate.toFixed(1)}%
 - الوقت الإجمالي: ${totalMinutes} دقيقة (${(totalMinutes / 60).toFixed(1)} ساعة)
 
@@ -998,7 +1043,7 @@ ${completedTasks.map(t => {
   return `- ${t.content}${streakText}${durationText}${quantityText}`;
 }).join('\n')}
 
-${failedTasks.length > 0 ? `## المهام الفاشلة:\n${failedTasks.map(t => `- ${t.content}`).join('\n')}` : ''}
+${failedMainTasks.length > 0 ? `## المهام الفاشلة:\n${failedMainTasks.map((t: any) => `- ${t.content}`).join('\n')}` : ''}
 
 ## التحدي اليومي:
 ${dailyChallenge || 'لا يوجد تحدي محدد لهذا اليوم'}
@@ -1087,9 +1132,8 @@ CONTENT: يعمل بشكل أفضل في الصباح الباكر، تركيز�
 تذكر: كن صادقاً ومحفزاً، واستخدم اللهجة المصرية بطبيعية، وركز على التطوير المستمر.
 `;
 
-    return prompt;
-  }
-
+  return prompt;
+}
   /**
    * Parse the unified AI response
    */
@@ -1246,11 +1290,17 @@ if (memoryUpdatesMatch && memoryUpdatesMatch[1]) {
       }
       
       if (content && content.length > 0) {
-        matchCount++;
-        console.log(`  ✅ [${matchCount}] Category: "${category}"`);
-        console.log(`     Content: "${content.substring(0, 100)}${content.length > 100 ? '...' : ''}"`);
-        result.memoryUpdates[category] = content;
-      } else {
+  matchCount++;
+  console.log(`  ✅ [${matchCount}] Category: "${category}"`);
+  console.log(`     Content preview: "${content.substring(0, 100)}${content.length > 100 ? '...' : ''}"`);
+  
+  // ✅ APPEND instead of overwrite
+  if (result.memoryUpdates[category]) {
+    result.memoryUpdates[category] += '\n\n' + content;
+  } else {
+    result.memoryUpdates[category] = content;
+  }
+} else {
         console.log(`  ⚠️ Category found but no content: "${category}"`);
       }
     }

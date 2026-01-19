@@ -1,8 +1,6 @@
 There are few notes and fixes that need to be done, I will address them all, and I want you to tell me how to implement the fixes.
 due to usage limits send me the fixes and how to implement one by one.
 
-   - when I complete many tasks almost at the same time in the same time, the autocomplete parent logic and other logic can be triggered multiple times, there must be a lock or something so that logics runs in sequence not at the same time.
-   - the analysis data not correct, the ai comment talk about 100% success while in fact the report had 55% success, it is like its talking about another report.
    - the notification message of analysis start .. should include the ai model name for reference.
    - The report preview has an issue which arise when a sub task is completed and its main tasks is still not (specially if the main task is under the priority level), it appears as if it is a main task (separately)
     - the daily challenges result aren't updated and summary is wrong, all challenged where the day passed without being completed must be considered a fail!
@@ -12,4 +10,7 @@ DONE:
    - the daily challenge widget has (current daily challenge + daily challenges list of current week) but it is missing the summary of this week's daily challenges (it is placed in weekly goals instead which is wrong)
    - The weekly goals widget is missing the last weekly goals analysis and has data that need to be removed (the weekly daily challenges list and summary)
    - not all memory categories are updated, only the first one and other catergories are always empty, there must be a problem!
+   - when I complete many tasks almost at the same time in the same time, the autocomplete parent logic and other logic can be triggered multiple times, there must be a lock or something so that logics runs in sequence not at the same time.
+   - the analysis data not correct, the ai comment talk about 100% success while in fact the report had 55% success, it is like its talking about another report.
+   
 

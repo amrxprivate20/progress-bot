@@ -179,14 +179,15 @@ export class ReportProcessor extends DurableObject<Env> {
 const aiResponse = await aiClient.generateDailyReport({
   reportDate: reportData.date,
   tasks: reportData.tasks,
+  failedTasksJson: reportData.failedTasksJson, // ✅ ADD THIS
   streaks: reportData.streaks,
   weeklyGoals: reportData.weeklyGoals?.goals_text || null,
   dailyChallenge: reportData.dailyChallenge?.challenge_text || null,
-  memory: reportData.memory, // ✅ ADDED
+  memory: reportData.memory,
   pastWeekSummary,
   strategicGoals: reportData.strategicGoals,
   userAnswers: Object.keys(userAnswers).length > 0 ? userAnswers : undefined,
-  journalContent: reportData.journal, // Also add journal if available
+  journalContent: reportData.journal,
 });
     // ✅ TEMPORARY DEBUG: Log raw AI response
     console.log('🤖 RAW AI RESPONSE - MEMORY_UPDATES section:');
