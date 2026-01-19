@@ -3,7 +3,7 @@
 // ============================================
 
 import type { Env } from './types';
-import { createSupabaseClient } from './database/client';
+import { createSupabaseClient, op } from './database/client';
 import { SettingsManager } from './database/settings';
 import { createBot, createTelegramWebhookHandler } from './bot/grammy';
 import { handleTodoistWebhook, sendTaskNotification } from './handlers/todoist';

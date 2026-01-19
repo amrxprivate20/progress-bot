@@ -552,6 +552,7 @@ if (goalsMatch && goalsMatch[1]) {
              !lower.includes('none');
     });
 }
+}
 
 // ============================================
 // Anthropic API Client
@@ -1155,6 +1156,7 @@ if (goalsMatch && goalsMatch[1]) {
              !lower.includes('no ') &&
              !lower.includes('none');
     });
+}
 }
 
 // ============================================
