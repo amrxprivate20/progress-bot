@@ -385,12 +385,26 @@ Q: [سؤالك هنا]
 - [اذكر الأهداف المهملة أو اكتب "لا يوجد"]
 
 ## [MEMORY_UPDATES]
-(إذا كانت هناك رؤى جديدة أو معلومات مهمة يجب تحديثها في الذاكرة، اذكرها بهذا الشكل:
+(⚠️ IMPORTANT: إذا كانت هناك أي رؤى جديدة، أنماط، أو معلومات مهمة من تجربة اليوم، يجب تحديث الذاكرة.
+
+أمثلة على ما يستحق التحديث:
+- أنماط جديدة في الإنتاجية أو المشاعر
+- استراتيجيات ناجحة تم اكتشافها
+- تحديات متكررة
+- معلومات شخصية جديدة
+- إنجازات مهمة
+
+استخدم هذا الشكل بالضبط:
 CATEGORY: [اسم الفئة بالضبط كما هو أعلاه]
-CONTENT: [المعلومة الجديدة]
+CONTENT: [المعلومة الجديدة - جملة أو جملتين]
 
-إذا لم تكن هناك معلومات جديدة، اكتب: "لا توجد تحديثات")
+⚠️ حتى لو كانت رؤية صغيرة، اكتبها! 
 
+مثال:
+CATEGORY: Personal Insights & Patterns
+CONTENT: يعمل بشكل أفضل في الصباح الباكر، تركيزه يقل بعد الظهر
+
+إذا لم تكن هناك معلومات جديدة على الإطلاق، اكتب: "لا توجد تحديثات")
 ## [MEMORY_OPTIMIZATION]
 (إذا كانت الذاكرة بحاجة لتحسين وإعادة تنظيم (كبيرة جداً أو غير منظمة)، اكتب "OPTIMIZE_NEEDED"، وإلا اكتب "NOT_NEEDED")
 
@@ -507,20 +521,31 @@ if (goalsMatch && goalsMatch[1]) {
 }
 
     // Extract memory updates
-    const memoryUpdatesMatch = response.match(/\[MEMORY_UPDATES\]([\s\S]*?)(?:\[|$)/i);
-    if (memoryUpdatesMatch && memoryUpdatesMatch[1]) {
-      const memoryText = memoryUpdatesMatch[1];
-      if (!memoryText.includes('لا توجد تحديثات')) {
-        const categoryMatches = memoryText.matchAll(/CATEGORY:\s*([^\n]+)\s*CONTENT:\s*([^\n]+)/gi);
-        for (const match of categoryMatches) {
-          if (match[1] && match[2]) {
-            const category = match[1].trim();
-            const content = match[2].trim();
-            result.memoryUpdates[category] = content;
-          }
-        }
+const memoryUpdatesMatch = response.match(/\[MEMORY_UPDATES\]([\s\S]*?)(?:\[|$)/i);
+console.log('🔍 Memory updates section found:', !!memoryUpdatesMatch);
+if (memoryUpdatesMatch && memoryUpdatesMatch[1]) {
+  const memoryText = memoryUpdatesMatch[1];
+  console.log('📝 Memory text:', memoryText.substring(0, 200));
+  
+  if (!memoryText.includes('لا توجد تحديثات')) {
+    const categoryMatches = memoryText.matchAll(/CATEGORY:\s*([^\n]+)\s*CONTENT:\s*([^\n]+)/gi);
+    let matchCount = 0;
+    
+    for (const match of categoryMatches) {
+      matchCount++;
+      if (match[1] && match[2]) {
+        const category = match[1].trim();
+        const content = match[2].trim();
+        console.log(`  ✅ Found update: ${category} -> ${content.substring(0, 50)}`);
+        result.memoryUpdates[category] = content;
       }
     }
+    
+    console.log(`📊 Total memory updates parsed: ${matchCount}`);
+  } else {
+    console.log('ℹ️ AI said no updates needed');
+  }
+}
 
     // Extract memory optimization flag
     const memoryOptMatch = response.match(/\[MEMORY_OPTIMIZATION\]([\s\S]*?)(?:\[|$)/i);
@@ -990,12 +1015,26 @@ Q: [سؤالك هنا]
 - [اذكر الأهداف المهملة أو اكتب "لا يوجد"]
 
 ## [MEMORY_UPDATES]
-(إذا كانت هناك رؤى جديدة أو معلومات مهمة يجب تحديثها في الذاكرة، اذكرها بهذا الشكل:
+(⚠️ IMPORTANT: إذا كانت هناك أي رؤى جديدة، أنماط، أو معلومات مهمة من تجربة اليوم، يجب تحديث الذاكرة.
+
+أمثلة على ما يستحق التحديث:
+- أنماط جديدة في الإنتاجية أو المشاعر
+- استراتيجيات ناجحة تم اكتشافها
+- تحديات متكررة
+- معلومات شخصية جديدة
+- إنجازات مهمة
+
+استخدم هذا الشكل بالضبط:
 CATEGORY: [اسم الفئة بالضبط كما هو أعلاه]
-CONTENT: [المعلومة الجديدة]
+CONTENT: [المعلومة الجديدة - جملة أو جملتين]
 
-إذا لم تكن هناك معلومات جديدة، اكتب: "لا توجد تحديثات")
+⚠️ حتى لو كانت رؤية صغيرة، اكتبها! 
 
+مثال:
+CATEGORY: Personal Insights & Patterns
+CONTENT: يعمل بشكل أفضل في الصباح الباكر، تركيزه يقل بعد الظهر
+
+إذا لم تكن هناك معلومات جديدة على الإطلاق، اكتب: "لا توجد تحديثات")
 ## [MEMORY_OPTIMIZATION]
 (إذا كانت الذاكرة بحاجة لتحسين وإعادة تنظيم (كبيرة جداً أو غير منظمة)، اكتب "OPTIMIZE_NEEDED"، وإلا اكتب "NOT_NEEDED")
 
@@ -1112,20 +1151,31 @@ if (goalsMatch && goalsMatch[1]) {
 }
 
     // Extract memory updates
-    const memoryUpdatesMatch = response.match(/\[MEMORY_UPDATES\]([\s\S]*?)(?:\[|$)/i);
-    if (memoryUpdatesMatch && memoryUpdatesMatch[1]) {
-      const memoryText = memoryUpdatesMatch[1];
-      if (!memoryText.includes('لا توجد تحديثات')) {
-        const categoryMatches = memoryText.matchAll(/CATEGORY:\s*([^\n]+)\s*CONTENT:\s*([^\n]+)/gi);
-        for (const match of categoryMatches) {
-          if (match[1] && match[2]) {
-            const category = match[1].trim();
-            const content = match[2].trim();
-            result.memoryUpdates[category] = content;
-          }
-        }
+const memoryUpdatesMatch = response.match(/\[MEMORY_UPDATES\]([\s\S]*?)(?:\[|$)/i);
+console.log('🔍 Memory updates section found:', !!memoryUpdatesMatch);
+if (memoryUpdatesMatch && memoryUpdatesMatch[1]) {
+  const memoryText = memoryUpdatesMatch[1];
+  console.log('📝 Memory text:', memoryText.substring(0, 200));
+  
+  if (!memoryText.includes('لا توجد تحديثات')) {
+    const categoryMatches = memoryText.matchAll(/CATEGORY:\s*([^\n]+)\s*CONTENT:\s*([^\n]+)/gi);
+    let matchCount = 0;
+    
+    for (const match of categoryMatches) {
+      matchCount++;
+      if (match[1] && match[2]) {
+        const category = match[1].trim();
+        const content = match[2].trim();
+        console.log(`  ✅ Found update: ${category} -> ${content.substring(0, 50)}`);
+        result.memoryUpdates[category] = content;
       }
     }
+    
+    console.log(`📊 Total memory updates parsed: ${matchCount}`);
+  } else {
+    console.log('ℹ️ AI said no updates needed');
+  }
+}
 
     // Extract memory optimization flag
     const memoryOptMatch = response.match(/\[MEMORY_OPTIMIZATION\]([\s\S]*?)(?:\[|$)/i);
