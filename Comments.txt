@@ -1,8 +1,9 @@
 There are few notes and fixes that need to be done, I will address them all, and I want you to tell me how to implement the fixes.
 due to usage limits send me the fixes and how to implement one by one.
  
-    - I noticed that sometimes when I complete a task, the notification group may have unrelated tasks completed from another day, however this issue didn't appear when I checked the report preview
+    - I noticed in supabase streak tables tasks names are not clean which leads to duplicates with diffrent paremeters and thus problems in streak tracking because it counts as different tasks
     - The report preview has an issue which arise when a sub task is completed and its main tasks is still not (specially if the main task is under the priority level), it appears as if it is a main task (separately)
     - when a sub-task completes the system should check if there are no other failed sub-tasks, then the corresponding main task should be automatically completed in Todoist
     - the daily challenge widget has (current daily challenge + daily challenges list of current week) but it is missing the summary of this week's daily challenges (it is placed in weekly goals instead which is wrong)
     The weekly goals widget is missing the last weekly goals analysis and has data that need to be removed (the weekly daily challenges list and summary)
+   

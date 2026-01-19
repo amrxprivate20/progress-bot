@@ -906,17 +906,22 @@ export async function sendTaskNotification(
       mainTask = task;
     }
 
-    // STEP 2: Get completed subtasks from DATABASE (unchanged)
-    if (mainTask) {
-      const parentId = task.origin_task || task.task_id;
-      const parentBaseId = parentId.split('_')[0];
-      
-      const allTasks = await db.select<Task>('tasks', {});
-      completedSubtasks = allTasks.filter(t => {
-        if (!t.origin_task) return false;
-        const originBase = t.origin_task.split('_')[0];
-        return originBase === parentBaseId;
-      });
+    // STEP 2: Get completed subtasks from DATABASE - FILTERED BY DATE
+if (mainTask) {
+  const parentId = task.origin_task || task.task_id;
+  const parentBaseId = parentId.split('_')[0];
+  
+  const allTasks = await db.select<Task>('tasks', {});
+  completedSubtasks = allTasks.filter(t => {
+    if (!t.origin_task) return false;
+    const originBase = t.origin_task.split('_')[0];
+    
+    // ✅ NEW: Only include subtasks from the same Egypt date
+    const subtaskDate = getEgyptDateString(new Date(t.completed_at));
+    const mainTaskDate = getEgyptDateString(completedAtDate);
+    
+    return originBase === parentBaseId && subtaskDate === mainTaskDate;
+  });
       
       console.log(`📋 Found ${completedSubtasks.length} completed subtasks in DB`);
     }
