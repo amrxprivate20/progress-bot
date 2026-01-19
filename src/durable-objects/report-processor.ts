@@ -175,17 +175,19 @@ export class ReportProcessor extends DurableObject<Env> {
       const startTime = Date.now();
 
       // Call AI - THIS IS THE LONG OPERATION (no timeout here!)
-      const aiResponse = await aiClient.generateDailyReport({
-        reportDate: reportData.date,
-        tasks: reportData.tasks,
-        streaks: reportData.streaks,
-        weeklyGoals: reportData.weeklyGoals?.goals_text || null,
-        dailyChallenge: reportData.dailyChallenge?.challenge_text || null,
-        memory: reportData.memory,
-        pastWeekSummary,
-        strategicGoals: reportData.strategicGoals,
-        userAnswers: Object.keys(userAnswers).length > 0 ? userAnswers : undefined,
-      });
+      // AFTER (CORRECT):
+const aiResponse = await aiClient.generateDailyReport({
+  reportDate: reportData.date,
+  tasks: reportData.tasks,
+  streaks: reportData.streaks,
+  weeklyGoals: reportData.weeklyGoals?.goals_text || null,
+  dailyChallenge: reportData.dailyChallenge?.challenge_text || null,
+  memory: reportData.memory, // ✅ ADDED
+  pastWeekSummary,
+  strategicGoals: reportData.strategicGoals,
+  userAnswers: Object.keys(userAnswers).length > 0 ? userAnswers : undefined,
+  journalContent: reportData.journal, // Also add journal if available
+});
 
       const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
       console.log(`✅ [Job ${jobId}] AI analysis complete in ${elapsed}s`);
@@ -194,10 +196,22 @@ export class ReportProcessor extends DurableObject<Env> {
       await this.sendReportResults(chatId, botToken, reportData, aiResponse);
 
       // Update memory (REMOVED noisy messages)
-      if (Object.keys(aiResponse.memoryUpdates).length > 0) {
-        console.log(`🧠 [Job ${jobId}] Updating memory...`);
-        await memoryMgr.updateMemory(aiResponse.memoryUpdates);
-      }
+if (aiResponse.memoryUpdates && Object.keys(aiResponse.memoryUpdates).length > 0) {
+  console.log(`🧠 [Job ${jobId}] Updating memory with ${Object.keys(aiResponse.memoryUpdates).length} categories...`);
+  
+  try {
+    // Log what we're updating
+    for (const [category, content] of Object.entries(aiResponse.memoryUpdates)) {
+      console.log(`  📝 ${category}: ${content.substring(0, 100)}...`);
+    }
+    
+    await memoryMgr.updateMemory(aiResponse.memoryUpdates);
+    console.log(`✅ [Job ${jobId}] Memory updated successfully`);
+  } catch (memError) {
+    console.error(`❌ [Job ${jobId}] Memory update failed:`, memError);
+    // Don't throw - continue with report
+  }
+}
 
       // Check memory optimization
       if (aiResponse.memoryOptimization === 'OPTIMIZE_NEEDED') {

@@ -7,6 +7,7 @@ import { createSupabaseClient } from './database/client';
 import { SettingsManager } from './database/settings';
 import { createBot, createTelegramWebhookHandler } from './bot/grammy';
 import { handleTodoistWebhook, sendTaskNotification } from './handlers/todoist';
+import { syncFailuresFromTodoist } from './handlers/todoist';
 import { validateEnvironment } from './utils/validation';
 import { asyncHandler, formatErrorResponse, ValidationError } from './utils/errors';
 import { ReportProcessor } from './durable-objects/report-processor';
@@ -371,21 +372,19 @@ async function handleWidgetAPI(
       }
 
       case 'today-report': {
-        // Generate today's preview (similar to /today command)
-        const reportGen = createReportGenerator(db, settings);
-        const preview = await reportGen.generatePreview();
+  // Sync with Todoist first
+  try {
+    await syncFailuresFromTodoist(today, db, settings);
+  } catch (syncError) {
+    console.error('Widget sync warning:', syncError);
+  }
 
-        // Return plain text summary
-        const summary = [
-          `📅 ${today}`,
-          `✅ مكتملة: ${preview.completed_tasks}`,
-          `❌ فاشلة: ${preview.failed_tasks}`,
-          `📊 النسبة: ${Math.round(preview.success_rate)}%`,
-          `⏱️ الوقت: ${preview.total_time_minutes} دقيقة`,
-        ].join('\n');
+  const reportGen = createReportGenerator(db, settings);
+  const preview = await reportGen.generatePreview();
 
-        return new Response(summary, { status: 200, headers });
-      }
+  // Return the FULL formatted text (same as /today command)
+  return new Response(preview.formatted_text, { status: 200, headers });
+}
 
       case 'daily-challenge': {
         // Get today's challenge AND weekly challenges list
@@ -439,37 +438,93 @@ async function handleWidgetAPI(
         return new Response(response.trim(), { status: 200, headers });
       }
 
-      case 'weekly-challenges': {
-        // Get this week's challenges
-        const weekStart = getWeekStartDate();
-        const weekEnd = getWeekEndDate();
+      // AFTER (showing GOALS with challenge results):
+case 'weekly-goals': // Also support this name
+case 'weekly-challenges': {
+  const weekStart = getWeekStartDate();
+  const weekEnd = getWeekEndDate();
 
-        const challenges = await db.select('daily_challenges', {
-          order: 'challenge_date.asc',
-        });
+  // Get weekly goals
+  const goals = await db.select('weekly_goals', {
+    filter: { week_start_date: op.eq(weekStart) },
+    limit: 1,
+  });
 
-        // Filter to this week
-        const thisWeekChallenges = challenges.filter((c: any) => {
-          const date = c.challenge_date;
-          return date >= weekStart && date <= weekEnd;
-        });
+  let response = '';
 
-        if (thisWeekChallenges.length === 0) {
-          return new Response('لا توجد تحديات هذا الأسبوع', { status: 200, headers });
-        }
+  if (goals.length === 0 || !goals[0]) {
+    return new Response(
+      '⚠️ لا توجد أهداف لهذا الأسبوع',
+      { status: 200, headers }
+    );
+  }
 
-        const lines = thisWeekChallenges.map((c: any) => {
-          const statusIcon = c.result === true ? '✅' : c.result === false ? '❌' : '⏳';
-          return `${statusIcon} ${c.challenge_date}: ${c.challenge_text}`;
-        });
+  const weekGoals = goals[0];
+  
+  // Header
+  response += `🎯 الأهداف الأسبوعية\n`;
+  response += `📅 ${weekStart} → ${weekEnd}\n`;
+  response += `━━━━━━━━━━━━━━━━━━\n\n`;
+  
+  // Goals text
+  response += weekGoals.goals_text + '\n\n';
+  
+  // Get challenges for this week
+  const allChallenges = await db.select('daily_challenges', {
+    order: 'challenge_date.asc',
+  });
 
-        // Add summary
-        const completed = thisWeekChallenges.filter((c: any) => c.result === true).length;
-        const total = thisWeekChallenges.length;
-        lines.unshift(`📊 ${completed}/${total} مكتمل\n`);
+  const weekChallenges = allChallenges.filter((c: any) => {
+    const date = c.challenge_date;
+    return date >= weekStart && date <= weekEnd;
+  });
 
-        return new Response(lines.join('\n'), { status: 200, headers });
-      }
+  if (weekChallenges.length > 0) {
+    response += `━━━━━━━━━━━━━━━━━━\n`;
+    response += `⚡ التحديات اليومية:\n\n`;
+
+    const arabicDays: Record<number, string> = {
+      0: 'الأحد', 1: 'الإثنين', 2: 'الثلاثاء',
+      3: 'الأربعاء', 4: 'الخميس', 5: 'الجمعة', 6: 'السبت'
+    };
+
+    for (const challenge of weekChallenges) {
+      const dateStr = typeof challenge.challenge_date === 'string'
+        ? challenge.challenge_date
+        : new Date(challenge.challenge_date).toISOString().split('T')[0];
+
+      const date = new Date(dateStr + 'T12:00:00Z');
+      const dayName = arabicDays[date.getDay()] || '';
+      const isToday = dateStr === today;
+
+      const status = challenge.result === true ? '✅' :
+                     challenge.result === false ? '❌' : '⏳';
+
+      const todayMarker = isToday ? ' ← اليوم' : '';
+
+      response += `${status} ${dayName} (${dateStr})${todayMarker}\n`;
+      response += `   ${challenge.challenge_text}\n\n`;
+    }
+
+    // Weekly progress
+    const completed = weekChallenges.filter((c: any) => c.result === true).length;
+    const failed = weekChallenges.filter((c: any) => c.result === false).length;
+    const pending = weekChallenges.filter((c: any) => c.result === undefined || c.result === null).length;
+
+    response += `━━━━━━━━━━━━━━━━━━\n`;
+    response += `📊 ملخص الأسبوع:\n`;
+    response += `✅ مكتمل: ${completed}\n`;
+    response += `❌ فاشل: ${failed}\n`;
+    response += `⏳ قيد الانتظار: ${pending}\n`;
+
+    if (completed > 0 || failed > 0) {
+      const rate = Math.round((completed / (completed + failed)) * 100);
+      response += `📈 نسبة النجاح: ${rate}%\n`;
+    }
+  }
+
+  return new Response(response.trim(), { status: 200, headers });
+}
 
       default:
         return new Response(

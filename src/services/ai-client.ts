@@ -449,29 +449,62 @@ CONTENT: [المعلومة الجديدة]
       result.reward = rewardMatch[1].trim();
     }
 
-    // Extract goals analysis
-    const goalsMatch = response.match(/\[GOALS_ANALYSIS\]([\s\S]*?)(?:\[|$)/i);
-    if (goalsMatch && goalsMatch[1]) {
-      const goalsText = goalsMatch[1];
+    // AFTER (CORRECT - more flexible parsing):
+// Extract goals analysis
+const goalsMatch = response.match(/\[GOALS_ANALYSIS\]([\s\S]*?)(?:\[|$)/i);
+if (goalsMatch && goalsMatch[1]) {
+  const goalsText = goalsMatch[1];
 
-      // Parse completed goals
-      const completedMatch = goalsText.match(/###\s*منجزة[^#]*([\s\S]*?)(?:###|$)/);
-      if (completedMatch && completedMatch[1]) {
-        result.goalsAnalysis.completed = this.parseListItems(completedMatch[1]);
-      }
+  console.log('📊 Parsing goals from:', goalsText.substring(0, 200));
 
-      // Parse in-progress goals
-      const inProgressMatch = goalsText.match(/###\s*قيد التنفيذ[^#]*([\s\S]*?)(?:###|$)/);
-      if (inProgressMatch && inProgressMatch[1]) {
-        result.goalsAnalysis.inProgress = this.parseListItems(inProgressMatch[1]);
-      }
-
-      // Parse neglected goals
-      const neglectedMatch = goalsText.match(/###\s*مهملة[^#]*([\s\S]*?)(?:###|$)/);
-      if (neglectedMatch && neglectedMatch[1]) {
-        result.goalsAnalysis.neglected = this.parseListItems(neglectedMatch[1]);
-      }
+  // Parse completed goals - more flexible patterns
+  const completedPatterns = [
+    /###\s*منجزة\s*✅([\s\S]*?)(?:###|$)/i,
+    /###\s*منجزة([\s\S]*?)(?:###|$)/i,
+    /منجزة\s*✅([\s\S]*?)(?:###|قيد التنفيذ|مهملة|$)/i,
+  ];
+  
+  for (const pattern of completedPatterns) {
+    const match = goalsText.match(pattern);
+    if (match && match[1]) {
+      result.goalsAnalysis.completed = this.parseListItems(match[1]);
+      console.log('✅ Completed goals:', result.goalsAnalysis.completed);
+      break;
     }
+  }
+
+  // Parse in-progress goals
+  const inProgressPatterns = [
+    /###\s*قيد التنفيذ\s*🔄([\s\S]*?)(?:###|$)/i,
+    /###\s*قيد التنفيذ([\s\S]*?)(?:###|$)/i,
+    /قيد التنفيذ\s*🔄([\s\S]*?)(?:###|منجزة|مهملة|$)/i,
+  ];
+  
+  for (const pattern of inProgressPatterns) {
+    const match = goalsText.match(pattern);
+    if (match && match[1]) {
+      result.goalsAnalysis.inProgress = this.parseListItems(match[1]);
+      console.log('🔄 In-progress goals:', result.goalsAnalysis.inProgress);
+      break;
+    }
+  }
+
+  // Parse neglected goals
+  const neglectedPatterns = [
+    /###\s*مهملة\s*⚠️([\s\S]*?)(?:###|$)/i,
+    /###\s*مهملة([\s\S]*?)(?:###|$)/i,
+    /مهملة\s*⚠️([\s\S]*?)(?:###|منجزة|قيد التنفيذ|$)/i,
+  ];
+  
+  for (const pattern of neglectedPatterns) {
+    const match = goalsText.match(pattern);
+    if (match && match[1]) {
+      result.goalsAnalysis.neglected = this.parseListItems(match[1]);
+      console.log('⚠️ Neglected goals:', result.goalsAnalysis.neglected);
+      break;
+    }
+  }
+}
 
     // Extract memory updates
     const memoryUpdatesMatch = response.match(/\[MEMORY_UPDATES\]([\s\S]*?)(?:\[|$)/i);
@@ -505,13 +538,19 @@ CONTENT: [المعلومة الجديدة]
    * Parse list items from text
    */
   private parseListItems(text: string): string[] {
-    return text
-      .split('\n')
-      .map(line => line.trim())
-      .filter(line => line.startsWith('-'))
-      .map(line => line.replace(/^-\s*/, '').trim())
-      .filter(item => item.length > 0 && !item.includes('لا يوجد'));
-  }
+  return text
+    .split('\n')
+    .map(line => line.trim())
+    .filter(line => line.startsWith('-') || line.match(/^\d+\./)) // Accept - or 1. 2. etc
+    .map(line => line.replace(/^[-\d.]+\s*/, '').trim()) // Remove markers
+    .filter(item => {
+      // Remove empty, "لا يوجد", "no", "none", etc.
+      const lower = item.toLowerCase();
+      return item.length > 0 && 
+             !lower.includes('لا يوجد') && 
+             !lower.includes('no ') &&
+             !lower.includes('none');
+    });
 }
 
 // ============================================
@@ -1014,29 +1053,62 @@ CONTENT: [المعلومة الجديدة]
       result.reward = rewardMatch[1].trim();
     }
 
-    // Extract goals analysis
-    const goalsMatch = response.match(/\[GOALS_ANALYSIS\]([\s\S]*?)(?:\[|$)/i);
-    if (goalsMatch && goalsMatch[1]) {
-      const goalsText = goalsMatch[1];
+    // AFTER (CORRECT - more flexible parsing):
+// Extract goals analysis
+const goalsMatch = response.match(/\[GOALS_ANALYSIS\]([\s\S]*?)(?:\[|$)/i);
+if (goalsMatch && goalsMatch[1]) {
+  const goalsText = goalsMatch[1];
 
-      // Parse completed goals
-      const completedMatch = goalsText.match(/###\s*منجزة[^#]*([\s\S]*?)(?:###|$)/);
-      if (completedMatch && completedMatch[1]) {
-        result.goalsAnalysis.completed = this.parseListItems(completedMatch[1]);
-      }
+  console.log('📊 Parsing goals from:', goalsText.substring(0, 200));
 
-      // Parse in-progress goals
-      const inProgressMatch = goalsText.match(/###\s*قيد التنفيذ[^#]*([\s\S]*?)(?:###|$)/);
-      if (inProgressMatch && inProgressMatch[1]) {
-        result.goalsAnalysis.inProgress = this.parseListItems(inProgressMatch[1]);
-      }
-
-      // Parse neglected goals
-      const neglectedMatch = goalsText.match(/###\s*مهملة[^#]*([\s\S]*?)(?:###|$)/);
-      if (neglectedMatch && neglectedMatch[1]) {
-        result.goalsAnalysis.neglected = this.parseListItems(neglectedMatch[1]);
-      }
+  // Parse completed goals - more flexible patterns
+  const completedPatterns = [
+    /###\s*منجزة\s*✅([\s\S]*?)(?:###|$)/i,
+    /###\s*منجزة([\s\S]*?)(?:###|$)/i,
+    /منجزة\s*✅([\s\S]*?)(?:###|قيد التنفيذ|مهملة|$)/i,
+  ];
+  
+  for (const pattern of completedPatterns) {
+    const match = goalsText.match(pattern);
+    if (match && match[1]) {
+      result.goalsAnalysis.completed = this.parseListItems(match[1]);
+      console.log('✅ Completed goals:', result.goalsAnalysis.completed);
+      break;
     }
+  }
+
+  // Parse in-progress goals
+  const inProgressPatterns = [
+    /###\s*قيد التنفيذ\s*🔄([\s\S]*?)(?:###|$)/i,
+    /###\s*قيد التنفيذ([\s\S]*?)(?:###|$)/i,
+    /قيد التنفيذ\s*🔄([\s\S]*?)(?:###|منجزة|مهملة|$)/i,
+  ];
+  
+  for (const pattern of inProgressPatterns) {
+    const match = goalsText.match(pattern);
+    if (match && match[1]) {
+      result.goalsAnalysis.inProgress = this.parseListItems(match[1]);
+      console.log('🔄 In-progress goals:', result.goalsAnalysis.inProgress);
+      break;
+    }
+  }
+
+  // Parse neglected goals
+  const neglectedPatterns = [
+    /###\s*مهملة\s*⚠️([\s\S]*?)(?:###|$)/i,
+    /###\s*مهملة([\s\S]*?)(?:###|$)/i,
+    /مهملة\s*⚠️([\s\S]*?)(?:###|منجزة|قيد التنفيذ|$)/i,
+  ];
+  
+  for (const pattern of neglectedPatterns) {
+    const match = goalsText.match(pattern);
+    if (match && match[1]) {
+      result.goalsAnalysis.neglected = this.parseListItems(match[1]);
+      console.log('⚠️ Neglected goals:', result.goalsAnalysis.neglected);
+      break;
+    }
+  }
+}
 
     // Extract memory updates
     const memoryUpdatesMatch = response.match(/\[MEMORY_UPDATES\]([\s\S]*?)(?:\[|$)/i);
@@ -1070,13 +1142,19 @@ CONTENT: [المعلومة الجديدة]
    * Parse list items from text
    */
   private parseListItems(text: string): string[] {
-    return text
-      .split('\n')
-      .map(line => line.trim())
-      .filter(line => line.startsWith('-'))
-      .map(line => line.replace(/^-\s*/, '').trim())
-      .filter(item => item.length > 0 && !item.includes('لا يوجد'));
-  }
+  return text
+    .split('\n')
+    .map(line => line.trim())
+    .filter(line => line.startsWith('-') || line.match(/^\d+\./)) // Accept - or 1. 2. etc
+    .map(line => line.replace(/^[-\d.]+\s*/, '').trim()) // Remove markers
+    .filter(item => {
+      // Remove empty, "لا يوجد", "no", "none", etc.
+      const lower = item.toLowerCase();
+      return item.length > 0 && 
+             !lower.includes('لا يوجد') && 
+             !lower.includes('no ') &&
+             !lower.includes('none');
+    });
 }
 
 // ============================================
