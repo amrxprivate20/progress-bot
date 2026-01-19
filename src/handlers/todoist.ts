@@ -631,13 +631,13 @@ async function updateParentTaskStatus(
 async function updateStreakFromDueDate(
   db: SupabaseClient,
   taskName: string,
-  completedAt: Date,
+  completedAt: Date,  // ✅ This parameter is correct
   dueString: string,
   isSubtask: boolean = false
 ): Promise<void> {
   try {
-    // ✅ CRITICAL FIX: Ensure completedAt is a Date
-    let completedDate: Date;
+    // ✅ FIX: Ensure completedAt is a Date (rename for clarity)
+    let completedDate: Date;  // ✅ CHANGED: Use completedDate instead of completedAt
     if (completedAt instanceof Date) {
       completedDate = completedAt;
     } else {
@@ -645,7 +645,10 @@ async function updateStreakFromDueDate(
       completedDate = new Date(completedAt);
     }
     
-    const streakKey = isSubtask ? `${taskName} [subtask]` : taskName;    
+    // ✅ NEW: Clean the task name before using it as streak key
+    const cleanName = extractCleanTaskName(taskName);
+    const streakKey = isSubtask ? `${cleanName} [subtask]` : cleanName;
+    
     const streakType = determineStreakType(dueString);
     const weeklyPattern = extractWeeklyPattern(dueString);
 
@@ -653,13 +656,15 @@ async function updateStreakFromDueDate(
 
     console.log('🔥 Updating streak:', {
       task: streakKey,
+      originalName: taskName,
+      cleanName: cleanName,
       egyptDate: completedDateStr,
       utcDate: completedDate.toISOString(),
       streakType,
       weeklyPattern,
     });
 
-    const existingStreaks = await db.select<Streak>('streaks', {
+     const existingStreaks = await db.select<Streak>('streaks', {
       filter: { task_name: op.eq(streakKey) }
     });
 
@@ -1043,14 +1048,6 @@ if (mainTask) {
     // STEP 4: Build notification message (unchanged)
     const totalSubtasks = completedSubtasks.length + failedSubtasks.length;
 
-    // Helper to clean task name (remove all metadata)
-    const cleanTaskName = (content: string): string => {
-      return content
-        .replace(/\[([^\]]+)\]/g, '') // Remove brackets
-        .replace(/❗/g, '') // Remove origin marker
-        .replace(/\(origin:[^)]+\)/gi, '') // Remove origin reference
-        .trim();
-    };
 
     // === SIMPLIFIED NOTIFICATION FORMAT ===
     // Line 1: symbol + task name [duration] [quantity] [streak]
@@ -1062,7 +1059,7 @@ if (mainTask) {
       ? (mainTask.status === 'done' ? '✅' : '❌')
       : (failedSubtasks.length === 0 ? '✅' : (completedSubtasks.length === 0 ? '❌' : '⚠️'));
 
-    const cleanName = cleanTaskName(mainTask.content);
+    const cleanName = extractCleanTaskName(mainTask.content);
 
     // Build first line: name + metadata inline
     let firstLine = `${symbol} ${cleanName}`;
@@ -1078,7 +1075,8 @@ if (mainTask) {
     }
 
     // Add streak if present
-    const streakName = task.content + (task.origin_task ? ' [subtask]' : '');
+    const cleanTaskNameForStreak = extractCleanTaskName(task.content);
+    const streakName = cleanTaskNameForStreak + (task.origin_task ? ' [subtask]' : '');
     const streaks = await db.select('streaks', { filter: { task_name: op.eq(streakName) } });
 
     if (streaks && streaks.length > 0) {
@@ -1100,13 +1098,13 @@ if (mainTask) {
     if (totalSubtasks > 0) {
       // Completed subtasks
       for (const sub of completedSubtasks) {
-        const subClean = cleanTaskName(sub.content);
+        const subClean = extractCleanTaskName(sub.content);
         message += `\n  ✓ ${subClean}`;
       }
 
       // Failed subtasks
       for (const sub of failedSubtasks) {
-        const subClean = cleanTaskName(sub.content);
+        const subClean = extractCleanTaskName(sub.content);
         message += `\n  ✗ ${subClean}`;
       }
     }
