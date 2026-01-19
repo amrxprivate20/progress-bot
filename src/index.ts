@@ -10,10 +10,13 @@ import { handleTodoistWebhook, sendTaskNotification } from './handlers/todoist';
 import { validateEnvironment } from './utils/validation';
 import { asyncHandler, formatErrorResponse, ValidationError } from './utils/errors';
 import { ReportProcessor } from './durable-objects/report-processor';
+import { createReportGenerator } from './services/report-generator';
+import { getTodayInEgypt } from './utils/timezone';
 
 // Extended Env with Durable Object binding
 interface EnvWithDO extends Env {
   REPORT_PROCESSOR: DurableObjectNamespace; // Durable Object namespace
+  SUPABASE_SERVICE_ROLE_KEY?: string; // For storage operations (bypasses RLS)
 }
 
 export { ReportProcessor }; // Export the Durable Object class
@@ -71,13 +74,26 @@ export default {
       // TELEGRAM WEBHOOK
       // ============================================
       if (path === '/telegram/webhook' && request.method === 'POST') {
+        console.log('📨 Telegram webhook received');
         const botToken = env.TELEGRAM_BOT_TOKEN;
-        
-        // Pass Durable Object namespace to bot
-        const bot = createBot(botToken, db, settings, env.REPORT_PROCESSOR);
+
+        // Pass Durable Object namespace and env to bot
+        const bot = createBot(botToken, db, settings, env.REPORT_PROCESSOR, {
+          SUPABASE_URL: env.SUPABASE_URL,
+          SUPABASE_ANON_KEY: env.SUPABASE_ANON_KEY,
+          SUPABASE_SERVICE_ROLE_KEY: env.SUPABASE_SERVICE_ROLE_KEY,
+          TELEGRAM_BOT_TOKEN: env.TELEGRAM_BOT_TOKEN,
+        });
         const handler = createTelegramWebhookHandler(bot);
-        
-        return await handler(request);
+
+        try {
+          const response = await handler(request);
+          console.log('✅ Telegram webhook handled successfully');
+          return response;
+        } catch (webhookError) {
+          console.error('❌ Telegram webhook error:', webhookError);
+          throw webhookError;
+        }
       }
 
       // ============================================
@@ -133,6 +149,10 @@ export default {
               telegram_webhook: 'POST /telegram/webhook',
               settings: 'GET/POST/DELETE /api/settings',
               job_status: 'GET /api/jobs/{jobId}',
+              widget_last_reward: 'GET /api/widget/last-reward',
+              widget_today_report: 'GET /api/widget/today-report',
+              widget_daily_challenge: 'GET /api/widget/daily-challenge',
+              widget_weekly_challenges: 'GET /api/widget/weekly-challenges',
             },
           }),
           {
@@ -140,6 +160,15 @@ export default {
             headers: { 'Content-Type': 'application/json' },
           }
         );
+      }
+
+      // ============================================
+      // WIDGET API ENDPOINTS
+      // ============================================
+      if (path.startsWith('/api/widget/') && request.method === 'GET') {
+        return asyncHandler(async () => {
+          return await handleWidgetAPI(path, db, settings);
+        })(request, env, ctx);
       }
 
       // ============================================
@@ -300,4 +329,179 @@ async function handleSettingsAPI(
   }
 
   throw new ValidationError('Invalid settings API endpoint');
+}
+
+// ============================================
+// Widget API Handlers
+// ============================================
+
+async function handleWidgetAPI(
+  path: string,
+  db: any,
+  settings: SettingsManager
+): Promise<Response> {
+  const endpoint = path.replace('/api/widget/', '');
+  const today = getTodayInEgypt();
+
+  // Common headers for widget responses (plain text, CORS enabled)
+  const headers = {
+    'Content-Type': 'text/plain; charset=utf-8',
+    'Access-Control-Allow-Origin': '*',
+    'Cache-Control': 'public, max-age=60', // Cache for 1 minute
+  };
+
+  try {
+    switch (endpoint) {
+      case 'last-reward': {
+        // Get the most recent daily report with a reward
+        const reports = await db.select('daily_reports', {
+          order: 'report_date.desc',
+          limit: 5,
+        });
+
+        for (const report of reports) {
+          if (report.suggested_reward) {
+            return new Response(
+              `🎁 ${report.suggested_reward}\n📅 ${report.report_date}`,
+              { status: 200, headers }
+            );
+          }
+        }
+        return new Response('لا توجد مكافآت حتى الآن', { status: 200, headers });
+      }
+
+      case 'today-report': {
+        // Generate today's preview (similar to /today command)
+        const reportGen = createReportGenerator(db, settings);
+        const preview = await reportGen.generatePreview();
+
+        // Return plain text summary
+        const summary = [
+          `📅 ${today}`,
+          `✅ مكتملة: ${preview.completed_tasks}`,
+          `❌ فاشلة: ${preview.failed_tasks}`,
+          `📊 النسبة: ${Math.round(preview.success_rate)}%`,
+          `⏱️ الوقت: ${preview.total_time_minutes} دقيقة`,
+        ].join('\n');
+
+        return new Response(summary, { status: 200, headers });
+      }
+
+      case 'daily-challenge': {
+        // Get today's challenge AND weekly challenges list
+        const weekStart = getWeekStartDate();
+        const weekEnd = getWeekEndDate();
+
+        // Get all challenges for the week
+        const allChallenges = await db.select('daily_challenges', {
+          order: 'challenge_date.asc',
+        });
+
+        const weekChallenges = allChallenges.filter((c: any) => {
+          const date = c.challenge_date;
+          return date >= weekStart && date <= weekEnd;
+        });
+
+        if (weekChallenges.length === 0) {
+          return new Response('لا يوجد تحدي لليوم', { status: 200, headers });
+        }
+
+        // Find today's challenge
+        const todayChallenge = weekChallenges.find((c: any) => c.challenge_date === today);
+
+        // Build response with today's challenge highlighted and weekly list
+        const arabicDays: Record<number, string> = {
+          0: 'الأحد', 1: 'الإثنين', 2: 'الثلاثاء',
+          3: 'الأربعاء', 4: 'الخميس', 5: 'الجمعة', 6: 'السبت'
+        };
+
+        let response = '';
+
+        // Today's challenge first (highlighted)
+        if (todayChallenge) {
+          const statusIcon = todayChallenge.result === true ? '✅' : todayChallenge.result === false ? '❌' : '⏳';
+          response += `🎯 تحدي اليوم:\n${statusIcon} ${todayChallenge.challenge_text}\n\n`;
+        }
+
+        // Weekly summary
+        const completed = weekChallenges.filter((c: any) => c.result === true).length;
+        response += `📊 الأسبوع: ${completed}/${weekChallenges.length}\n\n`;
+
+        // List all weekly challenges
+        for (const c of weekChallenges) {
+          const date = new Date(c.challenge_date + 'T12:00:00Z');
+          const dayName = arabicDays[date.getDay()] || '';
+          const statusIcon = c.result === true ? '✅' : c.result === false ? '❌' : '⏳';
+          const isToday = c.challenge_date === today ? ' ←' : '';
+          response += `${statusIcon} ${dayName}${isToday}: ${c.challenge_text}\n`;
+        }
+
+        return new Response(response.trim(), { status: 200, headers });
+      }
+
+      case 'weekly-challenges': {
+        // Get this week's challenges
+        const weekStart = getWeekStartDate();
+        const weekEnd = getWeekEndDate();
+
+        const challenges = await db.select('daily_challenges', {
+          order: 'challenge_date.asc',
+        });
+
+        // Filter to this week
+        const thisWeekChallenges = challenges.filter((c: any) => {
+          const date = c.challenge_date;
+          return date >= weekStart && date <= weekEnd;
+        });
+
+        if (thisWeekChallenges.length === 0) {
+          return new Response('لا توجد تحديات هذا الأسبوع', { status: 200, headers });
+        }
+
+        const lines = thisWeekChallenges.map((c: any) => {
+          const statusIcon = c.result === true ? '✅' : c.result === false ? '❌' : '⏳';
+          return `${statusIcon} ${c.challenge_date}: ${c.challenge_text}`;
+        });
+
+        // Add summary
+        const completed = thisWeekChallenges.filter((c: any) => c.result === true).length;
+        const total = thisWeekChallenges.length;
+        lines.unshift(`📊 ${completed}/${total} مكتمل\n`);
+
+        return new Response(lines.join('\n'), { status: 200, headers });
+      }
+
+      default:
+        return new Response(
+          `Unknown widget endpoint: ${endpoint}\nAvailable: last-reward, today-report, daily-challenge, weekly-challenges`,
+          { status: 404, headers }
+        );
+    }
+  } catch (error) {
+    console.error('Widget API error:', error);
+    return new Response(
+      `خطأ: ${error instanceof Error ? error.message : 'Unknown'}`,
+      { status: 500, headers }
+    );
+  }
+}
+
+// Helper: Get week start date (Saturday)
+function getWeekStartDate(): string {
+  const today = new Date();
+  const dayOfWeek = today.getDay(); // 0 = Sunday, 6 = Saturday
+  const daysFromSat = dayOfWeek === 6 ? 0 : dayOfWeek + 1;
+  const saturday = new Date(today);
+  saturday.setDate(today.getDate() - daysFromSat);
+  return saturday.toISOString().split('T')[0] || '';
+}
+
+// Helper: Get week end date (Friday)
+function getWeekEndDate(): string {
+  const today = new Date();
+  const dayOfWeek = today.getDay();
+  const daysToFri = dayOfWeek <= 5 ? 5 - dayOfWeek : 6;
+  const friday = new Date(today);
+  friday.setDate(today.getDate() + daysToFri);
+  return friday.toISOString().split('T')[0] || '';
 }

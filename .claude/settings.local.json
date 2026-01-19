@@ -1,7 +1,16 @@
 {
   "permissions": {
     "allow": [
-      "Bash(cat:*)"
+      "Bash(cat:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(npm run build:*)",
+      "Bash(npx tsc:*)",
+      "Bash(npx wrangler:*)",
+      "Bash(find:*)",
+      "Bash(curl:*)",
+      "Bash(npm run deploy:*)",
+      "Bash(npm run typecheck:*)"
     ]
   }
 }

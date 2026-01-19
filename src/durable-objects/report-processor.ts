@@ -6,11 +6,12 @@
 // FIXED: Uses timezone utilities for Egypt UTC+2
 
 import { DurableObject } from 'cloudflare:workers';
-import { createSupabaseClient } from '../database/client';
+import { createSupabaseClient, op } from '../database/client';
 import { SettingsManager as SettingsMgr } from '../database/settings';
 import { createReportGenerator } from '../services/report-generator';
-import { createAIClient } from '../services/ai-client';
+import { createUnifiedAIClient } from '../services/ai-client';
 import { createMemoryManager } from '../services/memory-manager';
+import { createDriveService } from '../services/google-drive';
 import type { Env } from '../types';
 
 // ============================================
@@ -22,9 +23,11 @@ export interface ReportJobData {
   chatId: string;
   reportData: any;
   userAnswers: Record<string, string>;
-  apiKey: string;
+  apiKey: string; // OpenRouter API key
+  anthropicApiKey?: string; // Anthropic API key (optional, takes priority)
   aiModel: string;
   botToken: string;
+  useAnthropicPrimary?: boolean; // Default true if anthropicApiKey provided
 }
 
 export interface JobStatus {
@@ -64,20 +67,33 @@ export class ReportProcessor extends DurableObject<Env> {
     // POST /process - Start processing job
     if (path === '/process' && request.method === 'POST') {
       const jobData = await request.json() as ReportJobData;
-      
+
       // Start processing in background (don't await)
       this.ctx.waitUntil(this.processReport(jobData));
-      
+
       return new Response(
-        JSON.stringify({ 
-          success: true, 
+        JSON.stringify({
+          success: true,
           message: 'Processing started',
-          jobId: jobData.jobId 
+          jobId: jobData.jobId
         }),
         {
           status: 202, // Accepted
           headers: { 'Content-Type': 'application/json' },
         }
+      );
+    }
+
+    // POST /createtasks - Create Todoist tasks in background
+    if (path === '/createtasks' && request.method === 'POST') {
+      const { jobId } = await request.json() as { jobId: string };
+
+      // Start processing in background (don't await)
+      this.ctx.waitUntil(this.processCreateTasks(jobId));
+
+      return new Response(
+        JSON.stringify({ success: true, message: 'Task creation started', jobId }),
+        { status: 202, headers: { 'Content-Type': 'application/json' } }
       );
     }
 
@@ -89,14 +105,16 @@ export class ReportProcessor extends DurableObject<Env> {
    * This runs WITHOUT timeout limits!
    */
   private async processReport(jobData: ReportJobData): Promise<void> {
-    const { 
-      jobId, 
-      chatId, 
-      reportData, 
-      userAnswers, 
-      apiKey, 
-      aiModel, 
-      botToken 
+    const {
+      jobId,
+      chatId,
+      reportData,
+      userAnswers,
+      apiKey,
+      anthropicApiKey,
+      aiModel,
+      botToken,
+      useAnthropicPrimary
     } = jobData;
 
     console.log(`🎯 [Job ${jobId}] Starting report processing`);
@@ -116,9 +134,12 @@ export class ReportProcessor extends DurableObject<Env> {
         '🤖 جاري التحليل بالذكاء الاصطناعي...'
       );
 
-      // Validate API key
-      if (!apiKey.startsWith('sk-or-v1-')) {
-        throw new Error('Invalid OpenRouter API key format');
+      // Validate API keys - need at least one valid key
+      const hasValidAnthropicKey = anthropicApiKey && anthropicApiKey.startsWith('sk-ant-');
+      const hasValidOpenRouterKey = apiKey && apiKey.startsWith('sk-or-v1-');
+
+      if (!hasValidAnthropicKey && !hasValidOpenRouterKey) {
+        throw new Error('No valid AI API key provided. Need either Anthropic or OpenRouter key.');
       }
 
       // Create database clients
@@ -132,11 +153,18 @@ export class ReportProcessor extends DurableObject<Env> {
       const settings = new SettingsMgr(db);
 
       console.log(`🏗️ [Job ${jobId}] Creating services...`);
+      console.log(`🔑 [Job ${jobId}] Anthropic: ${hasValidAnthropicKey ? 'available' : 'not configured'}, OpenRouter: ${hasValidOpenRouterKey ? 'available' : 'not configured'}`);
 
       // Create services
       const reportGen = createReportGenerator(db, settings);
-      const aiClient = createAIClient(apiKey, aiModel);
-      const memoryMgr = createMemoryManager(db, aiClient);
+      const aiClient = createUnifiedAIClient({
+        anthropicApiKey: hasValidAnthropicKey ? anthropicApiKey : undefined,
+        openRouterApiKey: hasValidOpenRouterKey ? apiKey : undefined,
+        anthropicModel: 'claude-sonnet-4-20250514',
+        openRouterModel: aiModel,
+        useAnthropicPrimary: useAnthropicPrimary !== false, // Default to Anthropic if available
+      });
+      const memoryMgr = createMemoryManager(db, aiClient as any);
 
       // Generate past week summary
       const pastWeekSummary = reportGen.generatePastWeekSummary(
@@ -197,6 +225,30 @@ export class ReportProcessor extends DurableObject<Env> {
 
       console.log(`✅ [Job ${jobId}] Report saved successfully`);
 
+      // Save to Google Drive (if configured)
+      try {
+        const driveService = createDriveService(db, settings);
+        const driveResult = await driveService.saveReport({
+          report_date: new Date(reportData.date),
+          report_markdown: aiResponse.mainCommentary,
+          success_rate: stats.success_rate,
+          total_tasks: stats.total_tasks,
+          completed_tasks: stats.completed_tasks,
+          failed_tasks: stats.failed_tasks,
+        } as any);
+
+        if (driveResult.success) {
+          console.log(`☁️ [Job ${jobId}] Report saved to Google Drive`);
+          // Also update _LastUpdate.md
+          await driveService.updateLastUpdateFile();
+        } else if (driveResult.error !== 'Google Drive not configured') {
+          console.warn(`⚠️ [Job ${jobId}] Google Drive save failed:`, driveResult.error);
+        }
+      } catch (driveError) {
+        console.warn(`⚠️ [Job ${jobId}] Google Drive error (non-fatal):`, driveError);
+        // Don't fail the whole job if Google Drive fails
+      }
+
       // Final success message
       await this.sendTelegramMessage(chatId, botToken, '✅ تم حفظ التقرير بنجاح!');
 
@@ -246,6 +298,7 @@ export class ReportProcessor extends DurableObject<Env> {
     botToken: string,
     text: string
   ): Promise<void> {
+    console.log(`[Telegram] Sending message to ${chatId}, length: ${text.length}`);
     try {
       const response = await fetch(
         `https://api.telegram.org/bot${botToken}/sendMessage`,
@@ -259,9 +312,11 @@ export class ReportProcessor extends DurableObject<Env> {
         }
       );
 
+      const responseText = await response.text();
+      console.log(`[Telegram] Response status: ${response.status}, body: ${responseText.substring(0, 200)}`);
+
       if (!response.ok) {
-        const error = await response.text();
-        console.error('Telegram API error:', error);
+        console.error('Telegram API error:', responseText);
       }
     } catch (error) {
       console.error('Failed to send Telegram message:', error);
@@ -368,6 +423,125 @@ export class ReportProcessor extends DurableObject<Env> {
       }
 
       await this.sendTelegramMessage(chatId, botToken, goalsMsg);
+    }
+  }
+
+  /**
+   * Process create tasks job in background
+   */
+  private async processCreateTasks(jobId: string): Promise<void> {
+    console.log(`🎯 [CreateTasks ${jobId}] Starting task creation`);
+
+    let chatId = '';
+    let botToken = '';
+    let lockKey = '';
+
+    try {
+      // Get job data from database
+      const db = createSupabaseClient({
+        SUPABASE_URL: this.env.SUPABASE_URL,
+        SUPABASE_ANON_KEY: this.env.SUPABASE_ANON_KEY,
+        TELEGRAM_BOT_TOKEN: '',
+        TELEGRAM_CHAT_ID: '',
+        TODOIST_API_TOKEN: '',
+      } as any);
+
+      const jobData = await db.select('conversation_state', {
+        filter: { chat_id: op.eq(`job_${jobId}`) },
+      });
+
+      if (jobData.length === 0) {
+        console.error(`[CreateTasks ${jobId}] Job data not found`);
+        return;
+      }
+
+      // data is JSONB, already parsed by Supabase
+      const data = (jobData[0].data || {}) as any;
+      chatId = data.chatId;
+      lockKey = data.lockKey;
+      botToken = data.botToken;
+      const openRouterKey = data.openRouterKey;
+      const anthropicApiKey = data.anthropicApiKey;
+      const aiModel = data.aiModel;
+
+      console.log(`[CreateTasks ${jobId}] Processing for chat ${chatId}`);
+
+      // Create AI client
+      const { createUnifiedAIClient } = await import('../services/ai-client');
+      const aiClient = createUnifiedAIClient({
+        anthropicApiKey: anthropicApiKey || undefined,
+        openRouterApiKey: openRouterKey || undefined,
+        openRouterModel: aiModel,
+      });
+
+      // Create task generator
+      const settings = new SettingsMgr(db);
+      const { createTaskGeneratorService } = await import('../services/todoist-client');
+      const taskGen = createTaskGeneratorService(db, settings, aiClient as any);
+
+      console.log(`[CreateTasks ${jobId}] Generating tasks...`);
+      const result = await taskGen.generateAndCreateTasks();
+      console.log(`[CreateTasks ${jobId}] Generation complete:`, result.success);
+      console.log(`[CreateTasks ${jobId}] Result:`, JSON.stringify(result));
+
+      // Send results
+      if (result.success && result.createdTasks && result.createdTasks.length > 0) {
+        console.log(`[CreateTasks ${jobId}] Sending success message with ${result.createdTasks.length} tasks`);
+        let message = `🎉 تم إنشاء ${result.createdTasks.length} مهمة في Todoist!\n\n`;
+
+        for (const task of result.createdTasks) {
+          const priority = '⭐'.repeat(task.priority);
+          const dueDate = task.due?.date || 'بدون موعد';
+          message += `✅ ${task.content}\n`;
+          message += `   📅 ${dueDate} ${priority}\n\n`;
+        }
+
+        message += '━━━━━━━━━━━━━━━━━━━━\n';
+        message += '📱 افتح Todoist لرؤية المهام!';
+
+        await this.sendTelegramMessage(chatId, botToken, message);
+        console.log(`[CreateTasks ${jobId}] Success message sent`);
+      } else {
+        console.log(`[CreateTasks ${jobId}] No tasks created or error:`, result.error);
+        console.log(`[CreateTasks ${jobId}] createdTasks:`, result.createdTasks);
+        await this.sendTelegramMessage(
+          chatId,
+          botToken,
+          `❌ ${result.error || 'لم يتم إنشاء أي مهام'}`
+        );
+      }
+
+      // Clean up job data
+      await db.delete('conversation_state', { chat_id: op.eq(`job_${jobId}`) });
+
+      console.log(`🎉 [CreateTasks ${jobId}] Complete!`);
+
+    } catch (error) {
+      console.error(`💥 [CreateTasks ${jobId}] Error:`, error);
+
+      if (chatId && botToken) {
+        await this.sendTelegramMessage(
+          chatId,
+          botToken,
+          '❌ حدث خطأ أثناء إنشاء المهام: ' + (error as Error).message
+        );
+      }
+    } finally {
+      // Always clear the lock
+      if (lockKey) {
+        try {
+          const db = createSupabaseClient({
+            SUPABASE_URL: this.env.SUPABASE_URL,
+            SUPABASE_ANON_KEY: this.env.SUPABASE_ANON_KEY,
+            TELEGRAM_BOT_TOKEN: '',
+            TELEGRAM_CHAT_ID: '',
+            TODOIST_API_TOKEN: '',
+          } as any);
+          await db.delete('conversation_state', { chat_id: op.eq(lockKey) });
+        } catch (e) {
+          console.error('Failed to clear lock:', e);
+        }
+      }
     }
   }
 }

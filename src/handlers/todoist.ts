@@ -22,13 +22,11 @@ import {
 } from '../services/failure-manager';
 import {
   parseTaskMetadata,
-  getOriginalMetadataString,
-  extractCleanTaskName, 
+  extractCleanTaskName,
 } from '../utils/task-parser';
-import { 
-  getEgyptDateString, 
+import {
+  getEgyptDateString,
   getEgyptDayBoundaries,
-  formatArabicStreak,
   formatArabicTime
 } from '../utils/timezone';
 
@@ -280,37 +278,84 @@ export async function handleTodoistWebhook(
     };
   }
 
+  // Check for pending timer update FIRST (from /starttask -> /completetask flow)
+  // This must happen before duplicate check so we match on correct content
+  let taskContent = event.event_data.content;
+  let timerDuration = 0;
+  const pendingUpdateKey = `pending_update_${event.event_data.id}`;
+
+  console.log('🔍 Looking for pending update with key:', pendingUpdateKey);
+  console.log('🔍 Original task content from webhook:', taskContent);
+
+  try {
+    // Small delay to ensure pending update record is saved (race condition prevention)
+    await new Promise(resolve => setTimeout(resolve, 200));
+
+    const pendingUpdates = await db.select('conversation_state', {
+      filter: { chat_id: op.eq(pendingUpdateKey) },
+    });
+
+    console.log('📊 Found pending updates:', pendingUpdates.length);
+
+    if (pendingUpdates.length > 0) {
+      const pendingData = (pendingUpdates[0] as any).data || {};
+      console.log('📦 Pending update data:', JSON.stringify(pendingData));
+
+      if (pendingData.updatedContent) {
+        console.log('🔄 Using updated content from timer:', pendingData.updatedContent);
+        taskContent = pendingData.updatedContent;
+        timerDuration = pendingData.durationMinutes || 0;
+      }
+      // Clean up the pending update
+      await db.delete('conversation_state', { chat_id: op.eq(pendingUpdateKey) });
+      console.log('🗑️ Cleaned up pending update record');
+    } else {
+      console.log('ℹ️ No pending timer update found for this task');
+    }
+  } catch (err) {
+    console.error('❌ Error checking pending update:', err);
+  }
+
+  // NOW check for duplicates using the final task content (with updated duration/quantity)
   if (!isRecurring) {
-    const isDuplicate = await checkDuplicate(db, event.event_data.id, completedAt.toISOString());
+    const isDuplicate = await checkDuplicate(db, event.event_data.id, taskContent, completedAt.toISOString());
     if (isDuplicate) {
-      console.log('⚠️ Duplicate task detected');
+      console.log('⚠️ Duplicate task detected - skipping save');
       return { success: true, message: 'Duplicate task ignored' };
     }
   }
 
-  const metadata = parseTaskMetadata(event.event_data.content);
+  const metadata = parseTaskMetadata(taskContent);
   console.log('📊 Parsed metadata:', metadata);
 
   let category = metadata.category;
   if (!category && event.event_data.labels && event.event_data.labels.length > 0) {
     const firstLabel = event.event_data.labels[0];
     if (firstLabel) {
+      // Remove emojis but keep Arabic/Unicode letters
+      // \p{Emoji} matches emojis, keep everything else
       category = firstLabel
-        .replace(/[^\w\s]/gi, '')
+        .replace(/[\u{1F300}-\u{1F9FF}]|[\u{2600}-\u{26FF}]|[\u{2700}-\u{27BF}]/gu, '') // Remove emojis
         .replace(/\s+/g, '_')
-        .trim()
-        .toLowerCase();
+        .trim();
+
+      // If category is empty or just underscores, use the original label
+      if (!category || category === '_' || /^_+$/.test(category)) {
+        category = firstLabel.trim();
+      }
+
+      console.log('🏷️ Label category:', firstLabel, '->', category);
     }
   }
 
   const task: Task = {
     task_id: event.event_data.id,
-    content: event.event_data.content,
+    content: taskContent, // Use updated content if timer was used
     category: category,
     priority: event.event_data.priority,
     description: event.event_data.description || undefined,
     completed_at: completedAt, // ✅ Date object
-    duration_minutes: metadata.duration_minutes || 0,
+    duration_minutes: timerDuration || metadata.duration_minutes || 0, // Prefer timer duration
     quantity: metadata.quantity,
     quantity_unit: metadata.quantity_unit,
     is_origin: isRecurring && !isSubtask,
@@ -674,6 +719,7 @@ function extractWeeklyPattern(dueString: string): string | undefined {
 async function checkDuplicate(
   db: SupabaseClient,
   taskId: string,
+  taskContent: string,
   completedAt: string
 ): Promise<boolean> {
   try {
@@ -681,18 +727,38 @@ async function checkDuplicate(
     const windowStart = new Date(completedDate.getTime() - 20 * 60 * 1000);
     const windowEnd = new Date(completedDate.getTime() + 20 * 60 * 1000);
 
-    const existing = await db.select('tasks', {
-      columns: 'id,completed_at',
+    // Get clean task name for matching (remove all [...] parameters)
+    const cleanName = extractCleanTaskName(taskContent);
+    console.log('🔍 Checking duplicate for clean name:', cleanName);
+
+    // Get all tasks in the time window
+    const recentTasks = await db.select<{ id: number; task_id: string; content: string; completed_at: string }>('tasks', {
+      columns: 'id,task_id,content,completed_at',
       filter: {
-        task_id: op.eq(taskId),
         completed_at: op.gte(windowStart.toISOString()),
       },
-      limit: 1,
+      limit: 50,
     });
 
-    if (existing.length > 0) {
-      const existingDate = new Date(existing[0].completed_at);
-      return existingDate <= windowEnd;
+    // Check for duplicates by CLEAN NAME (not task ID)
+    for (const existing of recentTasks) {
+      const existingCleanName = extractCleanTaskName(existing.content);
+      const existingDate = new Date(existing.completed_at);
+
+      if (existingCleanName === cleanName && existingDate <= windowEnd) {
+        console.log('⚠️ Found duplicate by clean name:', existingCleanName, 'existing task_id:', existing.task_id);
+        return true;
+      }
+    }
+
+    // Also check by task ID (original logic)
+    const existingById = recentTasks.find(t => t.task_id === taskId);
+    if (existingById) {
+      const existingDate = new Date(existingById.completed_at);
+      if (existingDate <= windowEnd) {
+        console.log('⚠️ Found duplicate by task ID:', taskId);
+        return true;
+      }
     }
 
     return false;
@@ -907,91 +973,62 @@ export async function sendTaskNotification(
         .trim();
     };
 
-    if (totalSubtasks === 0) {
-      // No subtasks - simple task
-      const symbol = mainTask.status === 'done' ? '✅' : '❌';
-      const cleanName = cleanTaskName(mainTask.content);
-      const metadata = getOriginalMetadataString(mainTask.content);
-      
-      message = `${symbol} ${cleanName}`;
-      if (metadata) {
-        message += ` ${metadata}`;
-      }
-    } else {
-      // Has subtasks - determine parent symbol
-      const allComplete = failedSubtasks.length === 0;
-      const allFailed = completedSubtasks.length === 0;
-      
-      let symbol: string;
-      if (allComplete) {
-        symbol = '✅';
-      } else if (allFailed) {
-        symbol = '❌';
-      } else {
-        symbol = '⚠️';
-      }
-      
-      // Clean parent name but keep metadata separate
-      const cleanName = cleanTaskName(mainTask.content);
-      const metadata = getOriginalMetadataString(mainTask.content);
-      
-      message = `${symbol} ${cleanName}`;
-      if (metadata) {
-        message += ` ${metadata}`;
-      }
-      message += '\n';
-      
-      // Add completed subtasks (cleaned)
-      for (const sub of completedSubtasks) {
-        const subClean = cleanTaskName(sub.content);
-        const subMetadata = getOriginalMetadataString(sub.content);
-        
-        message += `\n✓ ${subClean}`;
-        if (subMetadata) {
-          message += ` ${subMetadata}`;
-        }
-      }
-      
-      // Add failed subtasks (cleaned)
-      for (const sub of failedSubtasks) {
-        const subClean = cleanTaskName(sub.content);
-        message += `\n✕ ${subClean}`;
-      }
-    }
+    // === SIMPLIFIED NOTIFICATION FORMAT ===
+    // Line 1: symbol + task name [duration] [quantity] [streak]
+    // Line 2: description (if any)
+    // Then: subtasks (if any)
 
-    // Add task details
     const displayTask = mainTask;
-    
-    if (displayTask.description) {
-      message += `\n\n📝 ${displayTask.description}`;
-    }
+    const symbol = totalSubtasks === 0
+      ? (mainTask.status === 'done' ? '✅' : '❌')
+      : (failedSubtasks.length === 0 ? '✅' : (completedSubtasks.length === 0 ? '❌' : '⚠️'));
 
+    const cleanName = cleanTaskName(mainTask.content);
+
+    // Build first line: name + metadata inline
+    let firstLine = `${symbol} ${cleanName}`;
+
+    // Add duration if present
     if (displayTask.duration_minutes && displayTask.duration_minutes > 0) {
-      message += `\n\n⏱ المدة: ${formatArabicTime(displayTask.duration_minutes)}`;
+      firstLine += ` [${formatArabicTime(displayTask.duration_minutes)}]`;
     }
 
+    // Add quantity if present
     if (displayTask.quantity && displayTask.quantity_unit) {
-      message += `\n📊 الكمية: ${displayTask.quantity} ${displayTask.quantity_unit}`;
+      firstLine += ` [${displayTask.quantity} ${displayTask.quantity_unit}]`;
     }
 
-    if (displayTask.category) {
-      message += `\n🏷 الفئة: ${displayTask.category}`;
-    }
-
-    // Add streak info
+    // Add streak if present
     const streakName = task.content + (task.origin_task ? ' [subtask]' : '');
     const streaks = await db.select('streaks', { filter: { task_name: op.eq(streakName) } });
-    
+
     if (streaks && streaks.length > 0) {
       const streak = streaks[0];
-      if (streak.current_streak > 0) {
-        message += '\n\n🔥 السلسلة:\n';
-        message += `النوع: ${streak.streak_type === 'daily' ? 'يومية' : 'أسبوعية'}\n`;
-        message += `المدة: ${formatArabicStreak(streak.current_streak)}`;
-        
-        if (streak.current_streak === streak.best_streak && streak.current_streak > 1) {
-          message += ' 🎉 (رقم قياسي جديد!)';
-        }
+      if (streak.current_streak > 1) {
+        const isRecord = streak.current_streak === streak.best_streak;
+        firstLine += ` [🔥${streak.current_streak}${isRecord ? '🎉' : ''}]`;
+      }
+    }
+
+    message = firstLine;
+
+    // Line 2: description (if any)
+    if (displayTask.description) {
+      message += `\n📝 ${displayTask.description}`;
+    }
+
+    // Subtasks (if any)
+    if (totalSubtasks > 0) {
+      // Completed subtasks
+      for (const sub of completedSubtasks) {
+        const subClean = cleanTaskName(sub.content);
+        message += `\n  ✓ ${subClean}`;
+      }
+
+      // Failed subtasks
+      for (const sub of failedSubtasks) {
+        const subClean = cleanTaskName(sub.content);
+        message += `\n  ✗ ${subClean}`;
       }
     }
 

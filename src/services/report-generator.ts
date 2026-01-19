@@ -10,12 +10,12 @@
 import { SupabaseClient, op } from '../database/client';
 import { SettingsManager } from '../database/settings';
 import { Task, Streak, DailyReport, WeeklyGoals, DailyChallenge, Memory } from '../types';
-import { 
-  getTodayInEgypt, 
-  getEgyptDayBoundaries, 
-  formatArabicTime, 
-  formatArabicStreak, 
-  formatArabicDate 
+import {
+  getTodayInEgypt,
+  getEgyptDayBoundaries,
+  formatArabicTime,
+  formatArabicStreak,
+  formatArabicDate
 } from '../utils/timezone';
 import { getOriginalMetadataString, extractCleanTaskName } from '../utils/task-parser';
 import {
@@ -23,6 +23,7 @@ import {
   type FailedTask,
   type DailyFailures,
 } from './failure-manager';
+import { createJournalManager } from './journal';
 
 // ============================================
 // Types
@@ -38,6 +39,7 @@ export interface ReportData {
   memory: Record<string, string>;
   previousReports: DailyReport[];
   strategicGoals: string;
+  journal: string | null; // Formatted journal entries for the day
 }
 
 export interface ReportPreview {
@@ -63,6 +65,7 @@ export interface ReportStatistics {
   total_time_minutes: number;
   total_quantity: Record<string, number>;
   category_breakdown: Record<string, number>;
+  duration_by_category: Record<string, number>; // minutes per category
 }
 
 // ============================================
@@ -105,6 +108,10 @@ export class ReportGenerator {
     // Get strategic goals from settings
     const strategicGoals = await this.settings.get('strategic_goals') || '';
 
+    // Get journal entries for the day (with media URLs for clickable links)
+    const journalMgr = createJournalManager(this.db);
+    const journal = await journalMgr.getFormattedJournalWithMedia(reportDate);
+
     return {
       date: reportDate,
       tasks,
@@ -115,6 +122,7 @@ export class ReportGenerator {
       memory,
       previousReports,
       strategicGoals,
+      journal,
     };
   }
 
@@ -173,36 +181,164 @@ export class ReportGenerator {
    * Calculate statistics from tasks + JSON failures
    */
   calculateStatistics(tasks: Task[], failedTasksJson: DailyFailures | null): ReportStatistics {
-    const completed = tasks.filter(t => t.status === 'done').length;
-    const failed = failedTasksJson ? failedTasksJson.failed_tasks.length : 0;
-    const partial = tasks.filter(t => t.status === 'partial').length;
-    const total = completed + failed;
+    // =========================================================================
+    // NEW LOGIC: Only count MAIN tasks, calculate success based on subtasks
+    // =========================================================================
 
-    const successRate = total > 0 ? (completed / total) * 100 : 0;
+    // Step 1: Separate main tasks and subtasks from completed tasks
+    const completedMainTasks = tasks.filter(t => !t.origin_task); // No parent = main task
+    const completedSubtasks = tasks.filter(t => !!t.origin_task); // Has parent = subtask
 
-    const totalTime = tasks
-      .filter(t => t.status === 'done')
-      .reduce((sum, t) => sum + (t.duration_minutes || 0), 0);
+    // Step 2: Get failed main tasks and subtasks from JSON
+    const failedMainTasks = failedTasksJson?.failed_tasks.filter(t => !t.is_subtask) || [];
+    const failedSubtasks = failedTasksJson?.failed_tasks.filter(t => t.is_subtask) || [];
+
+    // Step 3: Build a map of all main tasks (completed + failed)
+    const mainTaskMap = new Map<string, {
+      name: string;
+      isCompleted: boolean;
+      completedSubtasks: number;
+      failedSubtasks: number;
+      totalSubtasks: number;
+      category?: string;
+      duration?: number;
+    }>();
+
+    // Add completed main tasks
+    for (const task of completedMainTasks) {
+      const cleanName = extractCleanTaskName(task.content);
+      mainTaskMap.set(cleanName, {
+        name: cleanName,
+        isCompleted: true,
+        completedSubtasks: 0,
+        failedSubtasks: 0,
+        totalSubtasks: 0,
+        category: task.category,
+        duration: task.duration_minutes,
+      });
+    }
+
+    // Add failed main tasks (if not already in map)
+    for (const task of failedMainTasks) {
+      const cleanName = extractCleanTaskName(task.content);
+      if (!mainTaskMap.has(cleanName)) {
+        mainTaskMap.set(cleanName, {
+          name: cleanName,
+          isCompleted: false,
+          completedSubtasks: 0,
+          failedSubtasks: 0,
+          totalSubtasks: 0,
+          category: task.category,
+          duration: task.duration_minutes,
+        });
+      }
+    }
+
+    // Step 4: Count subtasks for each main task
+    // Count completed subtasks
+    for (const sub of completedSubtasks) {
+      // Find parent by origin_task ID
+      const parentTask = completedMainTasks.find(t => {
+        const baseId = t.task_id?.split('_')[0];
+        const originBase = sub.origin_task?.split('_')[0];
+        return baseId === originBase || t.task_id === sub.origin_task;
+      });
+
+      if (parentTask) {
+        const parentName = extractCleanTaskName(parentTask.content);
+        const entry = mainTaskMap.get(parentName);
+        if (entry) {
+          entry.completedSubtasks++;
+          entry.totalSubtasks++;
+        }
+      }
+    }
+
+    // Count failed subtasks by parent name
+    for (const sub of failedSubtasks) {
+      if (sub.parent_content) {
+        const parentName = extractCleanTaskName(sub.parent_content);
+        const entry = mainTaskMap.get(parentName);
+        if (entry) {
+          entry.failedSubtasks++;
+          entry.totalSubtasks++;
+        }
+      }
+    }
+
+    // Step 5: Calculate success percentage for each main task
+    let totalSuccessPercent = 0;
+    let fullyCompleted = 0;
+    let partiallyCompleted = 0;
+    let fullyFailed = 0;
+
+    for (const [, entry] of mainTaskMap) {
+      let successPercent: number;
+
+      if (entry.totalSubtasks === 0) {
+        // No subtasks - binary: 100% if completed, 0% if not
+        successPercent = entry.isCompleted ? 100 : 0;
+      } else {
+        // Has subtasks - calculate based on subtask completion
+        successPercent = (entry.completedSubtasks / entry.totalSubtasks) * 100;
+      }
+
+      totalSuccessPercent += successPercent;
+
+      // Categorize
+      if (successPercent === 100) {
+        fullyCompleted++;
+      } else if (successPercent === 0) {
+        fullyFailed++;
+      } else {
+        partiallyCompleted++;
+      }
+    }
+
+    // Step 6: Calculate overall success rate (average of all main task percentages)
+    const totalMainTasks = mainTaskMap.size;
+    const overallSuccessRate = totalMainTasks > 0 ? totalSuccessPercent / totalMainTasks : 0;
+
+    // Step 7: Calculate duration from completed tasks only
+    const completedTasks = tasks.filter(t => t.status === 'done');
+    const totalTime = completedTasks.reduce((sum, t) => sum + (t.duration_minutes || 0), 0);
+
+    // Step 8: Calculate duration by category
+    const durationByCategory: Record<string, number> = {};
+    for (const task of completedTasks) {
+      if (task.duration_minutes && task.duration_minutes > 0) {
+        const category = task.category || 'غير مصنف'; // "Uncategorized"
+        durationByCategory[category] = (durationByCategory[category] || 0) + task.duration_minutes;
+      }
+    }
 
     // Group quantities by unit
     const quantities: Record<string, number> = {};
-    for (const task of tasks.filter(t => t.status === 'done' && t.quantity)) {
+    for (const task of completedTasks.filter(t => t.quantity)) {
       const unit = task.quantity_unit || 'items';
       quantities[unit] = (quantities[unit] || 0) + (task.quantity || 0);
     }
 
-    // Category breakdown
-    const categoryBreakdown = this.groupByCategory(tasks.filter(t => t.status === 'done'));
+    // Category breakdown (completed tasks only)
+    const categoryBreakdown = this.groupByCategory(completedTasks);
+
+    console.log(`📊 Statistics calculation:`);
+    console.log(`   Total main tasks: ${totalMainTasks}`);
+    console.log(`   Fully completed: ${fullyCompleted}`);
+    console.log(`   Partially completed: ${partiallyCompleted}`);
+    console.log(`   Failed: ${fullyFailed}`);
+    console.log(`   Overall success rate: ${overallSuccessRate.toFixed(1)}%`);
 
     return {
-      total_tasks: total,
-      completed_tasks: completed,
-      failed_tasks: failed,
-      partial_tasks: partial,
-      success_rate: successRate,
+      total_tasks: totalMainTasks,
+      completed_tasks: fullyCompleted,
+      failed_tasks: fullyFailed,
+      partial_tasks: partiallyCompleted,
+      success_rate: overallSuccessRate,
       total_time_minutes: totalTime,
       total_quantity: quantities,
       category_breakdown: categoryBreakdown,
+      duration_by_category: durationByCategory,
     };
   }
 
@@ -417,13 +553,33 @@ export class ReportGenerator {
 
     let text = `📊 التقرير اليومي - ${arabicDate}\n\n`;
 
-    // Statistics
+    // Statistics (main tasks only, subtasks excluded from counts)
     text += `📈 الإحصائيات:\n`;
-    text += `- إجمالي المهام: ${stats.total_tasks}\n`;
-    text += `- المنجزة: ${stats.completed_tasks}\n`;
-    text += `- الفاشلة: ${stats.failed_tasks}\n`;
+    text += `- إجمالي المهام الرئيسية: ${stats.total_tasks}\n`;
+    text += `- مكتملة بالكامل: ${stats.completed_tasks}\n`;
+    if (stats.partial_tasks > 0) {
+      text += `- مكتملة جزئياً: ${stats.partial_tasks}\n`;
+    }
+    text += `- فاشلة: ${stats.failed_tasks}\n`;
     text += `- معدل النجاح: ${stats.success_rate.toFixed(1)}%\n`;
-    text += `- وقت الإنجاز: ${formatArabicTime(stats.total_time_minutes)}\n\n`;
+
+    // Duration breakdown by category
+    if (stats.total_time_minutes > 0) {
+      text += `\n⏱ توزيع الوقت:\n`;
+      text += `- الإجمالي: ${formatArabicTime(stats.total_time_minutes)}\n`;
+
+      // Sort categories by duration (descending)
+      const sortedCategories = Object.entries(stats.duration_by_category)
+        .sort(([, a], [, b]) => b - a);
+
+      for (const [category, minutes] of sortedCategories) {
+        const percentage = ((minutes / stats.total_time_minutes) * 100).toFixed(0);
+        text += `- ${category}: ${formatArabicTime(minutes)} (${percentage}%)\n`;
+      }
+    } else {
+      text += `- وقت الإنجاز: ${formatArabicTime(stats.total_time_minutes)}\n`;
+    }
+    text += '\n';
 
     // ✅ Build hierarchical structure using NAME-BASED grouping
     text += `🎯 مهام اليوم:\n`;
@@ -652,9 +808,18 @@ export class ReportGenerator {
       }
     }
 
-    // Challenge
-    if (challengeStatus !== 'لا يوجد تحدي') {
+    // Challenge (show both the challenge text AND the result)
+    if (data.dailyChallenge && data.dailyChallenge.challenge_text) {
+      text += `\n🎯 التحدي اليومي:\n`;
+      text += `   "${data.dailyChallenge.challenge_text}"\n`;
+      text += `   النتيجة: ${challengeStatus}`;
+    } else if (challengeStatus !== 'لا يوجد تحدي') {
       text += `\n🎯 التحدي اليومي: ${challengeStatus}`;
+    }
+
+    // Journal entries
+    if (data.journal) {
+      text += `\n\n${data.journal}`;
     }
 
     return text;

@@ -6,6 +6,7 @@
 export interface Env {
   SUPABASE_URL: string;
   SUPABASE_ANON_KEY: string;
+  SUPABASE_SERVICE_ROLE_KEY?: string; // For storage operations (bypasses RLS)
   TELEGRAM_BOT_TOKEN: string;
   TELEGRAM_CHAT_ID: string;
   TODOIST_API_TOKEN: string;
@@ -99,6 +100,18 @@ export interface Setting {
   key: string;
   value: string;
   updated_at?: Date;
+}
+
+export interface JournalEntry {
+  id?: string;
+  entry_date: Date | string;
+  message_text?: string;
+  media_url?: string;
+  media_type?: 'image' | 'video' | 'document' | 'voice';
+  entry_order?: number;
+  created_at?: Date;
+  is_session_start?: boolean;
+  is_session_end?: boolean;
 }
 
 export interface ConversationState {
@@ -297,6 +310,8 @@ export const CONVERSATION_STATE_TYPE = {
   QA_FLOW: 'qa_flow',
   REPORT_CONFIRMATION: 'report_confirmation',
   MEMORY_CLEAR_CONFIRMATION: 'memory_clear_confirmation',
+  JOURNAL_SESSION: 'journal_session',
+  LOG_FAILURE: 'log_failure',
 } as const;
 
 export const TELEGRAM_THREAD = {

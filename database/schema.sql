@@ -155,7 +155,31 @@ CREATE TABLE IF NOT EXISTS settings (
 COMMENT ON TABLE settings IS 'System configuration and API keys';
 
 -- ============================================
--- 8. CONVERSATION STATE TABLE (for Q&A flow)
+-- 8. JOURNAL ENTRIES TABLE (for daily journaling)
+-- ============================================
+CREATE TABLE IF NOT EXISTS journal_entries (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  entry_date DATE NOT NULL,
+  message_text TEXT,
+  media_url TEXT,
+  media_type TEXT CHECK (media_type IN ('image', 'video', 'document', 'voice')),
+  entry_order INTEGER DEFAULT 0,
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  is_session_start BOOLEAN DEFAULT false,
+  is_session_end BOOLEAN DEFAULT false
+);
+
+CREATE INDEX IF NOT EXISTS idx_journal_date ON journal_entries(entry_date DESC);
+CREATE INDEX IF NOT EXISTS idx_journal_order ON journal_entries(entry_date, entry_order);
+
+COMMENT ON TABLE journal_entries IS 'Daily journal entries with text and media support';
+COMMENT ON COLUMN journal_entries.entry_date IS 'Egypt date for the entry';
+COMMENT ON COLUMN journal_entries.entry_order IS 'Order of entry within the day';
+COMMENT ON COLUMN journal_entries.is_session_start IS 'Marks the start of a journaling session';
+COMMENT ON COLUMN journal_entries.is_session_end IS 'Marks the end of a journaling session';
+
+-- ============================================
+-- 9. CONVERSATION STATE TABLE (for Q&A flow)
 -- ============================================
 CREATE TABLE IF NOT EXISTS conversation_state (
   id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
@@ -198,8 +222,11 @@ INSERT INTO settings (key, value) VALUES
   ('todoist_api_token', 'YOUR_TOKEN_HERE'),
   ('todoist_project_id', '6G5w8P3227Gxp9vw'),
   ('openrouter_api_key', 'YOUR_KEY_HERE'),
+  ('anthropic_api_key', ''),
+  ('use_anthropic_primary', 'true'),
   ('ai_model', 'anthropic/claude-sonnet-4'),
   ('google_drive_folder_id', 'YOUR_FOLDER_ID_HERE'),
+  ('google_service_account', '{}'),
   ('quran_task_name', 'Reviewing a memorized portion from the the Holy Quran❗'),
   ('quran_spreadsheet_id', '1MHFaNWUyzDaGYRWEJOs8BV_g4JOmoagjnr4ZY0wxg0g'),
   ('timezone', 'Africa/Cairo'),

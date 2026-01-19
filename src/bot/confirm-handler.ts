@@ -9,8 +9,9 @@
 import type { BotContext } from './grammy';
 import type { ReportJobData } from '../durable-objects/report-processor';
 import { createReportGenerator } from '../services/report-generator';
-import { createAIClient } from '../services/ai-client';
+import { createUnifiedAIClient } from '../services/ai-client';
 import { createConversationManager } from '../services/conversation-manager';
+import { op } from '../database/client';
 
 /**
  * Handle /confirm command - Start Durable Object job
@@ -20,9 +21,26 @@ export async function handleConfirmCommand(
   reportProcessorNamespace: DurableObjectNamespace
 ): Promise<void> {
   try {
-    await ctx.reply('🔄 جاري بدء التحليل الكامل...');
-
     const chatId = ctx.chat?.id.toString() || '';
+
+    // Check if there's a pending report date from /report command
+    const pendingReportKey = `pending_report_${chatId}`;
+    const pendingReportState = await ctx.db.select('conversation_state', {
+      filter: { chat_id: op.eq(pendingReportKey) },
+      limit: 1,
+    });
+
+    let targetDate: string | undefined;
+    if (pendingReportState.length > 0) {
+      const pendingData = (pendingReportState[0] as any).data || {};
+      targetDate = pendingData.targetDate;
+      // Clean up the pending state
+      await ctx.db.delete('conversation_state', { chat_id: op.eq(pendingReportKey) });
+    }
+
+    const dateLabel = targetDate || 'اليوم';
+    await ctx.reply(`🔄 جاري بدء التحليل الكامل لـ ${dateLabel}...`);
+
     const conversationMgr = createConversationManager(ctx.db);
 
     // Check if there's an active Q&A conversation
@@ -37,11 +55,22 @@ export async function handleConfirmCommand(
 
     // Get API keys from settings
     const openRouterKey = await ctx.settings.get('openrouter_api_key');
+    const anthropicApiKey = await ctx.settings.get('anthropic_api_key');
     const aiModel = await ctx.settings.get('ai_model') || 'anthropic/claude-sonnet-4';
     const botToken = await ctx.settings.get('telegram_bot_token');
+    const useAnthropicPrimary = (await ctx.settings.get('use_anthropic_primary')) !== 'false';
 
-    if (!openRouterKey || openRouterKey.trim().length === 0) {
-      await ctx.reply('❌ OpenRouter API key غير مضبوط في الإعدادات');
+    // Validate we have at least one AI API key
+    const hasValidAnthropicKey = anthropicApiKey && anthropicApiKey.trim().startsWith('sk-ant-');
+    const hasValidOpenRouterKey = openRouterKey && openRouterKey.trim().startsWith('sk-or-v1-');
+
+    if (!hasValidAnthropicKey && !hasValidOpenRouterKey) {
+      await ctx.reply(
+        '❌ لم يتم تكوين أي مفتاح AI API\n\n' +
+        'يرجى إضافة أحد المفاتيح التالية في الإعدادات:\n' +
+        '• anthropic_api_key (يبدأ بـ sk-ant-)\n' +
+        '• openrouter_api_key (يبدأ بـ sk-or-v1-)'
+      );
       return;
     }
 
@@ -50,37 +79,58 @@ export async function handleConfirmCommand(
       return;
     }
 
-    // Validate API key format
-    const trimmedKey = openRouterKey.trim();
-    if (!trimmedKey.startsWith('sk-or-v1-')) {
-      await ctx.reply(
-        '❌ OpenRouter API key غير صحيح\n\n' +
-        'المفتاح يجب أن يبدأ بـ sk-or-v1-\n' +
-        'تحقق من المفتاح في https://openrouter.ai/keys'
-      );
-      return;
-    }
+    const trimmedOpenRouterKey = openRouterKey?.trim() || '';
+    const trimmedAnthropicKey = anthropicApiKey?.trim() || '';
 
-    // Create services
+    // Create services - use UnifiedAIClient for question generation
     const reportGen = createReportGenerator(ctx.db, ctx.settings);
-    const aiClient = createAIClient(trimmedKey, aiModel);
+    const aiClient = createUnifiedAIClient({
+      anthropicApiKey: hasValidAnthropicKey ? trimmedAnthropicKey : undefined,
+      openRouterApiKey: hasValidOpenRouterKey ? trimmedOpenRouterKey : undefined,
+      anthropicModel: 'claude-sonnet-4-20250514',
+      openRouterModel: aiModel,
+      useAnthropicPrimary,
+    });
 
-    // Collect report data
+    // Collect report data (use target date if specified from /report command)
     await ctx.reply('📊 جاري جمع البيانات...');
-    const reportData = await reportGen.collectReportData();
+    const reportData = await reportGen.collectReportData(targetDate);
 
-    if (reportData.tasks.length === 0) {
-      await ctx.reply('⚠️ لا توجد مهام لهذا اليوم');
+    // Allow 0% success days to be reported - check for tasks OR failed tasks
+    const hasCompletedTasks = reportData.tasks.length > 0;
+    const hasFailedTasks = (reportData.failedTasksJson?.failed_tasks?.length || 0) > 0;
+
+    if (!hasCompletedTasks && !hasFailedTasks) {
+      await ctx.reply('⚠️ لا توجد مهام مكتملة أو فاشلة لهذا اليوم.\nأكمل مهمة واحدة على الأقل أو سجل مهمة فاشلة باستخدام /log_failure');
       return;
     }
 
-    // Generate questions using AI
+    // Check if memory is empty (needs personal questions)
+    const memoryIsEmpty = Object.values(reportData.memory).every(
+      (content) => !content || content.trim() === ''
+    );
+
+    // Personal questions to ask when memory is empty
+    const personalQuestions = memoryIsEmpty ? [
+      'أخبرني عن نفسك باختصار - ما هي اهتماماتك الرئيسية وأهدافك في الحياة؟',
+      'ما هو روتينك اليومي المثالي؟ (أوقات النوم، العمل، الراحة)',
+      'ما هي أكبر التحديات التي تواجهها عادة في الإنتاجية؟',
+      'ما الذي يحفزك ويعطيك طاقة؟ وما الذي يستنزف طاقتك؟',
+    ] : [];
+
+    // Generate AI questions based on tasks
     await ctx.reply('💭 جاري تحضير بعض الأسئلة التوضيحية...');
-    const questions = await aiClient.generateQuestions({
+    const aiQuestions = await aiClient.generateQuestions({
       tasks: reportData.tasks,
       weeklyGoals: reportData.weeklyGoals?.goals_text || null,
       dailyChallenge: reportData.dailyChallenge?.challenge_text || null,
     });
+
+    // Add the tomorrow planning question at the end (asks about circumstances for better planning)
+    const tomorrowPlanningQuestion = 'ما هي ظروف الغد؟ (مواعيد، التزامات، طاقتك المتوقعة، أي شيء يساعد في التخطيط)';
+
+    // Combine: personal questions (if memory empty) + AI questions + tomorrow question
+    const questions = [...personalQuestions, ...aiQuestions, tomorrowPlanningQuestion];
 
     if (questions.length > 0) {
       // Start Q&A conversation
@@ -102,13 +152,15 @@ export async function handleConfirmCommand(
     } else {
       // No questions, start job immediately
       await startDurableObjectJob(
-        ctx, 
-        reportProcessorNamespace, 
-        reportData, 
-        {}, 
-        trimmedKey, 
-        aiModel, 
-        botToken
+        ctx,
+        reportProcessorNamespace,
+        reportData,
+        {},
+        trimmedOpenRouterKey,
+        aiModel,
+        botToken,
+        trimmedAnthropicKey,
+        useAnthropicPrimary
       );
     }
 
@@ -128,10 +180,12 @@ export async function startDurableObjectJob(
   userAnswers: Record<string, string>,
   apiKey: string,
   aiModel: string,
-  botToken: string
+  botToken: string,
+  anthropicApiKey?: string,
+  useAnthropicPrimary?: boolean
 ): Promise<void> {
   const chatId = ctx.chat?.id.toString() || '';
-  
+
   // Generate unique job ID
   const jobId = crypto.randomUUID();
 
@@ -145,8 +199,10 @@ export async function startDurableObjectJob(
       reportData,
       userAnswers,
       apiKey,
+      anthropicApiKey,
       aiModel,
       botToken,
+      useAnthropicPrimary,
     };
 
     // Get Durable Object instance for this job
