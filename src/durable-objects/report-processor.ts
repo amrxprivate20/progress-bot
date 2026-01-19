@@ -188,6 +188,14 @@ const aiResponse = await aiClient.generateDailyReport({
   userAnswers: Object.keys(userAnswers).length > 0 ? userAnswers : undefined,
   journalContent: reportData.journal, // Also add journal if available
 });
+    // ✅ TEMPORARY DEBUG: Log raw AI response
+    console.log('🤖 RAW AI RESPONSE - MEMORY_UPDATES section:');
+    const debugMatch = aiResponse.mainCommentary.match(/\[MEMORY_UPDATES\]([\s\S]*?)(?:\[|$)/i);
+        if (debugMatch) {
+      console.log(debugMatch[1]);
+        } else {
+      console.log('No MEMORY_UPDATES section found');
+}
 
       const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
       console.log(`✅ [Job ${jobId}] AI analysis complete in ${elapsed}s`);

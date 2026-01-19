@@ -387,56 +387,72 @@ async function handleWidgetAPI(
 }
 
       case 'daily-challenge': {
-        // Get today's challenge AND weekly challenges list
-        const weekStart = getWeekStartDate();
-        const weekEnd = getWeekEndDate();
+  // Get today's challenge AND weekly challenges list
+  const weekStart = getWeekStartDate();
+  const weekEnd = getWeekEndDate();
 
-        // Get all challenges for the week
-        const allChallenges = await db.select('daily_challenges', {
-          order: 'challenge_date.asc',
-        });
+  // Get all challenges for the week
+  const allChallenges = await db.select('daily_challenges', {
+    order: 'challenge_date.asc',
+  });
 
-        const weekChallenges = allChallenges.filter((c: any) => {
-          const date = c.challenge_date;
-          return date >= weekStart && date <= weekEnd;
-        });
+  const weekChallenges = allChallenges.filter((c: any) => {
+    const date = c.challenge_date;
+    return date >= weekStart && date <= weekEnd;
+  });
 
-        if (weekChallenges.length === 0) {
-          return new Response('لا يوجد تحدي لليوم', { status: 200, headers });
-        }
+  if (weekChallenges.length === 0) {
+    return new Response('لا يوجد تحدي لليوم', { status: 200, headers });
+  }
 
-        // Find today's challenge
-        const todayChallenge = weekChallenges.find((c: any) => c.challenge_date === today);
+  // Find today's challenge
+  const todayChallenge = weekChallenges.find((c: any) => c.challenge_date === today);
 
-        // Build response with today's challenge highlighted and weekly list
-        const arabicDays: Record<number, string> = {
-          0: 'الأحد', 1: 'الإثنين', 2: 'الثلاثاء',
-          3: 'الأربعاء', 4: 'الخميس', 5: 'الجمعة', 6: 'السبت'
-        };
+  // Build response with today's challenge highlighted and weekly list
+  const arabicDays: Record<number, string> = {
+    0: 'الأحد', 1: 'الإثنين', 2: 'الثلاثاء',
+    3: 'الأربعاء', 4: 'الخميس', 5: 'الجمعة', 6: 'السبت'
+  };
 
-        let response = '';
+  let response = '';
 
-        // Today's challenge first (highlighted)
-        if (todayChallenge) {
-          const statusIcon = todayChallenge.result === true ? '✅' : todayChallenge.result === false ? '❌' : '⏳';
-          response += `🎯 تحدي اليوم:\n${statusIcon} ${todayChallenge.challenge_text}\n\n`;
-        }
+  // Today's challenge first (highlighted)
+  if (todayChallenge) {
+    const statusIcon = todayChallenge.result === true ? '✅' : todayChallenge.result === false ? '❌' : '⏳';
+    response += `🎯 تحدي اليوم:\n${statusIcon} ${todayChallenge.challenge_text}\n\n`;
+  }
 
-        // Weekly summary
-        const completed = weekChallenges.filter((c: any) => c.result === true).length;
-        response += `📊 الأسبوع: ${completed}/${weekChallenges.length}\n\n`;
+  // ✅ NEW: Detailed weekly summary (moved from weekly goals)
+  const completed = weekChallenges.filter((c: any) => c.result === true).length;
+  const failed = weekChallenges.filter((c: any) => c.result === false).length;
+  const pending = weekChallenges.filter((c: any) => c.result === undefined || c.result === null).length;
 
-        // List all weekly challenges
-        for (const c of weekChallenges) {
-          const date = new Date(c.challenge_date + 'T12:00:00Z');
-          const dayName = arabicDays[date.getDay()] || '';
-          const statusIcon = c.result === true ? '✅' : c.result === false ? '❌' : '⏳';
-          const isToday = c.challenge_date === today ? ' ←' : '';
-          response += `${statusIcon} ${dayName}${isToday}: ${c.challenge_text}\n`;
-        }
+  response += `━━━━━━━━━━━━━━━━━━\n`;
+  response += `📊 ملخص الأسبوع:\n`;
+  response += `✅ مكتمل: ${completed}\n`;
+  response += `❌ فاشل: ${failed}\n`;
+  response += `⏳ قيد الانتظار: ${pending}\n`;
 
-        return new Response(response.trim(), { status: 200, headers });
-      }
+  if (completed > 0 || failed > 0) {
+    const rate = Math.round((completed / (completed + failed)) * 100);
+    response += `📈 نسبة النجاح: ${rate}%\n`;
+  }
+  
+  response += `━━━━━━━━━━━━━━━━━━\n\n`;
+
+  // List all weekly challenges
+  response += `⚡ التحديات اليومية:\n\n`;
+  for (const c of weekChallenges) {
+    const date = new Date(c.challenge_date + 'T12:00:00Z');
+    const dayName = arabicDays[date.getDay()] || '';
+    const statusIcon = c.result === true ? '✅' : c.result === false ? '❌' : '⏳';
+    const isToday = c.challenge_date === today ? ' ← اليوم' : '';
+    response += `${statusIcon} ${dayName} (${c.challenge_date})${isToday}\n`;
+    response += `   ${c.challenge_text}\n\n`;
+  }
+
+  return new Response(response.trim(), { status: 200, headers });
+}
 
       // AFTER (showing GOALS with challenge results):
 case 'weekly-goals': // Also support this name
@@ -469,58 +485,67 @@ case 'weekly-challenges': {
   // Goals text
   response += weekGoals.goals_text + '\n\n';
   
-  // Get challenges for this week
-  const allChallenges = await db.select('daily_challenges', {
-    order: 'challenge_date.asc',
+  // ✅ NEW: Get latest weekly goals analysis from daily reports
+  const recentReports = await db.select('daily_reports', {
+    order: 'report_date.desc',
+    limit: 7, // Check last 7 days for analysis
   });
 
-  const weekChallenges = allChallenges.filter((c: any) => {
-    const date = c.challenge_date;
-    return date >= weekStart && date <= weekEnd;
-  });
+  // Find the most recent report with goals analysis
+  let latestAnalysis: any = null;
+  for (const report of recentReports) {
+    if (report.weekly_goals_analysis) {
+      try {
+        const analysis = typeof report.weekly_goals_analysis === 'string'
+          ? JSON.parse(report.weekly_goals_analysis)
+          : report.weekly_goals_analysis;
+        
+        // Check if analysis has content
+        if (analysis && (
+          (analysis.completed && analysis.completed.length > 0) ||
+          (analysis.inProgress && analysis.inProgress.length > 0) ||
+          (analysis.neglected && analysis.neglected.length > 0)
+        )) {
+          latestAnalysis = analysis;
+          break;
+        }
+      } catch (e) {
+        // Skip invalid JSON
+        continue;
+      }
+    }
+  }
 
-  if (weekChallenges.length > 0) {
+  // Display latest analysis if found
+  if (latestAnalysis) {
     response += `━━━━━━━━━━━━━━━━━━\n`;
-    response += `⚡ التحديات اليومية:\n\n`;
+    response += `📊 آخر تحديث:\n\n`;
 
-    const arabicDays: Record<number, string> = {
-      0: 'الأحد', 1: 'الإثنين', 2: 'الثلاثاء',
-      3: 'الأربعاء', 4: 'الخميس', 5: 'الجمعة', 6: 'السبت'
-    };
-
-    for (const challenge of weekChallenges) {
-      const dateStr = typeof challenge.challenge_date === 'string'
-        ? challenge.challenge_date
-        : new Date(challenge.challenge_date).toISOString().split('T')[0];
-
-      const date = new Date(dateStr + 'T12:00:00Z');
-      const dayName = arabicDays[date.getDay()] || '';
-      const isToday = dateStr === today;
-
-      const status = challenge.result === true ? '✅' :
-                     challenge.result === false ? '❌' : '⏳';
-
-      const todayMarker = isToday ? ' ← اليوم' : '';
-
-      response += `${status} ${dayName} (${dateStr})${todayMarker}\n`;
-      response += `   ${challenge.challenge_text}\n\n`;
+    if (latestAnalysis.completed && latestAnalysis.completed.length > 0) {
+      response += `✅ منجزة:\n`;
+      latestAnalysis.completed.forEach((g: string) => {
+        response += `• ${g}\n`;
+      });
+      response += '\n';
     }
 
-    // Weekly progress
-    const completed = weekChallenges.filter((c: any) => c.result === true).length;
-    const failed = weekChallenges.filter((c: any) => c.result === false).length;
-    const pending = weekChallenges.filter((c: any) => c.result === undefined || c.result === null).length;
-
-    response += `━━━━━━━━━━━━━━━━━━\n`;
-    response += `📊 ملخص الأسبوع:\n`;
-    response += `✅ مكتمل: ${completed}\n`;
-    response += `❌ فاشل: ${failed}\n`;
-    response += `⏳ قيد الانتظار: ${pending}\n`;
-
-    if (completed > 0 || failed > 0) {
-      const rate = Math.round((completed / (completed + failed)) * 100);
-      response += `📈 نسبة النجاح: ${rate}%\n`;
+    if (latestAnalysis.inProgress && latestAnalysis.inProgress.length > 0) {
+      response += `🔄 قيد التنفيذ:\n`;
+      latestAnalysis.inProgress.forEach((g: string) => {
+        response += `• ${g}\n`;
+      });
+      response += '\n';
     }
+
+    if (latestAnalysis.neglected && latestAnalysis.neglected.length > 0) {
+      response += `⚠️ مهملة:\n`;
+      latestAnalysis.neglected.forEach((g: string) => {
+        response += `• ${g}\n`;
+      });
+    }
+  } else {
+    response += `━━━━━━━━━━━━━━━━━━\n`;
+    response += `ℹ️ لم يتم تحليل الأهداف بعد\n`;
   }
 
   return new Response(response.trim(), { status: 200, headers });

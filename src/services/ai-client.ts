@@ -525,28 +525,72 @@ const memoryUpdatesMatch = response.match(/\[MEMORY_UPDATES\]([\s\S]*?)(?:\[|$)/
 console.log('🔍 Memory updates section found:', !!memoryUpdatesMatch);
 if (memoryUpdatesMatch && memoryUpdatesMatch[1]) {
   const memoryText = memoryUpdatesMatch[1];
-  console.log('📝 Memory text:', memoryText.substring(0, 200));
+  console.log('📝 Memory text:', memoryText.substring(0, 500)); // Show more for debugging
   
-  if (!memoryText.includes('لا توجد تحديثات')) {
-    const categoryMatches = memoryText.matchAll(/CATEGORY:\s*([^\n]+)\s*CONTENT:\s*([^\n]+)/gi);
+  if (!memoryText.includes('لا توجد تحديثات') && !memoryText.toLowerCase().includes('no updates')) {
+    // ✅ NEW: More robust parsing that handles multiple formats
+    
+    // Split by CATEGORY: markers to get individual updates
+    const categoryBlocks = memoryText.split(/(?=CATEGORY:)/i).filter(block => block.trim());
+    console.log(`🔍 Found ${categoryBlocks.length} category blocks`);
+    
     let matchCount = 0;
     
-    for (const match of categoryMatches) {
-      matchCount++;
-      if (match[1] && match[2]) {
-        const category = match[1].trim();
-        const content = match[2].trim();
-        console.log(`  ✅ Found update: ${category} -> ${content.substring(0, 50)}`);
+    for (const block of categoryBlocks) {
+      // Extract category name
+      const categoryMatch = block.match(/CATEGORY:\s*([^\n]+)/i);
+      if (!categoryMatch || !categoryMatch[1]) continue;
+      
+      const category = categoryMatch[1].trim();
+      
+      // Extract content - try multiple patterns
+      let content = '';
+      
+      // Pattern 1: CONTENT: on same line
+      const contentMatch1 = block.match(/CONTENT:\s*([^\n]+)/i);
+      if (contentMatch1 && contentMatch1[1]) {
+        content = contentMatch1[1].trim();
+      }
+      
+      // Pattern 2: CONTENT: on next line(s) - multiline
+      if (!content) {
+        const contentMatch2 = block.match(/CONTENT:\s*\n\s*(.+?)(?:\n\s*CATEGORY:|\n\s*\[|$)/is);
+        if (contentMatch2 && contentMatch2[1]) {
+          content = contentMatch2[1].trim();
+        }
+      }
+      
+      // Pattern 3: Just text after CATEGORY line (no CONTENT: label)
+      if (!content) {
+        const lines = block.split('\n').slice(1); // Skip CATEGORY line
+        content = lines.join(' ').trim();
+        // Stop at next CATEGORY or section marker
+        const stopIndex = content.search(/CATEGORY:|^\[/i);
+        if (stopIndex > 0) {
+          content = content.substring(0, stopIndex).trim();
+        }
+      }
+      
+      if (content && content.length > 0) {
+        matchCount++;
+        console.log(`  ✅ [${matchCount}] Category: "${category}"`);
+        console.log(`     Content: "${content.substring(0, 100)}${content.length > 100 ? '...' : ''}"`);
         result.memoryUpdates[category] = content;
+      } else {
+        console.log(`  ⚠️ Category found but no content: "${category}"`);
       }
     }
     
     console.log(`📊 Total memory updates parsed: ${matchCount}`);
+    
+    if (matchCount === 0) {
+      console.warn('⚠️ No memory updates parsed! Raw text:');
+      console.warn(memoryText);
+    }
   } else {
     console.log('ℹ️ AI said no updates needed');
   }
 }
-
     // Extract memory optimization flag
     const memoryOptMatch = response.match(/\[MEMORY_OPTIMIZATION\]([\s\S]*?)(?:\[|$)/i);
     if (memoryOptMatch && memoryOptMatch[1]) {
@@ -1155,28 +1199,72 @@ const memoryUpdatesMatch = response.match(/\[MEMORY_UPDATES\]([\s\S]*?)(?:\[|$)/
 console.log('🔍 Memory updates section found:', !!memoryUpdatesMatch);
 if (memoryUpdatesMatch && memoryUpdatesMatch[1]) {
   const memoryText = memoryUpdatesMatch[1];
-  console.log('📝 Memory text:', memoryText.substring(0, 200));
+  console.log('📝 Memory text:', memoryText.substring(0, 500)); // Show more for debugging
   
-  if (!memoryText.includes('لا توجد تحديثات')) {
-    const categoryMatches = memoryText.matchAll(/CATEGORY:\s*([^\n]+)\s*CONTENT:\s*([^\n]+)/gi);
+  if (!memoryText.includes('لا توجد تحديثات') && !memoryText.toLowerCase().includes('no updates')) {
+    // ✅ NEW: More robust parsing that handles multiple formats
+    
+    // Split by CATEGORY: markers to get individual updates
+    const categoryBlocks = memoryText.split(/(?=CATEGORY:)/i).filter(block => block.trim());
+    console.log(`🔍 Found ${categoryBlocks.length} category blocks`);
+    
     let matchCount = 0;
     
-    for (const match of categoryMatches) {
-      matchCount++;
-      if (match[1] && match[2]) {
-        const category = match[1].trim();
-        const content = match[2].trim();
-        console.log(`  ✅ Found update: ${category} -> ${content.substring(0, 50)}`);
+    for (const block of categoryBlocks) {
+      // Extract category name
+      const categoryMatch = block.match(/CATEGORY:\s*([^\n]+)/i);
+      if (!categoryMatch || !categoryMatch[1]) continue;
+      
+      const category = categoryMatch[1].trim();
+      
+      // Extract content - try multiple patterns
+      let content = '';
+      
+      // Pattern 1: CONTENT: on same line
+      const contentMatch1 = block.match(/CONTENT:\s*([^\n]+)/i);
+      if (contentMatch1 && contentMatch1[1]) {
+        content = contentMatch1[1].trim();
+      }
+      
+      // Pattern 2: CONTENT: on next line(s) - multiline
+      if (!content) {
+        const contentMatch2 = block.match(/CONTENT:\s*\n\s*(.+?)(?:\n\s*CATEGORY:|\n\s*\[|$)/is);
+        if (contentMatch2 && contentMatch2[1]) {
+          content = contentMatch2[1].trim();
+        }
+      }
+      
+      // Pattern 3: Just text after CATEGORY line (no CONTENT: label)
+      if (!content) {
+        const lines = block.split('\n').slice(1); // Skip CATEGORY line
+        content = lines.join(' ').trim();
+        // Stop at next CATEGORY or section marker
+        const stopIndex = content.search(/CATEGORY:|^\[/i);
+        if (stopIndex > 0) {
+          content = content.substring(0, stopIndex).trim();
+        }
+      }
+      
+      if (content && content.length > 0) {
+        matchCount++;
+        console.log(`  ✅ [${matchCount}] Category: "${category}"`);
+        console.log(`     Content: "${content.substring(0, 100)}${content.length > 100 ? '...' : ''}"`);
         result.memoryUpdates[category] = content;
+      } else {
+        console.log(`  ⚠️ Category found but no content: "${category}"`);
       }
     }
     
     console.log(`📊 Total memory updates parsed: ${matchCount}`);
+    
+    if (matchCount === 0) {
+      console.warn('⚠️ No memory updates parsed! Raw text:');
+      console.warn(memoryText);
+    }
   } else {
     console.log('ℹ️ AI said no updates needed');
   }
 }
-
     // Extract memory optimization flag
     const memoryOptMatch = response.match(/\[MEMORY_OPTIMIZATION\]([\s\S]*?)(?:\[|$)/i);
     if (memoryOptMatch && memoryOptMatch[1]) {
