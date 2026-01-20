@@ -153,7 +153,7 @@ setDebugLogger(logger: any): void {
   async generateDailyReport(context: {
   reportDate: string;
   tasks: any[];
-  failedTasksJson?: any; // ✅ ADD THIS
+  failedTasksJson?: any;
   streaks: any[];
   weeklyGoals: string | null;
   dailyChallenge: string | null;
@@ -162,6 +162,7 @@ setDebugLogger(logger: any): void {
   strategicGoals: string;
   userAnswers?: Record<string, string>;
   journalContent?: string;
+  formattedReport?: string; // ✅ NEW: Accept pre-formatted report
 }): Promise<UnifiedAIResponse> {
   const prompt = this.buildUnifiedPrompt(context);
 
@@ -327,6 +328,7 @@ Q: ما التحدي الرئيسي اللي واجهته النهاردة؟
 
  /**
  * Build the unified prompt for daily report analysis
+ * ✅ FIXED: Now uses the exact formatted report the user sees
  */
 private buildUnifiedPrompt(context: {
   reportDate: string;
@@ -340,12 +342,10 @@ private buildUnifiedPrompt(context: {
   strategicGoals: string;
   userAnswers?: Record<string, string>;
   journalContent?: string;
+  formattedReport?: string; // ✅ NEW: Pre-formatted report from preview
 }): string {
   const {
     reportDate,
-    tasks,
-    failedTasksJson,
-    streaks,
     weeklyGoals,
     dailyChallenge,
     memory,
@@ -353,65 +353,27 @@ private buildUnifiedPrompt(context: {
     strategicGoals,
     userAnswers,
     journalContent,
+    formattedReport, // ✅ Use this instead of rebuilding
   } = context;
-
-  // ✅ Calculate proper statistics
-  const completedTasks = tasks.filter(t => t.status === 'done');
-  const completedMainTasks = completedTasks.filter(t => !t.origin_task);
-
-  // Get failed tasks from JSON
-  const failedMainTasks = failedTasksJson?.failed_tasks?.filter((t: any) => !t.is_subtask) || [];
-  const failedSubtasks = failedTasksJson?.failed_tasks?.filter((t: any) => t.is_subtask) || [];
-
-  // Calculate totals
-  const totalMainTasks = completedMainTasks.length + failedMainTasks.length;
-
-  // Count fully completed main tasks (no failed subtasks)
-  const fullyCompletedCount = completedMainTasks.filter((main: any) => {
-    const mainName = main.content.replace(/\s*\[[^\]]+\]/g, '').trim();
-    const hasFailedSubs = failedSubtasks.some((sub: any) => {
-      const parentName = sub.parent_content?.replace(/\s*\[[^\]]+\]/g, '').trim();
-      return parentName === mainName;
-    });
-    return !hasFailedSubs;
-  }).length;
-
-  const successRate = totalMainTasks > 0 ? (fullyCompletedCount / totalMainTasks) * 100 : 0;
-  const totalMinutes = completedTasks.reduce((sum, t) => sum + (t.duration_minutes || 0), 0);
 
   const prompt = `
 # تحليل التقدم اليومي - ${reportDate}
 
 ${userAnswers ? `## إجابات المستخدم:\n${Object.entries(userAnswers).map(([q, a]) => `**س:** ${q}\n**ج:** ${a}`).join('\n\n')}\n` : ''}
 
-## الإحصائيات:
-- إجمالي المهام الرئيسية: ${totalMainTasks}
-- المكتملة بالكامل: ${fullyCompletedCount}
-- الفاشلة: ${failedMainTasks.length}
-- معدل النجاح: ${successRate.toFixed(1)}%
-- الوقت الإجمالي: ${totalMinutes} دقيقة (${(totalMinutes / 60).toFixed(1)} ساعة)
-
-## المهام المنجزة:
-${completedTasks.map(t => {
-  const streakInfo = streaks.find(s => s.task_name === t.content);
-  const streakText = streakInfo ? ` [🔥 ${streakInfo.current_streak} يوم]` : '';
-  const durationText = t.duration_minutes ? ` [⏱️ ${t.duration_minutes}د]` : '';
-  const quantityText = t.quantity ? ` [📊 ${t.quantity} ${t.quantity_unit || ''}]` : '';
-  return `- ${t.content}${streakText}${durationText}${quantityText}`;
-}).join('\n')}
-
-${failedMainTasks.length > 0 ? `## المهام الفاشلة:\n${failedMainTasks.map((t: any) => `- ${t.content}`).join('\n')}` : ''}
-
-## التحدي اليومي:
-${dailyChallenge || 'لا يوجد تحدي محدد لهذا اليوم'}
-
-## الأهداف الأسبوعية:
-${weeklyGoals || 'لا توجد أهداف محددة لهذا الأسبوع'}
+## التقرير اليومي:
+${formattedReport || 'لا توجد بيانات للتقرير'}
 
 ${journalContent ? `## يوميات اليوم:\n${journalContent}\n` : ''}
 
 ## ملخص الأسبوع الماضي:
 ${pastWeekSummary}
+
+## الأهداف الأسبوعية:
+${weeklyGoals || 'لا توجد أهداف محددة لهذا الأسبوع'}
+
+## التحدي اليومي:
+${dailyChallenge || 'لا يوجد تحدي محدد لهذا اليوم'}
 
 ## الأهداف الاستراتيجية طويلة المدى:
 ${strategicGoals}
@@ -481,6 +443,7 @@ CATEGORY: Personal Insights & Patterns
 CONTENT: يعمل بشكل أفضل في الصباح الباكر، تركيزه يقل بعد الظهر
 
 إذا لم تكن هناك معلومات جديدة على الإطلاق، اكتب: "لا توجد تحديثات")
+
 ## [MEMORY_OPTIMIZATION]
 (إذا كانت الذاكرة بحاجة لتحسين وإعادة تنظيم (كبيرة جداً أو غير منظمة)، اكتب "OPTIMIZE_NEEDED"، وإلا اكتب "NOT_NEEDED")
 
@@ -934,7 +897,7 @@ setDebugLogger(logger: any): void {
   async generateDailyReport(context: {
   reportDate: string;
   tasks: any[];
-  failedTasksJson?: any; // ✅ ADD THIS
+  failedTasksJson?: any;
   streaks: any[];
   weeklyGoals: string | null;
   dailyChallenge: string | null;
@@ -943,6 +906,7 @@ setDebugLogger(logger: any): void {
   strategicGoals: string;
   userAnswers?: Record<string, string>;
   journalContent?: string;
+  formattedReport?: string; // ✅ NEW: Accept pre-formatted report
 }): Promise<UnifiedAIResponse> {
   const prompt = this.buildUnifiedPrompt(context);
 
@@ -1110,6 +1074,7 @@ Q: ما التحدي الرئيسي اللي واجهته النهاردة؟
 
 /**
  * Build the unified prompt for daily report analysis
+ * ✅ FIXED: Now uses the exact formatted report the user sees
  */
 private buildUnifiedPrompt(context: {
   reportDate: string;
@@ -1123,12 +1088,10 @@ private buildUnifiedPrompt(context: {
   strategicGoals: string;
   userAnswers?: Record<string, string>;
   journalContent?: string;
+  formattedReport?: string; // ✅ NEW: Pre-formatted report from preview
 }): string {
   const {
     reportDate,
-    tasks,
-    failedTasksJson,
-    streaks,
     weeklyGoals,
     dailyChallenge,
     memory,
@@ -1136,65 +1099,27 @@ private buildUnifiedPrompt(context: {
     strategicGoals,
     userAnswers,
     journalContent,
+    formattedReport, // ✅ Use this instead of rebuilding
   } = context;
-
-  // ✅ Calculate proper statistics
-  const completedTasks = tasks.filter(t => t.status === 'done');
-  const completedMainTasks = completedTasks.filter(t => !t.origin_task);
-
-  // Get failed tasks from JSON
-  const failedMainTasks = failedTasksJson?.failed_tasks?.filter((t: any) => !t.is_subtask) || [];
-  const failedSubtasks = failedTasksJson?.failed_tasks?.filter((t: any) => t.is_subtask) || [];
-
-  // Calculate totals
-  const totalMainTasks = completedMainTasks.length + failedMainTasks.length;
-
-  // Count fully completed main tasks (no failed subtasks)
-  const fullyCompletedCount = completedMainTasks.filter((main: any) => {
-    const mainName = main.content.replace(/\s*\[[^\]]+\]/g, '').trim();
-    const hasFailedSubs = failedSubtasks.some((sub: any) => {
-      const parentName = sub.parent_content?.replace(/\s*\[[^\]]+\]/g, '').trim();
-      return parentName === mainName;
-    });
-    return !hasFailedSubs;
-  }).length;
-
-  const successRate = totalMainTasks > 0 ? (fullyCompletedCount / totalMainTasks) * 100 : 0;
-  const totalMinutes = completedTasks.reduce((sum, t) => sum + (t.duration_minutes || 0), 0);
 
   const prompt = `
 # تحليل التقدم اليومي - ${reportDate}
 
 ${userAnswers ? `## إجابات المستخدم:\n${Object.entries(userAnswers).map(([q, a]) => `**س:** ${q}\n**ج:** ${a}`).join('\n\n')}\n` : ''}
 
-## الإحصائيات:
-- إجمالي المهام الرئيسية: ${totalMainTasks}
-- المكتملة بالكامل: ${fullyCompletedCount}
-- الفاشلة: ${failedMainTasks.length}
-- معدل النجاح: ${successRate.toFixed(1)}%
-- الوقت الإجمالي: ${totalMinutes} دقيقة (${(totalMinutes / 60).toFixed(1)} ساعة)
-
-## المهام المنجزة:
-${completedTasks.map(t => {
-  const streakInfo = streaks.find(s => s.task_name === t.content);
-  const streakText = streakInfo ? ` [🔥 ${streakInfo.current_streak} يوم]` : '';
-  const durationText = t.duration_minutes ? ` [⏱️ ${t.duration_minutes}د]` : '';
-  const quantityText = t.quantity ? ` [📊 ${t.quantity} ${t.quantity_unit || ''}]` : '';
-  return `- ${t.content}${streakText}${durationText}${quantityText}`;
-}).join('\n')}
-
-${failedMainTasks.length > 0 ? `## المهام الفاشلة:\n${failedMainTasks.map((t: any) => `- ${t.content}`).join('\n')}` : ''}
-
-## التحدي اليومي:
-${dailyChallenge || 'لا يوجد تحدي محدد لهذا اليوم'}
-
-## الأهداف الأسبوعية:
-${weeklyGoals || 'لا توجد أهداف محددة لهذا الأسبوع'}
+## التقرير اليومي:
+${formattedReport || 'لا توجد بيانات للتقرير'}
 
 ${journalContent ? `## يوميات اليوم:\n${journalContent}\n` : ''}
 
 ## ملخص الأسبوع الماضي:
 ${pastWeekSummary}
+
+## الأهداف الأسبوعية:
+${weeklyGoals || 'لا توجد أهداف محددة لهذا الأسبوع'}
+
+## التحدي اليومي:
+${dailyChallenge || 'لا يوجد تحدي محدد لهذا اليوم'}
 
 ## الأهداف الاستراتيجية طويلة المدى:
 ${strategicGoals}
@@ -1264,6 +1189,7 @@ CATEGORY: Personal Insights & Patterns
 CONTENT: يعمل بشكل أفضل في الصباح الباكر، تركيزه يقل بعد الظهر
 
 إذا لم تكن هناك معلومات جديدة على الإطلاق، اكتب: "لا توجد تحديثات")
+
 ## [MEMORY_OPTIMIZATION]
 (إذا كانت الذاكرة بحاجة لتحسين وإعادة تنظيم (كبيرة جداً أو غير منظمة)، اكتب "OPTIMIZE_NEEDED"، وإلا اكتب "NOT_NEEDED")
 
@@ -1379,96 +1305,106 @@ if (goalsMatch && goalsMatch[1]) {
 }
 
     // Extract memory updates
-const memoryUpdatesMatch = response.match(/\[MEMORY_UPDATES\]([\s\S]*?)(?:\[|$)/i);
+const memoryUpdatesMatch = response.match(/\[MEMORY_UPDATES\]([\s\S]*?)(?:\[MEMORY_OPTIMIZATION\]|\[|$)/i);
 console.log('🔍 Memory updates section found:', !!memoryUpdatesMatch);
+
 if (memoryUpdatesMatch && memoryUpdatesMatch[1]) {
   const memoryText = memoryUpdatesMatch[1];
-  console.log('📝 Memory text:', memoryText.substring(0, 500)); // Show more for debugging
+  console.log('📝 Raw memory text length:', memoryText.length);
+  console.log('📝 Memory text preview:', memoryText.substring(0, 300));
   
-  if (!memoryText.includes('لا توجد تحديثات') && !memoryText.toLowerCase().includes('no updates')) {
-    // ✅ NEW: More robust parsing that handles multiple formats
+  // Check if AI explicitly said no updates
+  const noUpdatesIndicators = ['لا توجد تحديثات', 'no updates', 'not needed', 'none'];
+  const hasNoUpdates = noUpdatesIndicators.some(indicator => 
+    memoryText.toLowerCase().includes(indicator.toLowerCase())
+  );
+  
+  if (hasNoUpdates) {
+    console.log('ℹ️ AI explicitly said no updates needed');
+  } else {
+    // ✅ NEW: More robust splitting that handles edge cases
+    // Split on CATEGORY: but keep the marker
+    const rawBlocks = memoryText.split(/(CATEGORY:\s*[^\n]+)/i);
     
-    // Split by CATEGORY: markers to get individual updates
-    const categoryBlocks = memoryText
-  .split(/(?=CATEGORY:)/i)
-  .filter(block => block.trim())
-  .map(block => {
-    // Remove any content after the next [SECTION] marker
-    const sectionEnd = block.search(/\n\s*\[(?!CATEGORY)[A-Z_]+\]/i);
-    if (sectionEnd > 0) {
-      return block.substring(0, sectionEnd);
-    }
-    return block;
-  });
-    console.log(`🔍 Found ${categoryBlocks.length} category blocks`);
+    // Pair up category headers with their content
+    const categoryBlocks: Array<{category: string; content: string}> = [];
     
-    let matchCount = 0;
-    
-    for (const block of categoryBlocks) {
-      // Extract category name
-      const categoryMatch = block.match(/CATEGORY:\s*([^\n]+)/i);
-      if (!categoryMatch || !categoryMatch[1]) continue;
+    for (let i = 0; i < rawBlocks.length; i++) {
+      const block = rawBlocks[i]?.trim();
+      if (!block) continue;
       
-      const category = categoryMatch[1].trim();
-      
-      // Extract content - try multiple patterns
-      let content = '';
-      
-      // Pattern 1: CONTENT: on same line
-      const contentMatch1 = block.match(/CONTENT:\s*([^\n]+)/i);
-      if (contentMatch1 && contentMatch1[1]) {
-        content = contentMatch1[1].trim();
-      }
-      
-      // Pattern 2: CONTENT: on next line(s) - multiline
-      if (!content) {
-        const contentMatch2 = block.match(/CONTENT:\s*\n\s*(.+?)(?:\n\s*CATEGORY:|\n\s*\[|$)/is);
-        if (contentMatch2 && contentMatch2[1]) {
-          content = contentMatch2[1].trim();
+      // Check if this is a CATEGORY: header
+      const categoryMatch = block.match(/^CATEGORY:\s*(.+)$/i);
+      if (categoryMatch && categoryMatch[1]) {
+        const category = categoryMatch[1].trim();
+        
+        // Get the content (next block)
+        const nextBlock = rawBlocks[i + 1];
+        if (nextBlock) {
+          let content = nextBlock.trim();
+          
+          // Remove CONTENT: label if present
+          content = content.replace(/^CONTENT:\s*/i, '');
+          
+          // Clean up content - stop at next CATEGORY or section marker
+          const stopMarkers = [
+            /\nCATEGORY:/i,
+            /\n\s*\[(?!CATEGORY)[A-Z_]+\]/i
+          ];
+          
+          for (const marker of stopMarkers) {
+            const stopIndex = content.search(marker);
+            if (stopIndex > 0) {
+              content = content.substring(0, stopIndex);
+            }
+          }
+          
+          content = content.trim();
+          
+          if (content && content.length > 0) {
+            categoryBlocks.push({ category, content });
+          }
+          
+          i++; // Skip the content block we just processed
         }
       }
-      
-      // Pattern 3: Just text after CATEGORY line (no CONTENT: label)
-      if (!content) {
-        const lines = block.split('\n').slice(1); // Skip CATEGORY line
-        content = lines.join(' ').trim();
-        // Stop at next CATEGORY or section marker
-        const stopIndex = content.search(/CATEGORY:|^\[/i);
-        if (stopIndex > 0) {
-          content = content.substring(0, stopIndex).trim();
-        }
-      }
-      
-      if (content && content.length > 0) {
-  matchCount++;
-  console.log(`  ✅ [${matchCount}] Category: "${category}"`);
-  console.log(`     Content preview: "${content.substring(0, 100)}${content.length > 100 ? '...' : ''}"`);
-  
-  // ✅ FIXED: Always check if category exists before assigning
-  if (!result.memoryUpdates[category]) {
-    // First time seeing this category - initialize it
-    result.memoryUpdates[category] = content;
-    console.log(`     📝 First entry for "${category}"`);
-  } else {
-    // Category exists - append with clear separator
-    result.memoryUpdates[category] += '\n\n' + content;
-    console.log(`     ➕ Appended to existing "${category}"`);
-  }
-  
-  console.log(`     📊 Total for "${category}": ${result.memoryUpdates[category].length} chars`);
-} else {
-        console.log(`  ⚠️ Category found but no content: "${category}"`);
-      }
     }
     
-    console.log(`📊 Total memory updates parsed: ${matchCount}`);
+    console.log(`🔍 Found ${categoryBlocks.length} category-content pairs`);
     
-    if (matchCount === 0) {
-      console.warn('⚠️ No memory updates parsed! Raw text:');
-      console.warn(memoryText);
+    // ✅ NEW: Process all blocks and merge duplicates properly
+    const categoryContentMap = new Map<string, string[]>();
+    
+    for (const { category, content } of categoryBlocks) {
+      console.log(`  📝 Processing: "${category}" (${content.length} chars)`);
+      
+      if (!categoryContentMap.has(category)) {
+        categoryContentMap.set(category, []);
+      }
+      
+      categoryContentMap.get(category)!.push(content);
     }
-  } else {
-    console.log('ℹ️ AI said no updates needed');
+    
+    // ✅ NEW: Merge all content for each category
+    let totalUpdates = 0;
+    for (const [category, contents] of categoryContentMap.entries()) {
+      // Join all content pieces with separator
+      const mergedContent = contents.join('\n\n');
+      
+      result.memoryUpdates[category] = mergedContent;
+      totalUpdates++;
+      
+      console.log(`  ✅ [${totalUpdates}] Saved "${category}": ${mergedContent.length} chars`);
+      console.log(`     Preview: ${mergedContent.substring(0, 100)}...`);
+    }
+    
+    console.log(`📊 Total memory categories updated: ${totalUpdates}`);
+    console.log(`📊 Categories: ${Array.from(categoryContentMap.keys()).join(', ')}`);
+    
+    if (totalUpdates === 0) {
+      console.warn('⚠️ No memory updates parsed!');
+      console.warn('Raw memory text:', memoryText);
+    }
   }
 }
     // Extract memory optimization flag

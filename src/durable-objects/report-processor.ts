@@ -194,11 +194,16 @@ private async processReport(jobData: ReportJobData): Promise<void> {
       
       const startTime = Date.now();
 
-      // Call AI - THIS IS THE LONG OPERATION (no timeout here!)
-      const aiResponse = await aiClient.generateDailyReport({
+      // ✅ NEW: Generate formatted report first (same as user sees in preview)
+console.log('📋 Generating formatted report for AI...');
+const formattedReport = await reportGen.getFormattedReportForAI(reportData.date);
+console.log('✅ Formatted report generated:', formattedReport.length, 'chars');
+
+// Call AI - THIS IS THE LONG OPERATION (no timeout here!)
+const aiResponse = await aiClient.generateDailyReport({
   reportDate: reportData.date,
   tasks: reportData.tasks,
-  failedTasksJson: reportData.failedTasksJson, // ✅ ADD THIS
+  failedTasksJson: reportData.failedTasksJson,
   streaks: reportData.streaks,
   weeklyGoals: reportData.weeklyGoals?.goals_text || null,
   dailyChallenge: reportData.dailyChallenge?.challenge_text || null,
@@ -207,6 +212,7 @@ private async processReport(jobData: ReportJobData): Promise<void> {
   strategicGoals: reportData.strategicGoals,
   userAnswers: Object.keys(userAnswers).length > 0 ? userAnswers : undefined,
   journalContent: reportData.journal,
+  formattedReport, // ✅ NEW: Pass the exact formatted report
 });
     // ✅ TEMPORARY DEBUG: Log raw AI response
     console.log('🤖 RAW AI RESPONSE - MEMORY_UPDATES section:');

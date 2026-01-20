@@ -342,6 +342,30 @@ const challengeStatus = data.dailyChallenge
     };
   }
 
+/**
+ * Get the formatted report text (same as what user sees in preview)
+ * This is used by AI to ensure consistency
+ */
+async getFormattedReportForAI(date?: string): Promise<string> {
+  const data = await this.collectReportData(date);
+  const stats = this.calculateStatistics(data.tasks, data.failedTasksJson);
+
+  // Get top categories
+  const categories = this.groupByCategory(data.tasks.filter(t => t.status === 'done'));
+  const topCategories = Object.entries(categories)
+    .sort(([, a], [, b]) => b - a)
+    .slice(0, 5)
+    .map(([name, count]) => ({ name, count }));
+
+  // Check challenge status
+  const challengeStatus = data.dailyChallenge
+    ? await this.checkChallengeCompletion(data.dailyChallenge, data.tasks, data.date)
+    : 'لا يوجد تحدي';
+
+  // Use the SAME formatting function as preview
+  return this.formatPreviewText(data, stats, topCategories, challengeStatus);
+}
+
   /**
    * Generate summary of past week
    */

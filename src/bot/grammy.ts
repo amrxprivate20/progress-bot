@@ -908,25 +908,55 @@ async function sendLongMessage(ctx: Context, message: string) {
       }
 
       // Search for the task in Todoist
-      const todoistToken = await ctx.settings.get('todoist_api_token');
-      let todoistTaskId: string | null = null;
-      let todoistTaskContent: string = args.trim();
+const todoistToken = await ctx.settings.get('todoist_api_token');
+let todoistTaskId: string | null = null;
+let todoistTaskContent: string = args.trim();
 
-      if (todoistToken) {
-        try {
-          // Get all active tasks from Todoist
-          const response = await fetch('https://api.todoist.com/rest/v2/tasks', {
-            headers: { 'Authorization': `Bearer ${todoistToken.trim()}` },
-          });
+if (todoistToken) {
+  try {
+    // ✅ NEW: Get today's date in Egypt timezone
+    const { getTodayInEgypt } = await import('../utils/timezone');
+    const today = getTodayInEgypt();
+    const todayDate = new Date(today + 'T00:00:00Z');
+    
+    console.log('📅 Searching for tasks available today:', today);
 
-          if (response.ok) {
-            const tasks = await response.json() as Array<{ id: string; content: string }>;
-            // Find ALL tasks that match the search term (case-insensitive, partial match)
-            const searchTerm = args.trim().toLowerCase();
-            const matchedTasks = tasks.filter(t =>
-              t.content.toLowerCase().includes(searchTerm) ||
-              searchTerm.includes(t.content.toLowerCase())
-            );
+    // Get all active tasks from Todoist
+    const response = await fetch('https://api.todoist.com/rest/v2/tasks', {
+      headers: { 'Authorization': `Bearer ${todoistToken.trim()}` },
+    });
+
+    if (response.ok) {
+      const allTasks = await response.json() as Array<{ 
+        id: string; 
+        content: string; 
+        due?: { date: string };
+        is_completed?: boolean;
+      }>;
+      
+      // ✅ NEW: Filter to only tasks available today (due today or overdue, not completed)
+      const availableToday = allTasks.filter(t => {
+        // Skip completed tasks
+        if (t.is_completed) return false;
+        
+        // If no due date, include it (could be started anytime)
+        if (!t.due?.date) return true;
+        
+        // Check if due date is today or in the past (overdue)
+        const taskDueDate = new Date(t.due.date.split('T')[0] + 'T00:00:00Z');
+        return taskDueDate <= todayDate;
+      });
+      
+      console.log(`📋 Found ${availableToday.length} tasks available today (out of ${allTasks.length} total)`);
+      
+      // Find tasks that match the search term (case-insensitive, partial match)
+      const searchTerm = args.trim().toLowerCase();
+      const matchedTasks = availableToday.filter(t =>
+        t.content.toLowerCase().includes(searchTerm) ||
+        searchTerm.includes(t.content.toLowerCase())
+      );
+      
+      console.log(`🔍 Matched ${matchedTasks.length} tasks for search: "${searchTerm}"`);
 
             if (matchedTasks.length === 1) {
               // Only one match - use it directly
@@ -936,12 +966,30 @@ async function sendLongMessage(ctx: Context, message: string) {
                 todoistTaskContent = matchedTask.content;
               }
             } else if (matchedTasks.length > 1) {
-              // Multiple matches - show list and wait for selection
-              let message = '📋 **تم العثور على عدة مهام مطابقة:**\n\n';
-              matchedTasks.forEach((t, i) => {
-                message += `${i + 1}. ${t.content}\n`;
-              });
-              message += '\n🔢 أرسل رقم المهمة التي تريد بدء تتبعها:';
+  // Multiple matches - show list and wait for selection
+  let message = '📋 **تم العثور على عدة مهام مطابقة:**\n\n';
+  matchedTasks.forEach((t, i) => {
+    // ✅ NEW: Show due date if available
+    let dueInfo = '';
+    if (t.due?.date) {
+      const dueDate = t.due.date.split('T')[0];
+      const isToday = dueDate === today;
+      const isPast = new Date(dueDate) < todayDate;
+      
+      if (isToday) {
+        dueInfo = ' 📅 اليوم';
+      } else if (isPast) {
+        dueInfo = ` ⚠️ متأخرة (${dueDate})`;
+      } else {
+        dueInfo = ` 📅 ${dueDate}`;
+      }
+    } else {
+      dueInfo = ' 📌 بدون موعد';
+    }
+    
+    message += `${i + 1}. ${t.content}${dueInfo}\n`;
+  });
+  message += '\n🔢 أرسل رقم المهمة التي تريد بدء تتبعها:';
 
               // Store matched tasks for selection
               const selectKey = `task_select_${chatId}`;
@@ -964,8 +1012,18 @@ async function sendLongMessage(ctx: Context, message: string) {
         }
       }
 
-      // Save the active task with Todoist ID if found
-      // Store both startTime (timestamp) and startDate (Egypt date) for midnight boundary handling
+      // ✅ NEW: Inform user if no tasks were found
+if (!todoistTaskId && availableToday.length === 0) {
+  await ctx.reply(
+    '📋 لا توجد مهام متاحة اليوم في Todoist.\n\n' +
+    'يمكنك:\n' +
+    '• إضافة مهام جديدة لليوم\n' +
+    '• أو كتابة اسم المهمة يدوياً (سيتم إنشاء مهمة جديدة)'
+  );
+}
+
+        // Save the active task with Todoist ID if found
+        // Store both startTime (timestamp) and startDate (Egypt date) for midnight boundary handling
       const startDate = getTodayInEgypt(); // Egypt date when task started
       await ctx.db.insert('conversation_state', {
         chat_id: taskKey,
