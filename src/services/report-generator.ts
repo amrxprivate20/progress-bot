@@ -155,9 +155,9 @@ export class ReportGenerator {
     }));
 
     // Check challenge status
-    const challengeStatus = data.dailyChallenge
-      ? this.checkChallengeCompletion(data.dailyChallenge, data.tasks)
-      : 'لا يوجد تحدي';
+const challengeStatus = data.dailyChallenge
+  ? await this.checkChallengeCompletion(data.dailyChallenge, data.tasks, data.date)
+  : 'لا يوجد تحدي';
 
     // Format preview with hierarchy
     const formattedText = this.formatPreviewText(data, stats, topCategories, challengeStatus);
@@ -477,21 +477,38 @@ export class ReportGenerator {
     return categories;
   }
 
-  /**
-   * Check if daily challenge is completed
-   */
-  private checkChallengeCompletion(challenge: DailyChallenge, tasks: Task[]): string {
-    // Simple heuristic: check if challenge text appears in any completed task
-    const challengeText = challenge.challenge_text.toLowerCase();
-    const completedTasks = tasks.filter(t => t.status === 'done');
+ /**
+ * Check if daily challenge is completed
+ * Also updates the challenge result in database
+ */
+private async checkChallengeCompletion(
+  challenge: DailyChallenge, 
+  tasks: Task[],
+  challengeDate: string
+): Promise<string> {
+  // Simple heuristic: check if challenge text appears in any completed task
+  const challengeText = challenge.challenge_text.toLowerCase();
+  const completedTasks = tasks.filter(t => t.status === 'done');
 
-    const firstWord = challengeText.split(' ')[0];
-    const isCompleted = completedTasks.some(task =>
-      firstWord && task.content.toLowerCase().includes(firstWord)
+  const firstWord = challengeText.split(' ')[0];
+  const isCompleted = completedTasks.some(task =>
+    firstWord && task.content.toLowerCase().includes(firstWord)
+  );
+
+  // ✅ NEW: Update challenge result in database
+  try {
+    await this.db.update(
+      'daily_challenges',
+      { challenge_date: op.eq(challengeDate) },
+      { result: isCompleted }
     );
-
-    return isCompleted ? '✅ منجز' : '❌ غير منجز';
+    console.log(`✅ Updated challenge result for ${challengeDate}: ${isCompleted}`);
+  } catch (error) {
+    console.error('❌ Failed to update challenge result:', error);
   }
+
+  return isCompleted ? '✅ منجز' : '❌ غير منجز';
+}
 
   /**
    * ✅ FIXED v3.0: Format preview using COMPREHENSIVE NAME-BASED grouping
@@ -613,20 +630,40 @@ export class ReportGenerator {
       }
     }
 
-    // ===============================================================================
     // Step 2: Build parent task lookup from completed tasks using NAMES
-    // ===============================================================================
-    const tasksByName = new Map<string, Task>();
-    
-    for (const task of data.tasks) {
-      const cleanName = extractCleanTaskName(task.content);
-      
-      // Only store non-subtasks (main tasks) by name
-      if (!task.origin_task) {
-        tasksByName.set(cleanName, task);
-        console.log(`  ✅ Completed main task: "${cleanName}" (ID: ${task.task_id})`);
+const tasksByName = new Map<string, Task>();
+
+for (const task of data.tasks) {
+  const cleanName = extractCleanTaskName(task.content);
+  
+  // Only store non-subtasks (main tasks) by name
+  if (!task.origin_task) {
+    tasksByName.set(cleanName, task);
+    console.log(`  ✅ Completed main task: "${cleanName}" (ID: ${task.task_id})`);
+  }
+}
+
+// ✅ NEW: Add failed main tasks to the map so subtasks can find their parents
+if (data.failedTasksJson) {
+  for (const failed of data.failedTasksJson.failed_tasks) {
+    if (!failed.is_subtask) {
+      const cleanName = extractCleanTaskName(failed.content);
+      if (!tasksByName.has(cleanName)) {
+        // Create a pseudo-task entry for the failed parent
+        const pseudoParent: Task = {
+          task_id: failed.id,
+          content: failed.content,
+          completed_at: new Date(), // Dummy date
+          status: 'failed',
+          category: failed.category,
+          priority: failed.priority,
+        };
+        tasksByName.set(cleanName, pseudoParent);
+        console.log(`  ❌ Added failed main task to map: "${cleanName}"`);
       }
     }
+  }
+}
 
     // Step 3: Group completed subtasks by parent NAME
     const completedSubtasksByParentName = new Map<string, Task[]>();
@@ -688,11 +725,24 @@ export class ReportGenerator {
     console.log(`   Parent names with failed subs: ${failedSubtasksByParentName.size}\n`);
 
     // Step 4: Build output - process main tasks
-    const processedParentNames = new Set<string>();
-    let isFirstTask = true; // Track if this is the first task
-    
-    for (const task of data.tasks) {
-      if (processedSubtasks.has(task.task_id)) continue;
+const processedParentNames = new Set<string>();
+let isFirstTask = true; // Track if this is the first task
+
+// ✅ NEW: First, process all parent tasks (both completed and failed)
+const allParentNames = new Set([
+  ...Array.from(tasksByName.keys()),
+  ...Array.from(completedSubtasksByParentName.keys()),
+  ...Array.from(failedSubtasksByParentName.keys())
+]);
+
+for (const parentName of allParentNames) {
+  if (processedParentNames.has(parentName)) continue;
+  
+  const task = tasksByName.get(parentName);
+  if (!task) {
+    console.log(`⚠️ Parent "${parentName}" has subtasks but no parent task found`);
+    continue;
+  }
       
       const cleanName = extractCleanTaskName(task.content);
       
@@ -774,8 +824,42 @@ export class ReportGenerator {
         text += `   ✕ ${subCleanName}\n`;
       }
       
-      processedParentNames.add(cleanName);
+      processedParentNames.add(parentName);
+}
+
+// ✅ NEW: Process orphaned subtasks (subtasks without a parent in the list)
+for (const task of data.tasks) {
+  if (processedSubtasks.has(task.task_id)) continue;
+  if (!task.origin_task) continue; // Not a subtask
+  
+  const cleanName = extractCleanTaskName(task.content);
+  
+  // Check if this subtask's parent was already processed
+  const parentTask = tasksById.get(task.origin_task);
+  if (parentTask) {
+    const parentCleanName = extractCleanTaskName(parentTask.content);
+    if (processedParentNames.has(parentCleanName)) {
+      continue; // Already processed under parent
     }
+  }
+  
+  // This is an orphaned subtask - show it with a note
+  console.log(`⚠️ Orphaned subtask: "${cleanName}"`);
+  
+  if (!isFirstTask) {
+    text += '\n';
+  }
+  isFirstTask = false;
+  
+  const metadata = getOriginalMetadataString(task.content);
+  text += `⚠️ ${cleanName}`;
+  if (metadata) {
+    text += ` ${metadata}`;
+  }
+  text += ` (مهمة فرعية - المهمة الرئيسية غير مكتملة)\n`;
+  
+  processedSubtasks.add(task.task_id);
+}
     
     // ===============================================================================
     // Step 5: Add standalone failed tasks (with their failed subtasks)

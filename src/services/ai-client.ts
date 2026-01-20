@@ -65,9 +65,9 @@ export class AIClient {
   private apiKey: string;
   private baseUrl = 'https://openrouter.ai/api/v1';
   private model: string;
+  private debugLogger?: any; // Will be set externally
 
-  // NEW
-constructor(apiKey: string, model: string = 'anthropic/claude-sonnet-4') {
+  constructor(apiKey: string, model: string = 'anthropic/claude-sonnet-4') {
   // Trim whitespace and validate API key format
   this.apiKey = apiKey.trim();
   
@@ -78,23 +78,34 @@ constructor(apiKey: string, model: string = 'anthropic/claude-sonnet-4') {
   this.model = model;
 }
 
+/**
+ * Set debug logger
+ */
+setDebugLogger(logger: any): void {
+  this.debugLogger = logger;
+}
   /**
    * Send a completion request to OpenRouter API
    */
   async complete(
-    messages: AIMessage[],
-    temperature: number = 0.7,
-    maxTokens: number = 4000
-  ): Promise<string> {
-    const request: AICompletionRequest = {
-      model: this.model,
-      messages,
-      temperature,
-      max_tokens: maxTokens,
-      top_p: 1,
-    };
+  messages: AIMessage[],
+  temperature: number = 0.7,
+  maxTokens: number = 4000
+): Promise<string> {
+  const request: AICompletionRequest = {
+    model: this.model,
+    messages,
+    temperature,
+    max_tokens: maxTokens,
+    top_p: 1,
+  };
 
-    const response = await retryWithBackoff(
+  // ✅ NEW: Log AI request if debug mode enabled
+  if (this.debugLogger?.isEnabled()) {
+    await this.debugLogger.logAIRequest(this.model, messages, temperature, maxTokens);
+  }
+
+  const response = await retryWithBackoff(
       async () => {
         const res = await fetch(`${this.baseUrl}/chat/completions`, {
           method: 'POST',
@@ -124,12 +135,17 @@ constructor(apiKey: string, model: string = 'anthropic/claude-sonnet-4') {
     );
 
     const content = response.choices[0]?.message?.content;
-    if (!content) {
-      throw new ExternalAPIError('Empty response from OpenRouter', 'openrouter');
-    }
-
-    return content;
+  if (!content) {
+    throw new ExternalAPIError('Empty response from OpenRouter', 'openrouter');
   }
+
+  // ✅ NEW: Log AI response if debug mode enabled
+  if (this.debugLogger?.isEnabled()) {
+    await this.debugLogger.logAIResponse(this.model, content, response.usage);
+  }
+
+  return content;
+}
 
   /**
    * Generate daily report analysis with unified prompt
@@ -659,6 +675,7 @@ export class AnthropicClient {
   private apiKey: string;
   private baseUrl = 'https://api.anthropic.com/v1';
   private model: string;
+  private debugLogger?: any;
 
   constructor(apiKey: string, model: string = 'claude-sonnet-4-20250514') {
     this.apiKey = apiKey.trim();
@@ -669,6 +686,13 @@ export class AnthropicClient {
 
     this.model = model;
   }
+
+/**
+ * Set debug logger
+ */
+setDebugLogger(logger: any): void {
+  this.debugLogger = logger;
+}
 
   /**
    * Send a completion request to Anthropic API
@@ -693,7 +717,12 @@ export class AnthropicClient {
       })),
     };
 
-    const response = await retryWithBackoff(
+    // ✅ NEW: Log AI request if debug mode enabled
+  if (this.debugLogger?.isEnabled()) {
+    await this.debugLogger.logAIRequest(this.model, messages, temperature, maxTokens);
+  }
+
+  const response = await retryWithBackoff(
       async () => {
         const res = await fetch(`${this.baseUrl}/messages`, {
           method: 'POST',
@@ -729,8 +758,13 @@ export class AnthropicClient {
       throw new ExternalAPIError('Empty response from Anthropic', 'anthropic');
     }
 
-    return content;
+    // ✅ NEW: Log AI response if debug mode enabled
+  if (this.debugLogger?.isEnabled()) {
+    await this.debugLogger.logAIResponse(this.model, content, response.usage);
   }
+
+  return content;
+}
 }
 
 // ============================================
@@ -749,6 +783,7 @@ export class UnifiedAIClient {
   private anthropicClient?: AnthropicClient;
   private openRouterClient?: AIClient;
   private useAnthropicPrimary: boolean;
+  private debugLogger?: any;
 
   constructor(config: AIClientConfig) {
     this.useAnthropicPrimary = config.useAnthropicPrimary !== false;
@@ -784,6 +819,19 @@ export class UnifiedAIClient {
       throw new Error('No valid AI API keys provided. Need either Anthropic or OpenRouter API key.');
     }
   }
+/**
+ * Set debug logger for all clients
+ */
+setDebugLogger(logger: any): void {
+  this.debugLogger = logger;
+  if (this.anthropicClient) {
+    this.anthropicClient.setDebugLogger(logger);
+  }
+  if (this.openRouterClient) {
+    this.openRouterClient.setDebugLogger(logger);
+  }
+}
+
 
   /**
    * Complete a prompt using primary provider with fallback

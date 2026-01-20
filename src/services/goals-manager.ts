@@ -139,17 +139,78 @@ export class GoalsManager {
     );
   }
 
-  /**
-   * Get formatted goals summary for Telegram
-   */
-  async getFormattedGoalsSummary(): Promise<string> {
-    const goals = await this.getCurrentWeekGoals();
-    const currentWeek = this.getCurrentWeekRange();
+/**
+ * Auto-evaluate challenges for past dates
+ * Marks any unevaluated challenges from past days as failed
+ */
+async autoEvaluatePastChallenges(): Promise<number> {
+  try {
     const today = getTodayInEgypt();
+    const todayDate = new Date(today);
+    
+    console.log(`🔍 Auto-evaluating challenges before ${today}...`);
+    
+    // Get all challenges
+    const allChallenges = await this.db.select<DailyChallenge>('daily_challenges', {});
+    
+    let updatedCount = 0;
+    
+    for (const challenge of allChallenges) {
+      // Skip if already evaluated
+      if (challenge.result !== null && challenge.result !== undefined) {
+        continue;
+      }
+      
+      // Get challenge date
+      const challengeDateStr = typeof challenge.challenge_date === 'string'
+        ? challenge.challenge_date
+        : new Date(challenge.challenge_date).toISOString().split('T')[0];
+      
+      if (!challengeDateStr) continue;
+      
+      const challengeDate = new Date(challengeDateStr);
+      
+      // If challenge date is in the past (before today), mark as failed
+      if (challengeDate < todayDate) {
+        console.log(`  ❌ Marking past challenge as failed: ${challengeDateStr}`);
+        
+        await this.db.update(
+          'daily_challenges',
+          { challenge_date: op.eq(challengeDateStr) },
+          { result: false }
+        );
+        
+        updatedCount++;
+      }
+    }
+    
+    if (updatedCount > 0) {
+      console.log(`✅ Auto-evaluated ${updatedCount} past challenge(s) as failed`);
+    } else {
+      console.log(`ℹ️ No past challenges needed evaluation`);
+    }
+    
+    return updatedCount;
+    
+  } catch (error) {
+    console.error('❌ Error auto-evaluating challenges:', error);
+    return 0;
+  }
+}
 
-    // Get ALL challenges for current week
-    const weekChallenges = await this.getWeekChallenges(currentWeek.weekStartDate, currentWeek.weekEndDate);
+  /**
+ * Get formatted goals summary for Telegram
+ */
+async getFormattedGoalsSummary(): Promise<string> {
+  // ✅ NEW: Auto-evaluate past challenges first
+  await this.autoEvaluatePastChallenges();
+  
+  const goals = await this.getCurrentWeekGoals();
+  const currentWeek = this.getCurrentWeekRange();
+  const today = getTodayInEgypt();
 
+  // Get ALL challenges for current week
+  const weekChallenges = await this.getWeekChallenges(currentWeek.weekStartDate, currentWeek.weekEndDate);
     let summary = '🎯 الأهداف الأسبوعية\n';
     summary += `📅 ${currentWeek.weekStartDate} → ${currentWeek.weekEndDate}\n`;
     summary += `ـــــــــــــــــــــــ\n\n`;

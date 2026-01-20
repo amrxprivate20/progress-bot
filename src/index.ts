@@ -387,6 +387,17 @@ async function handleWidgetAPI(
 }
 
       case 'daily-challenge': {
+  // ✅ NEW: Auto-evaluate past challenges first
+  const { createGoalsManager } = await import('./services/goals-manager');
+  const { createAIClient } = await import('./services/ai-client');
+  
+  const openRouterKey = await settings.get('openrouter_api_key');
+  const aiModel = await settings.get('ai_model') || 'anthropic/claude-sonnet-4';
+  const aiClient = createAIClient(openRouterKey?.trim() || '', aiModel);
+  
+  const goalsMgr = createGoalsManager(db, settings, aiClient);
+  await goalsMgr.autoEvaluatePastChallenges();
+  
   // Get today's challenge AND weekly challenges list
   const weekStart = getWeekStartDate();
   const weekEnd = getWeekEndDate();

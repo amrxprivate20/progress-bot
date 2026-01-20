@@ -222,13 +222,24 @@ export async function startDurableObjectJob(
 
     console.log(`✅ [Job ${jobId}] Durable Object job started`);
 
-    // FIXED: Simplified notification without job ID spam
-    await ctx.reply(
-      '✅ تم بدء التحليل!\n\n' +
-      'جاري معالجة تقريرك في الخلفية. سأرسل لك النتائج خلال دقيقة أو دقيقتين.\n\n' +
-      'يمكنك الاستمرار في استخدام البوت عادياً! 🚀'
-    );
+    // Determine which AI provider is being used
+let aiProvider = 'Unknown';
+if (anthropicApiKey && anthropicApiKey.startsWith('sk-ant-') && useAnthropicPrimary !== false) {
+  aiProvider = 'Claude (Anthropic)';
+} else if (apiKey && apiKey.startsWith('sk-or-v1-')) {
+  // Extract model name from aiModel (e.g., "anthropic/claude-sonnet-4" -> "Claude Sonnet 4")
+  const modelParts = aiModel.split('/');
+  const modelName = modelParts[1] || aiModel;
+  aiProvider = modelName.replace(/-/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
+}
 
+// FIXED: Include AI model in notification
+await ctx.reply(
+  `✅ تم بدء التحليل!\n\n` +
+  `🤖 النموذج: ${aiProvider}\n\n` +
+  'جاري معالجة تقريرك في الخلفية. سأرسل لك النتائج خلال دقيقة أو دقيقتين.\n\n' +
+  'يمكنك الاستمرار في استخدام البوت عادياً! 🚀'
+);
   } catch (error) {
     console.error(`❌ [Job ${jobId}] Failed to start:`, error);
     await ctx.reply('❌ حدث خطأ أثناء بدء المعالجة. حاول مرة أخرى.');

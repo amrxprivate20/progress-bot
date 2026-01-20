@@ -13,6 +13,7 @@ import { createUnifiedAIClient } from '../services/ai-client';
 import { createMemoryManager } from '../services/memory-manager';
 import { createDriveService } from '../services/google-drive';
 import type { Env } from '../types';
+import { createDebugLogger } from '../utils/debug-logger';
 
 // ============================================
 // Types
@@ -104,22 +105,36 @@ export class ReportProcessor extends DurableObject<Env> {
    * Process the report in background
    * This runs WITHOUT timeout limits!
    */
-  private async processReport(jobData: ReportJobData): Promise<void> {
-    const {
-      jobId,
-      chatId,
-      reportData,
-      userAnswers,
-      apiKey,
-      anthropicApiKey,
-      aiModel,
-      botToken,
-      useAnthropicPrimary
-    } = jobData;
+private async processReport(jobData: ReportJobData): Promise<void> {
+  const {
+    jobId,
+    chatId,
+    reportData,
+    userAnswers,
+    apiKey,
+    anthropicApiKey,
+    aiModel,
+    botToken,
+    useAnthropicPrimary
+  } = jobData;
 
-    console.log(`🎯 [Job ${jobId}] Starting report processing`);
+  console.log(`🎯 [Job ${jobId}] Starting report processing`);
 
-    try {
+  try {
+    // ✅ NEW: Initialize debug logger
+    const db = createSupabaseClient({
+      SUPABASE_URL: this.env.SUPABASE_URL,
+      SUPABASE_ANON_KEY: this.env.SUPABASE_ANON_KEY,
+      TELEGRAM_BOT_TOKEN: '',
+      TELEGRAM_CHAT_ID: '',
+      TODOIST_API_TOKEN: '',
+    } as any);
+    const settings = new SettingsMgr(db);
+    
+    const debugLogger = createDebugLogger(settings);
+    await debugLogger.init();
+    
+    await debugLogger.log(`[Job ${jobId}] Starting report processing`);
       // Update status
       this.status = {
         status: 'processing',
@@ -158,12 +173,15 @@ export class ReportProcessor extends DurableObject<Env> {
       // Create services
       const reportGen = createReportGenerator(db, settings);
       const aiClient = createUnifiedAIClient({
-        anthropicApiKey: hasValidAnthropicKey ? anthropicApiKey : undefined,
-        openRouterApiKey: hasValidOpenRouterKey ? apiKey : undefined,
-        anthropicModel: 'claude-sonnet-4-20250514',
-        openRouterModel: aiModel,
-        useAnthropicPrimary: useAnthropicPrimary !== false, // Default to Anthropic if available
-      });
+  anthropicApiKey: hasValidAnthropicKey ? anthropicApiKey : undefined,
+  openRouterApiKey: hasValidOpenRouterKey ? apiKey : undefined,
+  anthropicModel: 'claude-sonnet-4-20250514',
+  openRouterModel: aiModel,
+  useAnthropicPrimary: useAnthropicPrimary !== false,
+});
+
+// ✅ NEW: Set debug logger on AI client
+aiClient.setDebugLogger(debugLogger);
       const memoryMgr = createMemoryManager(db, aiClient as any);
 
       // Generate past week summary
