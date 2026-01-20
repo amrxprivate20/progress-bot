@@ -63,59 +63,59 @@ export class DebugLogger {
    * Log AI request
    */
   async logAIRequest(
-    model: string,
-    messages: any[],
-    temperature?: number,
-    maxTokens?: number
-  ): Promise<void> {
-    if (!this.enabled) return;
+  model: string,
+  messages: any[],
+  temperature?: number,
+  maxTokens?: number
+): Promise<void> {
+  if (!this.enabled) return;
 
-    const timestamp = new Date().toISOString();
-    let message = `📤 **AI REQUEST** (${timestamp})\n\n`;
-    message += `🤖 **Model:** ${model}\n`;
-    message += `🌡️ **Temperature:** ${temperature || 0.7}\n`;
-    message += `📊 **Max Tokens:** ${maxTokens || 4000}\n\n`;
-    message += `📝 **Messages:**\n`;
-    message += '```json\n';
-    message += JSON.stringify(messages, null, 2);
-    message += '\n```';
+  const timestamp = new Date().toISOString();
+  let message = `📤 **AI REQUEST** (${timestamp})\n\n`;
+  message += `🤖 **Model:** ${model}\n`;
+  message += `🌡️ **Temperature:** ${temperature || 0.7}\n`;
+  message += `📊 **Max Tokens:** ${maxTokens || 4000}\n\n`;
+  message += `📝 **Messages:**\n`;
+  
+  // Send messages as JSON without truncation
+  const messagesJson = JSON.stringify(messages, null, 2);
+  message += '```json\n';
+  message += messagesJson;
+  message += '\n```';
 
-    await this.sendToTelegram(message);
-    console.log('📤 AI REQUEST logged to Telegram');
-  }
+  await this.sendToTelegram(message);
+  console.log('📤 AI REQUEST logged to Telegram');
+}
 
   /**
    * Log AI response
    */
   async logAIResponse(
-    model: string,
-    response: string,
-    usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number }
-  ): Promise<void> {
-    if (!this.enabled) return;
+  model: string,
+  response: string,
+  usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number }
+): Promise<void> {
+  if (!this.enabled) return;
 
-    const timestamp = new Date().toISOString();
-    let message = `📥 **AI RESPONSE** (${timestamp})\n\n`;
-    message += `🤖 **Model:** ${model}\n`;
-    
-    if (usage) {
-      message += `📊 **Tokens:**\n`;
-      message += `  • Prompt: ${usage.prompt_tokens || 'N/A'}\n`;
-      message += `  • Completion: ${usage.completion_tokens || 'N/A'}\n`;
-      message += `  • Total: ${usage.total_tokens || 'N/A'}\n\n`;
-    }
-    
-    message += `💬 **Response:**\n`;
-    message += '```\n';
-    message += response.substring(0, 3500); // Limit to avoid message too long
-    if (response.length > 3500) {
-      message += '\n... (truncated)';
-    }
-    message += '\n```';
-
-    await this.sendToTelegram(message);
-    console.log('📥 AI RESPONSE logged to Telegram');
+  const timestamp = new Date().toISOString();
+  let message = `📥 **AI RESPONSE** (${timestamp})\n\n`;
+  message += `🤖 **Model:** ${model}\n`;
+  
+  if (usage) {
+    message += `📊 **Tokens:**\n`;
+    message += `  • Prompt: ${usage.prompt_tokens || 'N/A'}\n`;
+    message += `  • Completion: ${usage.completion_tokens || 'N/A'}\n`;
+    message += `  • Total: ${usage.total_tokens || 'N/A'}\n\n`;
   }
+  
+  message += `💬 **Response:**\n`;
+  message += '```\n';
+  message += response; // ✅ NO TRUNCATION
+  message += '\n```';
+
+  await this.sendToTelegram(message);
+  console.log('📥 AI RESPONSE logged to Telegram');
+}
 
   /**
    * Log error

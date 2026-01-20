@@ -170,7 +170,7 @@ const logger = this.debugLogger;
 if (logger?.isEnabled()) {
   await logger.log(
     `📋 **UNIFIED PROMPT** (${context.reportDate})\n\n` +
-    '```\n' + prompt.substring(0, 3500) + '\n```',
+    '```\n' + prompt + '\n```',
     '📋'
   );
 }
@@ -209,7 +209,7 @@ if (logger?.isEnabled()) {
     if (Object.keys(parsed.memoryUpdates).length > 0) {
       let memoryLog = '🧠 **MEMORY UPDATES DETAILS**\n\n';
       for (const [category, content] of Object.entries(parsed.memoryUpdates)) {
-        memoryLog += `**${category}:**\n${content.substring(0, 200)}...\n\n`;
+        memoryLog += `**${category}:**\n${content}\n\n---\n\n`;
       }
       await logger.log(memoryLog, '🧠');
     }
@@ -953,7 +953,7 @@ setDebugLogger(logger: any): void {
   if (logger?.isEnabled()) {
     await logger.log(
       `📋 **UNIFIED PROMPT** (${context.reportDate})\n\n` +
-      '```\n' + prompt.substring(0, 3500) + '\n```',
+      '```\n' + prompt + '\n```',
       '📋'
     );
   }
@@ -992,7 +992,7 @@ setDebugLogger(logger: any): void {
     if (Object.keys(parsed.memoryUpdates).length > 0) {
       let memoryLog = '🧠 **MEMORY UPDATES DETAILS**\n\n';
       for (const [category, content] of Object.entries(parsed.memoryUpdates)) {
-        memoryLog += `**${category}:**\n${content.substring(0, 200)}...\n\n`;
+        memoryLog += `**${category}:**\n${content}\n\n---\n\n`;
       }
       await logger.log(memoryLog, '🧠');
     }
