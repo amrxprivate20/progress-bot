@@ -911,6 +911,7 @@ async function sendLongMessage(ctx: Context, message: string) {
 const todoistToken = await ctx.settings.get('todoist_api_token');
 let todoistTaskId: string | null = null;
 let todoistTaskContent: string = args.trim();
+let availableToday: any[] = [];
 
 if (todoistToken) {
   try {
@@ -942,8 +943,12 @@ if (todoistToken) {
         // If no due date, include it (could be started anytime)
         if (!t.due?.date) return true;
         
+        // ✅ FIX: Safely extract date and handle undefined
+        const dueDateStr = t.due.date.split('T')[0];
+        if (!dueDateStr) return false;
+        
         // Check if due date is today or in the past (overdue)
-        const taskDueDate = new Date(t.due.date.split('T')[0] + 'T00:00:00Z');
+        const taskDueDate = new Date(dueDateStr + 'T00:00:00Z');
         return taskDueDate <= todayDate;
       });
       
@@ -969,19 +974,21 @@ if (todoistToken) {
   // Multiple matches - show list and wait for selection
   let message = '📋 **تم العثور على عدة مهام مطابقة:**\n\n';
   matchedTasks.forEach((t, i) => {
-    // ✅ NEW: Show due date if available
+    // ✅ FIX: Show due date if available with proper null checks
     let dueInfo = '';
     if (t.due?.date) {
-      const dueDate = t.due.date.split('T')[0];
-      const isToday = dueDate === today;
-      const isPast = new Date(dueDate) < todayDate;
-      
-      if (isToday) {
-        dueInfo = ' 📅 اليوم';
-      } else if (isPast) {
-        dueInfo = ` ⚠️ متأخرة (${dueDate})`;
-      } else {
-        dueInfo = ` 📅 ${dueDate}`;
+      const dueDateStr = t.due.date.split('T')[0];
+      if (dueDateStr) {
+        const isToday = dueDateStr === today;
+        const isPast = new Date(dueDateStr) < todayDate;
+        
+        if (isToday) {
+          dueInfo = ' 📅 اليوم';
+        } else if (isPast) {
+          dueInfo = ` ⚠️ متأخرة (${dueDateStr})`;
+        } else {
+          dueInfo = ` 📅 ${dueDateStr}`;
+        }
       }
     } else {
       dueInfo = ' 📌 بدون موعد';
@@ -1012,16 +1019,15 @@ if (todoistToken) {
         }
       }
 
-      // ✅ NEW: Inform user if no tasks were found
-if (!todoistTaskId && availableToday.length === 0) {
-  await ctx.reply(
-    '📋 لا توجد مهام متاحة اليوم في Todoist.\n\n' +
-    'يمكنك:\n' +
-    '• إضافة مهام جديدة لليوم\n' +
-    '• أو كتابة اسم المهمة يدوياً (سيتم إنشاء مهمة جديدة)'
-  );
-}
-
+      // ✅ FIX: Check availableToday within the same scope
+      if (!todoistTaskId && availableToday.length === 0) {
+        await ctx.reply(
+          '📋 لا توجد مهام متاحة اليوم في Todoist.\n\n' +
+          'يمكنك:\n' +
+          '• إضافة مهام جديدة لليوم\n' +
+          '• أو كتابة اسم المهمة يدوياً (سيتم إنشاء مهمة جديدة)'
+        );
+      }
         // Save the active task with Todoist ID if found
         // Store both startTime (timestamp) and startDate (Egypt date) for midnight boundary handling
       const startDate = getTodayInEgypt(); // Egypt date when task started
