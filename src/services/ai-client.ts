@@ -87,25 +87,25 @@ setDebugLogger(logger: any): void {
   /**
    * Send a completion request to OpenRouter API
    */
-  async complete(
-  messages: AIMessage[],
-  temperature: number = 0.7,
-  maxTokens: number = 4000
-): Promise<string> {
-  const request: AICompletionRequest = {
-    model: this.model,
-    messages,
-    temperature,
-    max_tokens: maxTokens,
-    top_p: 1,
-  };
+    async complete(
+    messages: AIMessage[],
+    temperature: number = 0.7,
+    maxTokens: number = 4000
+  ): Promise<string> {
+    const request: AICompletionRequest = {
+      model: this.model,
+      messages,
+      temperature,
+      max_tokens: maxTokens,
+      top_p: 1,
+    };
 
-  // ✅ NEW: Log AI request if debug mode enabled
-  if (this.debugLogger?.isEnabled()) {
-    await this.debugLogger.logAIRequest(this.model, messages, temperature, maxTokens);
-  }
+    // ✅ NEW: Log AI request if debug mode enabled
+    if (this.debugLogger?.isEnabled()) {
+      await this.debugLogger.logAIRequest(this.model, messages, temperature, maxTokens);
+    }
 
-  const response = await retryWithBackoff(
+    const response = await retryWithBackoff(
       async () => {
         const res = await fetch(`${this.baseUrl}/chat/completions`, {
           method: 'POST',

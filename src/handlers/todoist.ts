@@ -153,30 +153,67 @@ async function completeParentInTodoistIfAllDone(
   try {
     console.log(`🔍 Checking if parent ${parentId} should be completed in Todoist...`);
     
-    // Get all subtasks from database
-    const subtasks = await db.select<Task>('tasks', {
-      filter: { origin_task: op.eq(parentId) },
+    // Get parent task to extract clean name for matching
+    const allTasks = await db.select<Task>('tasks', {});
+    const parentTasks = allTasks.filter(t => 
+      t.task_id === parentId || t.task_id?.startsWith(parentId + '_')
+    );
+    
+    if (parentTasks.length === 0) {
+      console.log(`⚠️ Parent ${parentId} not found in database`);
+      return;
+    }
+    
+    const parentTask = parentTasks.sort((a, b) => 
+      new Date(b.completed_at).getTime() - new Date(a.completed_at).getTime()
+    )[0];
+    
+    if (!parentTask) {
+      console.log(`⚠️ No valid parent task found`);
+      return;
+    }
+    
+    const parentCleanName = extractCleanTaskName(parentTask.content);
+    console.log(`📋 Parent clean name: "${parentCleanName}"`);
+    
+    // Get completed subtasks from database (by origin_task ID)
+    const completedSubtasks = allTasks.filter(t => {
+      if (!t.origin_task) return false;
+      const originBase = t.origin_task.split('_')[0];
+      const parentBase = parentId.split('_')[0];
+      return originBase === parentBase;
     });
 
-    // Also check for failed subtasks in JSON
+    // Get failed subtasks from JSON BY NAME
     const dailyFailures = await getDailyFailures(db, egyptDate);
-    const failedSubtasks = dailyFailures?.failed_tasks.filter(
-      f => f.is_subtask && f.parent_id === parentId
-    ) || [];
+    const failedSubtasks = dailyFailures?.failed_tasks.filter(f => {
+      if (!f.is_subtask || !f.parent_content) return false;
+      const failedParentName = extractCleanTaskName(f.parent_content);
+      return failedParentName === parentCleanName;
+    }) || [];
 
-    console.log(`📊 Parent ${parentId}: ${subtasks.length} DB subtasks, ${failedSubtasks.length} failed subtasks`);
+    const totalSubtasks = completedSubtasks.length + failedSubtasks.length;
+    
+    console.log(`📊 Parent "${parentCleanName}":`);
+    console.log(`   Completed subtasks: ${completedSubtasks.length}`);
+    console.log(`   Failed subtasks: ${failedSubtasks.length}`);
+    console.log(`   Total subtasks: ${totalSubtasks}`);
 
     // If there are ANY failed subtasks, don't complete parent
     if (failedSubtasks.length > 0) {
-      console.log(`⚠️ Parent ${parentId} has ${failedSubtasks.length} failed subtasks - not completing in Todoist`);
+      console.log(`⚠️ Parent has ${failedSubtasks.length} failed subtasks - NOT completing in Todoist`);
+      return;
+    }
+    
+    // If no subtasks at all, don't complete
+    if (totalSubtasks === 0) {
+      console.log(`ℹ️ Parent has no subtasks - NOT completing`);
       return;
     }
 
     // If all subtasks are done (and none failed), complete parent in Todoist
-    const allDone = subtasks.every(t => t.status === 'done');
-    
-    if (allDone && subtasks.length > 0) {
-      console.log(`✅ All subtasks done for parent ${parentId} - completing in Todoist`);
+    if (completedSubtasks.length === totalSubtasks) {
+      console.log(`✅ All ${totalSubtasks} subtasks done - completing parent in Todoist`);
       
       const todoistToken = await settings.get('todoist_api_token');
       if (!todoistToken) {
@@ -202,7 +239,7 @@ async function completeParentInTodoistIfAllDone(
         console.error(`❌ Failed to complete parent in Todoist: ${response.status} ${errorText}`);
       }
     } else {
-      console.log(`ℹ️ Parent ${parentId}: ${subtasks.filter(t => t.status === 'done').length}/${subtasks.length} subtasks done - not completing yet`);
+      console.log(`ℹ️ Only ${completedSubtasks.length}/${totalSubtasks} subtasks done - NOT completing yet`);
     }
   } catch (error) {
     console.error('❌ Error completing parent in Todoist:', error);

@@ -135,12 +135,13 @@ private async processReport(jobData: ReportJobData): Promise<void> {
     await debugLogger.init();
     
     await debugLogger.log(`[Job ${jobId}] Starting report processing`);
-      // Update status
-      this.status = {
-        status: 'processing',
-        progress: 'جاري التحليل بالذكاء الاصطناعي...',
-        startedAt: new Date().toISOString(),
-      };
+    
+    // Update status
+    this.status = {
+      status: 'processing',
+      progress: 'جاري التحليل بالذكاء الاصطناعي...',
+      startedAt: new Date().toISOString(),
+    };
 
       // Send initial status to user
       await this.sendTelegramMessage(
@@ -160,18 +161,27 @@ private async processReport(jobData: ReportJobData): Promise<void> {
       console.log(`🏗️ [Job ${jobId}] Creating services...`);
       console.log(`🔑 [Job ${jobId}] Anthropic: ${hasValidAnthropicKey ? 'available' : 'not configured'}, OpenRouter: ${hasValidOpenRouterKey ? 'available' : 'not configured'}`);
 
+      await debugLogger.log(
+        `🏗️ **Creating AI Services**\n\n` +
+        `Anthropic: ${hasValidAnthropicKey ? '✅' : '❌'}\n` +
+        `OpenRouter: ${hasValidOpenRouterKey ? '✅' : '❌'}\n` +
+        `Primary: ${useAnthropicPrimary ? 'Anthropic' : 'OpenRouter'}\n` +
+        `Model: ${aiModel}`
+      );
+
       // Create services
       const reportGen = createReportGenerator(db, settings);
       const aiClient = createUnifiedAIClient({
-  anthropicApiKey: hasValidAnthropicKey ? anthropicApiKey : undefined,
-  openRouterApiKey: hasValidOpenRouterKey ? apiKey : undefined,
-  anthropicModel: 'claude-sonnet-4-20250514',
-  openRouterModel: aiModel,
-  useAnthropicPrimary: useAnthropicPrimary !== false,
-});
+        anthropicApiKey: hasValidAnthropicKey ? anthropicApiKey : undefined,
+        openRouterApiKey: hasValidOpenRouterKey ? apiKey : undefined,
+        anthropicModel: 'claude-sonnet-4-20250514',
+        openRouterModel: aiModel,
+        useAnthropicPrimary: useAnthropicPrimary !== false,
+      });
 
-// ✅ NEW: Set debug logger on AI client
-aiClient.setDebugLogger(debugLogger);
+      // ✅ NEW: Set debug logger on AI client
+      aiClient.setDebugLogger(debugLogger);
+      
       const memoryMgr = createMemoryManager(db, aiClient as any);
 
       // Generate past week summary
@@ -180,11 +190,12 @@ aiClient.setDebugLogger(debugLogger);
       );
 
       console.log(`🤖 [Job ${jobId}] Calling AI (may take 15-60 seconds)...`);
+      await debugLogger.log(`🤖 **Starting AI Analysis** (may take 15-60s)`);
+      
       const startTime = Date.now();
 
       // Call AI - THIS IS THE LONG OPERATION (no timeout here!)
-      // AFTER (CORRECT):
-const aiResponse = await aiClient.generateDailyReport({
+      const aiResponse = await aiClient.generateDailyReport({
   reportDate: reportData.date,
   tasks: reportData.tasks,
   failedTasksJson: reportData.failedTasksJson, // ✅ ADD THIS
@@ -208,6 +219,13 @@ const aiResponse = await aiClient.generateDailyReport({
 
       const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
       console.log(`✅ [Job ${jobId}] AI analysis complete in ${elapsed}s`);
+      
+      await debugLogger.log(
+        `✅ **AI Analysis Complete**\n\n` +
+        `Duration: ${elapsed}s\n` +
+        `Questions: ${aiResponse.questions.length}\n` +
+        `Memory updates: ${Object.keys(aiResponse.memoryUpdates).length}`
+      );
 
       // Send results to user
       await this.sendReportResults(chatId, botToken, reportData, aiResponse);
