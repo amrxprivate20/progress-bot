@@ -423,26 +423,54 @@ Q: [سؤالك هنا]
 - [اذكر الأهداف المهملة أو اكتب "لا يوجد"]
 
 ## [MEMORY_UPDATES]
-(⚠️ IMPORTANT: إذا كانت هناك أي رؤى جديدة، أنماط، أو معلومات مهمة من تجربة اليوم، يجب تحديث الذاكرة.
+⚠️ **CRITICAL FORMAT RULES:**
+1. Each memory update MUST start with "CATEGORY:" on its own line
+2. Followed by "CONTENT:" on the next line
+3. Leave a blank line between different category updates
+4. Category names MUST match EXACTLY (copy-paste from list above)
 
-أمثلة على ما يستحق التحديث:
-- أنماط جديدة في الإنتاجية أو المشاعر
-- استراتيجيات ناجحة تم اكتشافها
-- تحديات متكررة
-- معلومات شخصية جديدة
-- إنجازات مهمة
+**Available Categories (copy these EXACTLY):**
+- Personal Insights & Patterns
+- Successful Strategies & What Works
+- Triggers & Challenges
+- Important Milestones & Breakthroughs
+- Recurring Themes & Lessons
+- Personal Information & Facts
 
-استخدم هذا الشكل بالضبط:
-CATEGORY: [اسم الفئة بالضبط كما هو أعلاه]
-CONTENT: [المعلومة الجديدة - جملة أو جملتين]
+**What to update:**
+- New patterns in productivity or emotions
+- Successful strategies discovered today
+- Recurring challenges or triggers
+- Personal information learned
+- Important achievements
 
-⚠️ حتى لو كانت رؤية صغيرة، اكتبها! 
+**Format (MUST follow EXACTLY):**
 
-مثال:
 CATEGORY: Personal Insights & Patterns
-CONTENT: يعمل بشكل أفضل في الصباح الباكر، تركيزه يقل بعد الظهر
+CONTENT: Works better in early morning, focus drops after noon
 
-إذا لم تكن هناك معلومات جديدة على الإطلاق، اكتب: "لا توجد تحديثات")
+CATEGORY: Successful Strategies & What Works
+CONTENT: Breaking large tasks into 30-minute chunks helps maintain focus
+
+CATEGORY: Triggers & Challenges
+CONTENT: Procrastinates when task feels overwhelming or unclear
+
+⚠️ **IMPORTANT:** 
+- Even small insights are valuable - add them!
+- You can update MULTIPLE categories (common to have 2-4 updates per day)
+- If truly NO new information, write: "لا توجد تحديثات"
+- DO NOT skip the first category - it's the most important one!
+
+**Examples of good updates:**
+
+CATEGORY: Personal Insights & Patterns
+CONTENT: Noticed increased energy levels when exercising before work. Mood directly correlates with task completion rate.
+
+CATEGORY: Successful Strategies & What Works
+CONTENT: Using timer method helped complete 5 tasks today. Taking breaks every 45 minutes prevents burnout.
+
+CATEGORY: Triggers & Challenges
+CONTENT: Struggles with focus when notifications are enabled. Needs quiet environment for deep work.
 
 ## [MEMORY_OPTIMIZATION]
 (إذا كانت الذاكرة بحاجة لتحسين وإعادة تنظيم (كبيرة جداً أو غير منظمة)، اكتب "OPTIMIZE_NEEDED"، وإلا اكتب "NOT_NEEDED")
@@ -906,20 +934,26 @@ setDebugLogger(logger: any): void {
   strategicGoals: string;
   userAnswers?: Record<string, string>;
   journalContent?: string;
-  formattedReport?: string; // ✅ NEW: Accept pre-formatted report
+  formattedReport?: string;
 }): Promise<UnifiedAIResponse> {
   const prompt = this.buildUnifiedPrompt(context);
 
-  // ✅ Store logger reference to satisfy TypeScript
+  // ✅ IMPROVED: Always log the unified prompt with proper error handling
   const logger = this.debugLogger;
-
-  // ✅ Log the unified prompt if debug enabled
   if (logger?.isEnabled()) {
-    await logger.log(
-      `📋 **UNIFIED PROMPT** (${context.reportDate})\n\n` +
-      '```\n' + prompt + '\n```',
-      '📋'
-    );
+    try {
+      console.log('🐛 Debug mode: Logging unified prompt...');
+      await logger.log(
+        `📋 **UNIFIED PROMPT** (${context.reportDate})\n\n` +
+        `**Length:** ${prompt.length} characters\n\n` +
+        '```\n' + prompt + '\n```',
+        '📋'
+      );
+      console.log('✅ Unified prompt logged successfully');
+    } catch (logError) {
+      console.error('❌ Failed to log unified prompt:', logError);
+      // Continue execution even if logging fails
+    }
   }
 
   const messages: AIMessage[] = [
@@ -1169,26 +1203,54 @@ Q: [سؤالك هنا]
 - [اذكر الأهداف المهملة أو اكتب "لا يوجد"]
 
 ## [MEMORY_UPDATES]
-(⚠️ IMPORTANT: إذا كانت هناك أي رؤى جديدة، أنماط، أو معلومات مهمة من تجربة اليوم، يجب تحديث الذاكرة.
+⚠️ **CRITICAL FORMAT RULES:**
+1. Each memory update MUST start with "CATEGORY:" on its own line
+2. Followed by "CONTENT:" on the next line
+3. Leave a blank line between different category updates
+4. Category names MUST match EXACTLY (copy-paste from list above)
 
-أمثلة على ما يستحق التحديث:
-- أنماط جديدة في الإنتاجية أو المشاعر
-- استراتيجيات ناجحة تم اكتشافها
-- تحديات متكررة
-- معلومات شخصية جديدة
-- إنجازات مهمة
+**Available Categories (copy these EXACTLY):**
+- Personal Insights & Patterns
+- Successful Strategies & What Works
+- Triggers & Challenges
+- Important Milestones & Breakthroughs
+- Recurring Themes & Lessons
+- Personal Information & Facts
 
-استخدم هذا الشكل بالضبط:
-CATEGORY: [اسم الفئة بالضبط كما هو أعلاه]
-CONTENT: [المعلومة الجديدة - جملة أو جملتين]
+**What to update:**
+- New patterns in productivity or emotions
+- Successful strategies discovered today
+- Recurring challenges or triggers
+- Personal information learned
+- Important achievements
 
-⚠️ حتى لو كانت رؤية صغيرة، اكتبها! 
+**Format (MUST follow EXACTLY):**
 
-مثال:
 CATEGORY: Personal Insights & Patterns
-CONTENT: يعمل بشكل أفضل في الصباح الباكر، تركيزه يقل بعد الظهر
+CONTENT: Works better in early morning, focus drops after noon
 
-إذا لم تكن هناك معلومات جديدة على الإطلاق، اكتب: "لا توجد تحديثات")
+CATEGORY: Successful Strategies & What Works
+CONTENT: Breaking large tasks into 30-minute chunks helps maintain focus
+
+CATEGORY: Triggers & Challenges
+CONTENT: Procrastinates when task feels overwhelming or unclear
+
+⚠️ **IMPORTANT:** 
+- Even small insights are valuable - add them!
+- You can update MULTIPLE categories (common to have 2-4 updates per day)
+- If truly NO new information, write: "لا توجد تحديثات"
+- DO NOT skip the first category - it's the most important one!
+
+**Examples of good updates:**
+
+CATEGORY: Personal Insights & Patterns
+CONTENT: Noticed increased energy levels when exercising before work. Mood directly correlates with task completion rate.
+
+CATEGORY: Successful Strategies & What Works
+CONTENT: Using timer method helped complete 5 tasks today. Taking breaks every 45 minutes prevents burnout.
+
+CATEGORY: Triggers & Challenges
+CONTENT: Struggles with focus when notifications are enabled. Needs quiet environment for deep work.
 
 ## [MEMORY_OPTIMIZATION]
 (إذا كانت الذاكرة بحاجة لتحسين وإعادة تنظيم (كبيرة جداً أو غير منظمة)، اكتب "OPTIMIZE_NEEDED"، وإلا اكتب "NOT_NEEDED")

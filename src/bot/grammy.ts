@@ -641,8 +641,21 @@ async function sendLongMessage(ctx: Context, message: string) {
     }
   });
 
-  // Clear memory command
-  bot.command('clearmemory', async (ctx) => {
+ // Clear memory command
+bot.command('clearmemory', async (ctx) => {
+  try {
+    const chatId = ctx.chat?.id.toString() || '';
+    
+    // Store pending confirmation state
+    await ctx.db.insert('conversation_state', {
+      chat_id: `clearmemory_confirm_${chatId}`,
+      conversation_type: 'clearmemory_confirmation',
+      current_step: 0,
+      total_steps: 1,
+      data: {},
+      expires_at: new Date(Date.now() + 2 * 60 * 1000).toISOString(), // 2 minutes
+    });
+    
     await ctx.reply(
       '⚠️ *تحذير*\n\n' +
       'هل أنت متأكد من رغبتك في مسح كل الذاكرة؟\n' +
@@ -650,7 +663,11 @@ async function sendLongMessage(ctx: Context, message: string) {
       'أرسل "نعم" للتأكيد أو "لا" للإلغاء',
       { parse_mode: 'Markdown' }
     );
-  });
+  } catch (error) {
+    console.error('Clearmemory command error:', error);
+    await ctx.reply('❌ حدث خطأ. حاول مرة أخرى.');
+  }
+});
 
   // NEW: /today command - Quick view of today's progress
   bot.command('today', async (ctx) => {
@@ -1531,6 +1548,46 @@ if (todoistToken) {
           await ctx.reply(`✅ تم تحديث ${updatedCount} تحدي(ات) بنجاح!`);
         } else {
           await ctx.reply('❌ لم يتم العثور على تحديات صالحة للتحديث.\nتأكد من التنسيق: YYYY-MM-DD (اليوم): التحدي');
+        }
+        return;
+      }
+
+// Check for pending clearmemory confirmation
+      const clearmemoryKey = `clearmemory_confirm_${chatId}`;
+      const pendingClearmemory = await ctx.db.select('conversation_state', {
+        filter: { chat_id: op.eq(clearmemoryKey) },
+      });
+
+      if (pendingClearmemory.length > 0) {
+        // Delete confirmation state
+        await ctx.db.delete('conversation_state', { chat_id: op.eq(clearmemoryKey) });
+
+        const lowerText = text.trim().toLowerCase();
+        
+        if (lowerText === 'نعم' || lowerText === 'yes') {
+          await ctx.reply('🔄 جاري مسح الذاكرة...');
+          
+          try {
+            const openRouterKey = await ctx.settings.get('openrouter_api_key');
+            const aiModel = await ctx.settings.get('ai_model') || 'anthropic/claude-sonnet-4';
+            
+            if (!openRouterKey) {
+              await ctx.reply('❌ مفتاح API غير مكون');
+              return;
+            }
+            
+            const aiClient = createAIClient(openRouterKey, aiModel);
+            const memoryMgr = createMemoryManager(ctx.db, aiClient);
+            
+            await memoryMgr.clearAll();
+            
+            await ctx.reply('✅ تم مسح الذاكرة بنجاح');
+          } catch (error) {
+            console.error('Memory clear error:', error);
+            await ctx.reply('❌ حدث خطأ أثناء مسح الذاكرة');
+          }
+        } else {
+          await ctx.reply('✅ تم إلغاء العملية. الذاكرة لم تُمسح.');
         }
         return;
       }

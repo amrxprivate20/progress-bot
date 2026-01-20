@@ -153,7 +153,7 @@ async function completeParentInTodoistIfAllDone(
   try {
     console.log(`🔍 Checking if parent ${parentId} should be completed in Todoist...`);
     
-    // Get parent task to extract clean name for matching
+    // ✅ NEW: First check if parent was already completed today
     const allTasks = await db.select<Task>('tasks', {});
     const parentTasks = allTasks.filter(t => 
       t.task_id === parentId || t.task_id?.startsWith(parentId + '_')
@@ -170,6 +170,12 @@ async function completeParentInTodoistIfAllDone(
     
     if (!parentTask) {
       console.log(`⚠️ No valid parent task found`);
+      return;
+    }
+    
+    // ✅ NEW: Check if parent is already completed (status === 'done')
+    if (parentTask.status === 'done') {
+      console.log(`✅ Parent "${parentTask.content}" is already completed - skipping Todoist auto-complete`);
       return;
     }
     

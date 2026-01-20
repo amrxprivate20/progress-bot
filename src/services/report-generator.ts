@@ -748,37 +748,70 @@ if (data.failedTasksJson) {
     console.log(`   Parent names with completed subs: ${completedSubtasksByParentName.size}`);
     console.log(`   Parent names with failed subs: ${failedSubtasksByParentName.size}\n`);
 
-    // Step 4: Build output - process main tasks
-const processedParentNames = new Set<string>();
-let isFirstTask = true; // Track if this is the first task
+    // ===============================================================================
+    // Step 4: Build output - process ALL main tasks (completed AND failed)
+    // ===============================================================================
+    const processedParentNames = new Set<string>();
+    let isFirstTask = true;
 
-// ✅ NEW: First, process all parent tasks (both completed and failed)
-const allParentNames = new Set([
-  ...Array.from(tasksByName.keys()),
-  ...Array.from(completedSubtasksByParentName.keys()),
-  ...Array.from(failedSubtasksByParentName.keys())
-]);
+    // Collect ALL parent names from all sources
+    const allParentNames = new Set<string>();
+    
+    // Add completed parent task names
+    for (const name of tasksByName.keys()) {
+      allParentNames.add(name);
+    }
+    
+    // Add parents that have completed subtasks
+    for (const name of completedSubtasksByParentName.keys()) {
+      allParentNames.add(name);
+    }
+    
+    // Add parents that have failed subtasks
+    for (const name of failedSubtasksByParentName.keys()) {
+      allParentNames.add(name);
+    }
+    
+    // Add failed main task names
+    for (const name of failedTasksByName.keys()) {
+      allParentNames.add(name);
+    }
 
-for (const parentName of allParentNames) {
-  if (processedParentNames.has(parentName)) continue;
-  
-  const task = tasksByName.get(parentName);
-  if (!task) {
-    console.log(`⚠️ Parent "${parentName}" has subtasks but no parent task found`);
-    continue;
-  }
+    console.log(`📊 Total unique parent names: ${allParentNames.size}`);
+
+    // Process each parent
+    for (const parentName of allParentNames) {
+      if (processedParentNames.has(parentName)) continue;
+      
+      // Try to get task from completed tasks OR failed tasks
+      let task = tasksByName.get(parentName);
+      
+      if (!task) {
+        // Not in completed tasks, check failed tasks
+        const failedTask = failedTasksByName.get(parentName);
+        if (failedTask) {
+          // Create a pseudo-Task object from FailedTask
+          task = {
+            task_id: failedTask.id,
+            content: failedTask.content,
+            completed_at: new Date(),
+            status: 'failed',
+            category: failedTask.category,
+            priority: failedTask.priority,
+            duration_minutes: failedTask.duration_minutes,
+          } as Task;
+          console.log(`🔍 Processing FAILED parent: "${parentName}"`);
+        } else {
+          console.log(`⚠️ Parent "${parentName}" not found in completed OR failed tasks`);
+          continue;
+        }
+      } else {
+        console.log(`🔍 Processing COMPLETED parent: "${parentName}"`);
+      }
       
       const cleanName = extractCleanTaskName(task.content);
       
-      // ✅ FIX 1: Skip duplicate parents (same clean name already displayed)
-      if (processedParentNames.has(cleanName)) {
-        console.log(`🔍 Skipping duplicate parent: "${cleanName}"`);
-        continue;
-      }
-      
-      console.log(`🔍 Displaying parent: "${cleanName}"`);
-      
-      // ✅ NEW: Get subtasks for this parent using CLEAN NAME (not ID!)
+      // Get subtasks for this parent
       const completedSubs = completedSubtasksByParentName.get(cleanName) || [];
       const failedSubs = failedSubtasksByParentName.get(cleanName) || [];
 
@@ -800,15 +833,15 @@ for (const parentName of allParentNames) {
         const allSubsFailed = completedSubs.length === 0;
 
         if (allSubsComplete) {
-          symbol = '✅';  // All subtasks complete
+          symbol = '✅';
         } else if (allSubsFailed) {
-          symbol = '❌';  // All subtasks failed (even if main completed)
+          symbol = '❌';
         } else {
-          symbol = '⚠️';  // Partial (some subs complete, some failed)
+          symbol = '⚠️';
         }
       }
       
-      // ✅ Add line break BEFORE main task (except first)
+      // Add line break BEFORE main task (except first)
       if (!isFirstTask) {
         text += '\n';
       }
@@ -822,10 +855,12 @@ for (const parentName of allParentNames) {
         text += ` ${metadata}`;
       }
       
-      // Add streak info
-      const streak = data.streaks.find(s => s.task_name === task.content);
-      if (streak && streak.current_streak > 1) {
-        text += ` [${formatArabicStreak(streak.current_streak)} بدون إنقطاع]`;
+      // Add streak info (only for completed recurring tasks)
+      if (mainCompleted) {
+        const streak = data.streaks.find(s => s.task_name === task.content);
+        if (streak && streak.current_streak > 1) {
+          text += ` [${formatArabicStreak(streak.current_streak)} بدون إنقطاع]`;
+        }
       }
       
       text += '\n';
@@ -849,73 +884,44 @@ for (const parentName of allParentNames) {
       }
       
       processedParentNames.add(parentName);
-}
-
-// ✅ NEW: Process orphaned subtasks (subtasks without a parent in the list)
-for (const task of data.tasks) {
-  if (processedSubtasks.has(task.task_id)) continue;
-  if (!task.origin_task) continue; // Not a subtask
-  
-  const cleanName = extractCleanTaskName(task.content);
-  
-  // Check if this subtask's parent was already processed
-  const parentTask = tasksById.get(task.origin_task);
-  if (parentTask) {
-    const parentCleanName = extractCleanTaskName(parentTask.content);
-    if (processedParentNames.has(parentCleanName)) {
-      continue; // Already processed under parent
     }
-  }
-  
-  // This is an orphaned subtask - show it with a note
-  console.log(`⚠️ Orphaned subtask: "${cleanName}"`);
-  
-  if (!isFirstTask) {
-    text += '\n';
-  }
-  isFirstTask = false;
-  
-  const metadata = getOriginalMetadataString(task.content);
-  text += `⚠️ ${cleanName}`;
-  if (metadata) {
-    text += ` ${metadata}`;
-  }
-  text += ` (مهمة فرعية - المهمة الرئيسية غير مكتملة)\n`;
-  
-  processedSubtasks.add(task.task_id);
-}
-    
+
     // ===============================================================================
-    // Step 5: Add standalone failed tasks (with their failed subtasks)
+    // Step 5: Process orphaned subtasks (if any remain)
     // ===============================================================================
-    if (data.failedTasksJson) {
-      console.log(`📊 Checking for standalone failed tasks...`);
-
-      for (const failed of data.failedTasksJson.failed_tasks) {
-        if (failed.is_subtask) continue; // Skip subtasks, they're handled with their parents
-
-        const cleanName = extractCleanTaskName(failed.content);
-
-        // Only show if not already processed as completed
-        if (!processedParentNames.has(cleanName)) {
-          console.log(`   ❌ Standalone failed: "${cleanName}"`);
-
-          text += '\n';
-          text += `❌ ${cleanName}\n`;
-
-          // Also show failed subtasks for this failed main task
-          const failedSubs = failedSubtasksByParentName.get(cleanName) || [];
-          for (const sub of failedSubs) {
-            const subCleanName = extractCleanTaskName(sub.content);
-            text += `   ✕ ${subCleanName}\n`;
-            console.log(`      ✕ Failed subtask: "${subCleanName}"`);
-          }
-
-          processedParentNames.add(cleanName);
+    for (const task of data.tasks) {
+      if (processedSubtasks.has(task.task_id)) continue;
+      if (!task.origin_task) continue; // Not a subtask
+      
+      const cleanName = extractCleanTaskName(task.content);
+      
+      // Check if this subtask's parent was already processed
+      const parentTask = tasksById.get(task.origin_task);
+      if (parentTask) {
+        const parentCleanName = extractCleanTaskName(parentTask.content);
+        if (processedParentNames.has(parentCleanName)) {
+          continue; // Already processed under parent
         }
       }
+      
+      // This is an orphaned subtask
+      console.log(`⚠️ Orphaned subtask: "${cleanName}"`);
+      
+      if (!isFirstTask) {
+        text += '\n';
+      }
+      isFirstTask = false;
+      
+      const metadata = getOriginalMetadataString(task.content);
+      text += `⚠️ ${cleanName}`;
+      if (metadata) {
+        text += ` ${metadata}`;
+      }
+      text += ` (مهمة فرعية - المهمة الرئيسية غير مكتملة)\n`;
+      
+      processedSubtasks.add(task.task_id);
     }
-
+    
     // Challenge (show both the challenge text AND the result)
     if (data.dailyChallenge && data.dailyChallenge.challenge_text) {
       text += `\n🎯 التحدي اليومي:\n`;

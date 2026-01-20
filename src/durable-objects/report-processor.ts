@@ -179,8 +179,18 @@ private async processReport(jobData: ReportJobData): Promise<void> {
         useAnthropicPrimary: useAnthropicPrimary !== false,
       });
 
-      // ✅ NEW: Set debug logger on AI client
+      // ✅ IMPROVED: Set debug logger with verification
       aiClient.setDebugLogger(debugLogger);
+      
+      if (debugLogger.isEnabled()) {
+        console.log('🐛 Debug logger set on AI client');
+        await debugLogger.log(
+          `🤖 **AI Client Initialized**\n\n` +
+          `Debug logging: ENABLED\n` +
+          `Model: ${aiModel}\n` +
+          `Provider: ${useAnthropicPrimary ? 'Anthropic (primary)' : 'OpenRouter (primary)'}`
+        );
+      }
       
       const memoryMgr = createMemoryManager(db, aiClient as any);
 
@@ -189,14 +199,27 @@ private async processReport(jobData: ReportJobData): Promise<void> {
         reportData.previousReports || []
       );
 
-      console.log(`🤖 [Job ${jobId}] Calling AI (may take 15-60 seconds)...`);
+            console.log(`🤖 [Job ${jobId}] Calling AI (may take 15-60 seconds)...`);
       await debugLogger.log(`🤖 **Starting AI Analysis** (may take 15-60s)`);
       
       const startTime = Date.now();
 
-      // ✅ NEW: Generate formatted report first (same as user sees in preview)
-console.log('📋 Generating formatted report for AI...');
-const formattedReport = await reportGen.getFormattedReportForAI(reportData.date);
+      // Generate formatted report first
+      console.log('📋 Generating formatted report for AI...');
+      const formattedReport = await reportGen.getFormattedReportForAI(reportData.date);
+      console.log('✅ Formatted report generated:', formattedReport.length, 'chars');
+
+      // ✅ NEW: Explicitly log that we're about to send the prompt
+      if (debugLogger.isEnabled()) {
+        await debugLogger.log(
+          `📤 **About to send AI request**\n\n` +
+          `Report date: ${reportData.date}\n` +
+          `Tasks: ${reportData.tasks.length}\n` +
+          `User answers: ${Object.keys(userAnswers).length}\n` +
+          `Report length: ${formattedReport.length} chars\n\n` +
+          `Prompt will be logged by AI client...`
+        );
+      }
 console.log('✅ Formatted report generated:', formattedReport.length, 'chars');
 
 // Call AI - THIS IS THE LONG OPERATION (no timeout here!)

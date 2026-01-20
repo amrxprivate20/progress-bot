@@ -2,8 +2,6 @@ There are few notes and fixes that need to be done, I will address them all, and
 
 due to usage limits send me the fixes and how to implement one by one.
     
-    - autocomplete parent task should'nt take place if the parent task is already completed today! to prevent duplications.
-    - /clearmemory does nothing after asking for confirmation!
     - If a command is in process and another command is sent it should be rejected till the first process ends
 
 
@@ -23,5 +21,9 @@ DONE:
    - The memory logic needs revising, because I noticed during multiple logs across many days, the first memory category is the only one that has updates while other categories are still empty for some reason! putting into consideration that the output sometimes may have many categories for memory, or multiple outputs for the same category.
    - Using the debugger mode I noticed that the report sent in the unified prompt is completely diffrent from the report I see in preview using /today or /progress, it is like it is built differently from scratch which is wrong, the system need to send the exact report I see in preview without making another one!    
    - /starttask should find the a simillar task from the task that are STILL AVAILABLE TODAY, not all tasks related to my project.
+   - autocomplete parent task should'nt take place if the parent task is already completed today! to prevent duplications.
+   - /clearmemory does nothing after asking for confirmation!
+   - debugger mode don't send the unified prompt sent to the model it only send the responce SOMETIMES!
+   - The response of ai fairly write memory outputs to other memory categories except for the first one, maybe the prompt need fixing!
    
 
