@@ -662,18 +662,18 @@ if (memoryUpdatesMatch && memoryUpdatesMatch[1]) {
   console.log(`  ✅ [${matchCount}] Category: "${category}"`);
   console.log(`     Content preview: "${content.substring(0, 100)}${content.length > 100 ? '...' : ''}"`);
   
-  // ✅ FIX: ALWAYS append with newlines, never overwrite
-  if (result.memoryUpdates[category]) {
-    // Category already has content - append with clear separator
-    result.memoryUpdates[category] += '\n\n' + content;
-    console.log(`     ⚠️ Appended to existing content for "${category}"`);
-  } else {
-    // First content for this category
+  // ✅ FIXED: Always check if category exists before assigning
+  if (!result.memoryUpdates[category]) {
+    // First time seeing this category - initialize it
     result.memoryUpdates[category] = content;
+    console.log(`     📝 First entry for "${category}"`);
+  } else {
+    // Category exists - append with clear separator
+    result.memoryUpdates[category] += '\n\n' + content;
+    console.log(`     ➕ Appended to existing "${category}"`);
   }
   
-  // ✅ NEW: Also log the full stored content length
-  console.log(`     Total stored for "${category}": ${result.memoryUpdates[category].length} chars`);
+  console.log(`     📊 Total for "${category}": ${result.memoryUpdates[category].length} chars`);
 } else {
         console.log(`  ⚠️ Category found but no content: "${category}"`);
       }
@@ -1444,18 +1444,18 @@ if (memoryUpdatesMatch && memoryUpdatesMatch[1]) {
   console.log(`  ✅ [${matchCount}] Category: "${category}"`);
   console.log(`     Content preview: "${content.substring(0, 100)}${content.length > 100 ? '...' : ''}"`);
   
-  // ✅ FIX: ALWAYS append with newlines, never overwrite
-  if (result.memoryUpdates[category]) {
-    // Category already has content - append with clear separator
-    result.memoryUpdates[category] += '\n\n' + content;
-    console.log(`     ⚠️ Appended to existing content for "${category}"`);
-  } else {
-    // First content for this category
+  // ✅ FIXED: Always check if category exists before assigning
+  if (!result.memoryUpdates[category]) {
+    // First time seeing this category - initialize it
     result.memoryUpdates[category] = content;
+    console.log(`     📝 First entry for "${category}"`);
+  } else {
+    // Category exists - append with clear separator
+    result.memoryUpdates[category] += '\n\n' + content;
+    console.log(`     ➕ Appended to existing "${category}"`);
   }
   
-  // ✅ NEW: Also log the full stored content length
-  console.log(`     Total stored for "${category}": ${result.memoryUpdates[category].length} chars`);
+  console.log(`     📊 Total for "${category}": ${result.memoryUpdates[category].length} chars`);
 } else {
         console.log(`  ⚠️ Category found but no content: "${category}"`);
       }
