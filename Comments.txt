@@ -1,7 +1,7 @@
 There are few notes and fixes that need to be done, I will address them all, and I want you to tell me how to implement the fixes.
 due to usage limits send me the fixes and how to implement one by one.
 
-    - Type-check errors    
+    - adding debug logging to the Durable Object
 
 DONE:
    - I noticed in supabase streak and tasks tables, tasks names are not clean which leads to duplicates with diffrent paremeters and thus problems in streak tracking because it counts as different tasks

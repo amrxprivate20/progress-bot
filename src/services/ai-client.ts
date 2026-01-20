@@ -163,22 +163,60 @@ setDebugLogger(logger: any): void {
   userAnswers?: Record<string, string>;
   journalContent?: string;
 }): Promise<UnifiedAIResponse> {
-    const prompt = this.buildUnifiedPrompt(context);
+  const prompt = this.buildUnifiedPrompt(context);
 
-    const messages: AIMessage[] = [
-      {
-        role: 'system',
-        content: 'أنت مساعد ذكي متخصص في تحليل التقدم الشخصي والإنتاجية. تتحدث باللهجة المصرية بشكل طبيعي ومحفز.',
-      },
-      {
-        role: 'user',
-        content: prompt,
-      },
-    ];
+  // ✅ NEW: Log the unified prompt if debug enabled
+const logger = this.debugLogger;
+if (logger?.isEnabled()) {
+  await logger.log(
+    `📋 **UNIFIED PROMPT** (${context.reportDate})\n\n` +
+    '```\n' + prompt.substring(0, 3500) + '\n```',
+    '📋'
+  );
+}
 
-    const response = await this.complete(messages, 0.7, 6000);
-    return this.parseUnifiedResponse(response);
+  const messages: AIMessage[] = [
+    {
+      role: 'system',
+      content: 'أنت مساعد ذكي متخصص في تحليل التقدم الشخصي والإنتاجية. تتحدث باللهجة المصرية بشكل طبيعي ومحفز.',
+    },
+    {
+      role: 'user',
+      content: prompt,
+    },
+  ];
+
+  const response = await this.complete(messages, 0.7, 6000);
+  const parsed = this.parseUnifiedResponse(response);
+
+  // ✅ NEW: Log the parsed response structure if debug enabled
+if (logger?.isEnabled()) {
+  await logger.log(
+      `📊 **PARSED AI RESPONSE**\n\n` +
+      `**Questions:** ${parsed.questions.length}\n` +
+      `**Challenge:** ${parsed.challengeEvaluation}\n` +
+      `**Reward:** ${parsed.reward ? 'Yes' : 'No'}\n` +
+      `**Goals Analysis:**\n` +
+      `  • Completed: ${parsed.goalsAnalysis.completed.length}\n` +
+      `  • In Progress: ${parsed.goalsAnalysis.inProgress.length}\n` +
+      `  • Neglected: ${parsed.goalsAnalysis.neglected.length}\n` +
+      `**Memory Updates:** ${Object.keys(parsed.memoryUpdates).length} categories\n` +
+      `**Memory Optimization:** ${parsed.memoryOptimization || 'NOT_NEEDED'}`,
+      '📊'
+    );
+
+    // Log memory updates details
+    if (Object.keys(parsed.memoryUpdates).length > 0) {
+      let memoryLog = '🧠 **MEMORY UPDATES DETAILS**\n\n';
+      for (const [category, content] of Object.entries(parsed.memoryUpdates)) {
+        memoryLog += `**${category}:**\n${content.substring(0, 200)}...\n\n`;
+      }
+      await logger.log(memoryLog, '🧠');
+    }
   }
+
+  return parsed;
+}
 
   /**
    * Optimize memory content
@@ -819,11 +857,9 @@ export class UnifiedAIClient {
       throw new Error('No valid AI API keys provided. Need either Anthropic or OpenRouter API key.');
     }
   }
-/**
- * Set debug logger for all clients
- */
 setDebugLogger(logger: any): void {
-  this.debugLogger = logger;
+  this.debugLogger = logger; // Store for unified logging
+  // Set logger on both child clients
   if (this.anthropicClient) {
     this.anthropicClient.setDebugLogger(logger);
   }
@@ -892,22 +928,62 @@ setDebugLogger(logger: any): void {
   userAnswers?: Record<string, string>;
   journalContent?: string;
 }): Promise<UnifiedAIResponse> {
-    const prompt = this.buildUnifiedPrompt(context);
+  const prompt = this.buildUnifiedPrompt(context);
 
-    const messages: AIMessage[] = [
-      {
-        role: 'system',
-        content: 'أنت مساعد ذكي متخصص في تحليل التقدم الشخصي والإنتاجية. تتحدث باللهجة المصرية بشكل طبيعي ومحفز.',
-      },
-      {
-        role: 'user',
-        content: prompt,
-      },
-    ];
+  // ✅ Store logger reference to satisfy TypeScript
+  const logger = this.debugLogger;
 
-    const response = await this.complete(messages, 0.7, 6000);
-    return this.parseUnifiedResponse(response);
+  // ✅ Log the unified prompt if debug enabled
+  if (logger?.isEnabled()) {
+    await logger.log(
+      `📋 **UNIFIED PROMPT** (${context.reportDate})\n\n` +
+      '```\n' + prompt.substring(0, 3500) + '\n```',
+      '📋'
+    );
   }
+
+  const messages: AIMessage[] = [
+    {
+      role: 'system',
+      content: 'أنت مساعد ذكي متخصص في تحليل التقدم الشخصي والإنتاجية. تتحدث باللهجة المصرية بشكل طبيعي ومحفز.',
+    },
+    {
+      role: 'user',
+      content: prompt,
+    },
+  ];
+
+  const response = await this.complete(messages, 0.7, 6000);
+  const parsed = this.parseUnifiedResponse(response);
+
+  // ✅ Log the parsed response structure if debug enabled
+  if (logger?.isEnabled()) {
+    await logger.log(
+      `📊 **PARSED AI RESPONSE**\n\n` +
+      `**Questions:** ${parsed.questions.length}\n` +
+      `**Challenge:** ${parsed.challengeEvaluation}\n` +
+      `**Reward:** ${parsed.reward ? 'Yes' : 'No'}\n` +
+      `**Goals Analysis:**\n` +
+      `  • Completed: ${parsed.goalsAnalysis.completed.length}\n` +
+      `  • In Progress: ${parsed.goalsAnalysis.inProgress.length}\n` +
+      `  • Neglected: ${parsed.goalsAnalysis.neglected.length}\n` +
+      `**Memory Updates:** ${Object.keys(parsed.memoryUpdates).length} categories\n` +
+      `**Memory Optimization:** ${parsed.memoryOptimization || 'NOT_NEEDED'}`,
+      '📊'
+    );
+
+    // Log memory updates details
+    if (Object.keys(parsed.memoryUpdates).length > 0) {
+      let memoryLog = '🧠 **MEMORY UPDATES DETAILS**\n\n';
+      for (const [category, content] of Object.entries(parsed.memoryUpdates)) {
+        memoryLog += `**${category}:**\n${content.substring(0, 200)}...\n\n`;
+      }
+      await logger.log(memoryLog, '🧠');
+    }
+  }
+
+  return parsed;
+}
 
   /**
    * Optimize memory content
