@@ -157,16 +157,6 @@ private async processReport(jobData: ReportJobData): Promise<void> {
         throw new Error('No valid AI API key provided. Need either Anthropic or OpenRouter key.');
       }
 
-      // Create database clients
-      const db = createSupabaseClient({
-        SUPABASE_URL: this.env.SUPABASE_URL,
-        SUPABASE_ANON_KEY: this.env.SUPABASE_ANON_KEY,
-        TELEGRAM_BOT_TOKEN: '', // Not needed for DB
-        TELEGRAM_CHAT_ID: '', // Not needed for DB
-        TODOIST_API_TOKEN: '', // Not needed for DB
-      } as any);
-      const settings = new SettingsMgr(db);
-
       console.log(`🏗️ [Job ${jobId}] Creating services...`);
       console.log(`🔑 [Job ${jobId}] Anthropic: ${hasValidAnthropicKey ? 'available' : 'not configured'}, OpenRouter: ${hasValidOpenRouterKey ? 'available' : 'not configured'}`);
 

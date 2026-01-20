@@ -1,7 +1,7 @@
 There are few notes and fixes that need to be done, I will address them all, and I want you to tell me how to implement the fixes.
 due to usage limits send me the fixes and how to implement one by one.
 
-    - the daily challenges result aren't updated and summary is wrong, all challenged where the day passed without being completed must be considered a fail!
+    - Type-check errors    
 
 DONE:
    - I noticed in supabase streak and tasks tables, tasks names are not clean which leads to duplicates with diffrent paremeters and thus problems in streak tracking because it counts as different tasks
@@ -12,5 +12,6 @@ DONE:
    - the analysis data not correct, the ai comment talk about 100% success while in fact the report had 55% success, it is like its talking about another report.
    - the notification message of analysis start .. should include the ai model name for reference.
    - The report preview has an issue which arise when a sub task is completed and its main tasks is still not (specially if the main task is under the priority level), it appears as if it is a main task (separately)
+   - the daily challenges result aren't updated and summary is wrong, all challenged where the day passed without being completed must be considered a fail!
    
 
