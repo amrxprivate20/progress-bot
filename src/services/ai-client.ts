@@ -607,7 +607,17 @@ if (memoryUpdatesMatch && memoryUpdatesMatch[1]) {
     // ✅ NEW: More robust parsing that handles multiple formats
     
     // Split by CATEGORY: markers to get individual updates
-    const categoryBlocks = memoryText.split(/(?=CATEGORY:)/i).filter(block => block.trim());
+    const categoryBlocks = memoryText
+  .split(/(?=CATEGORY:)/i)
+  .filter(block => block.trim())
+  .map(block => {
+    // Remove any content after the next [SECTION] marker
+    const sectionEnd = block.search(/\n\s*\[(?!CATEGORY)[A-Z_]+\]/i);
+    if (sectionEnd > 0) {
+      return block.substring(0, sectionEnd);
+    }
+    return block;
+  });
     console.log(`🔍 Found ${categoryBlocks.length} category blocks`);
     
     let matchCount = 0;
@@ -652,12 +662,18 @@ if (memoryUpdatesMatch && memoryUpdatesMatch[1]) {
   console.log(`  ✅ [${matchCount}] Category: "${category}"`);
   console.log(`     Content preview: "${content.substring(0, 100)}${content.length > 100 ? '...' : ''}"`);
   
-  // ✅ APPEND instead of overwrite
+  // ✅ FIX: ALWAYS append with newlines, never overwrite
   if (result.memoryUpdates[category]) {
+    // Category already has content - append with clear separator
     result.memoryUpdates[category] += '\n\n' + content;
+    console.log(`     ⚠️ Appended to existing content for "${category}"`);
   } else {
+    // First content for this category
     result.memoryUpdates[category] = content;
   }
+  
+  // ✅ NEW: Also log the full stored content length
+  console.log(`     Total stored for "${category}": ${result.memoryUpdates[category].length} chars`);
 } else {
         console.log(`  ⚠️ Category found but no content: "${category}"`);
       }
@@ -1373,7 +1389,17 @@ if (memoryUpdatesMatch && memoryUpdatesMatch[1]) {
     // ✅ NEW: More robust parsing that handles multiple formats
     
     // Split by CATEGORY: markers to get individual updates
-    const categoryBlocks = memoryText.split(/(?=CATEGORY:)/i).filter(block => block.trim());
+    const categoryBlocks = memoryText
+  .split(/(?=CATEGORY:)/i)
+  .filter(block => block.trim())
+  .map(block => {
+    // Remove any content after the next [SECTION] marker
+    const sectionEnd = block.search(/\n\s*\[(?!CATEGORY)[A-Z_]+\]/i);
+    if (sectionEnd > 0) {
+      return block.substring(0, sectionEnd);
+    }
+    return block;
+  });
     console.log(`🔍 Found ${categoryBlocks.length} category blocks`);
     
     let matchCount = 0;
@@ -1418,12 +1444,18 @@ if (memoryUpdatesMatch && memoryUpdatesMatch[1]) {
   console.log(`  ✅ [${matchCount}] Category: "${category}"`);
   console.log(`     Content preview: "${content.substring(0, 100)}${content.length > 100 ? '...' : ''}"`);
   
-  // ✅ APPEND instead of overwrite
+  // ✅ FIX: ALWAYS append with newlines, never overwrite
   if (result.memoryUpdates[category]) {
+    // Category already has content - append with clear separator
     result.memoryUpdates[category] += '\n\n' + content;
+    console.log(`     ⚠️ Appended to existing content for "${category}"`);
   } else {
+    // First content for this category
     result.memoryUpdates[category] = content;
   }
+  
+  // ✅ NEW: Also log the full stored content length
+  console.log(`     Total stored for "${category}": ${result.memoryUpdates[category].length} chars`);
 } else {
         console.log(`  ⚠️ Category found but no content: "${category}"`);
       }
