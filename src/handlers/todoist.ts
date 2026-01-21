@@ -480,6 +480,32 @@ export async function handleTodoistWebhook(
     origin_task: isSubtask ? event.event_data.parent_id : undefined,
     status: 'done',
   };
+  
+  // ✅ NEW: If this is a subtask, find and store parent's clean name
+  if (isSubtask && event.event_data.parent_id) {
+    // Find parent task in database
+    const allTasks = await db.select<Task>('tasks', {});
+    const parentTasks = allTasks.filter(t => 
+      t.task_id === event.event_data.parent_id || 
+      t.task_id?.startsWith(event.event_data.parent_id + '_')
+    );
+    
+    if (parentTasks.length > 0) {
+      const parentTask = parentTasks.sort((a, b) => 
+        new Date(b.completed_at).getTime() - new Date(a.completed_at).getTime()
+      )[0];
+      
+      if (parentTask) {
+        const parentCleanName = extractCleanTaskName(parentTask.content);
+        // Store in description field (or add new DB column if you prefer)
+        task.description = task.description 
+          ? `${task.description} (parent: ${parentCleanName})`
+          : `(parent: ${parentCleanName})`;
+        
+        console.log(`✅ Stored parent name for subtask: "${parentCleanName}"`);
+      }
+    }
+  }
 
   try {
     let savedTask: Task | undefined;
