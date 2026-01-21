@@ -590,24 +590,46 @@ async function sendLongMessage(ctx: Context, message: string) {
     }
   });
 
-  // Cancel command
-  bot.command('cancel', async (ctx) => {
-    try {
-      const chatId = ctx.chat?.id.toString() || '';
-      const conversationMgr = createConversationManager(ctx.db);
-
-      const hasConversation = await conversationMgr.hasActiveConversation(chatId);
-      if (hasConversation) {
-        await conversationMgr.clearConversation(chatId);
-        await ctx.reply('✅ تم إلغاء المحادثة');
-      } else {
-        await ctx.reply('✅ لا توجد محادثة نشطة للإلغاء');
-      }
-    } catch (error) {
-      console.error('Cancel command error:', error);
-      await ctx.reply('✅ تم الإلغاء');
+  // Cancel command - ENHANCED to cancel ANY pending operation
+bot.command('cancel', async (ctx) => {
+  try {
+    const chatId = ctx.chat?.id.toString() || '';
+    
+    // Check for all types of pending operations
+    const pendingOps = await ctx.db.select('conversation_state', {
+      filter: { chat_id: op.like(`%${chatId}%`) }, // Match any key containing chatId
+    });
+    
+    if (pendingOps.length === 0) {
+      await ctx.reply('✅ لا توجد عمليات نشطة للإلغاء');
+      return;
     }
-  });
+    
+    // List what we're canceling
+    const operationTypes = new Set<string>();
+    for (const op of pendingOps) {
+      operationTypes.add(op.conversation_type);
+    }
+    
+    // Delete all pending operations for this user
+    for (const op of pendingOps) {
+      await ctx.db.delete('conversation_state', { 
+        id: op.eq(op.id as string) 
+      });
+    }
+    
+    const typesStr = Array.from(operationTypes).join(', ');
+    await ctx.reply(
+      `✅ تم إلغاء العمليات التالية:\n` +
+      `${typesStr}\n\n` +
+      `يمكنك البدء من جديد الآن.`
+    );
+    
+  } catch (error) {
+    console.error('Cancel command error:', error);
+    await ctx.reply('✅ تم الإلغاء');
+  }
+});
 
   // NEW: Log failure command
   bot.command('log_failure', async (ctx) => {
