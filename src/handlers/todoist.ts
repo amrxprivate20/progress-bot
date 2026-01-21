@@ -144,53 +144,57 @@ async function syncParentTaskFromTodoist(
 /**
  * Complete parent task in Todoist if all subtasks are done
  */
-async function completeParentInTodoistIfAllDone(
+export async function completeParentInTodoistIfAllDone(
   db: SupabaseClient,
   settings: SettingsManager,
-  parentId: string,
+  taskId: string,
   egyptDate: string
 ): Promise<void> {
   try {
-    console.log(`🔍 Checking if parent ${parentId} should be completed in Todoist...`);
+    console.log(`🔍 Checking if any parent should autocomplete after completing subtask ${taskId}...`);
     
-    // ✅ NEW: First check if parent was already completed today
+    // Get all completed tasks
     const allTasks = await db.select<Task>('tasks', {});
-    const parentTasks = allTasks.filter(t => 
-      t.task_id === parentId || t.task_id?.startsWith(parentId + '_')
-    );
     
-    if (parentTasks.length === 0) {
-      console.log(`⚠️ Parent ${parentId} not found in database`);
+    // Find the completed subtask
+    const subtask = allTasks.find(t => t.task_id === taskId || t.task_id?.startsWith(taskId + '_'));
+    
+    if (!subtask || !subtask.origin_task) {
+      console.log('Not a subtask, skipping parent check');
       return;
     }
+
+    // Find parent by origin_task reference
+    const parentId = subtask.origin_task;
+    const parentBaseId = parentId.split('_')[0];
     
-    const parentTask = parentTasks.sort((a, b) => 
-      new Date(b.completed_at).getTime() - new Date(a.completed_at).getTime()
-    )[0];
-    
+    const parentTask = allTasks.find(t => {
+      const baseId = t.task_id?.split('_')[0];
+      return baseId === parentBaseId || t.task_id === parentId;
+    });
+
     if (!parentTask) {
-      console.log(`⚠️ No valid parent task found`);
+      console.log(`⚠️ Parent ${parentId} not found`);
       return;
     }
-    
-    // ✅ NEW: Check if parent is already completed (status === 'done')
+
+    // Check if parent is already completed
     if (parentTask.status === 'done') {
-      console.log(`✅ Parent "${parentTask.content}" is already completed - skipping Todoist auto-complete`);
+      console.log(`✅ Parent "${parentTask.content}" already completed - skipping`);
       return;
     }
-    
+
     const parentCleanName = extractCleanTaskName(parentTask.content);
-    console.log(`📋 Parent clean name: "${parentCleanName}"`);
-    
-    // Get completed subtasks from database (by origin_task ID)
+    console.log(`📋 Checking parent: "${parentCleanName}"`);
+
+    // Get ALL subtasks for this parent (by name matching)
     const completedSubtasks = allTasks.filter(t => {
       if (!t.origin_task) return false;
       const originBase = t.origin_task.split('_')[0];
-      const parentBase = parentId.split('_')[0];
-      return originBase === parentBase;
+      return originBase === parentBaseId && t.status === 'done';
     });
 
-    // Get failed subtasks from JSON BY NAME
+    // Get failed subtasks from JSON (by parent name)
     const dailyFailures = await getDailyFailures(db, egyptDate);
     const failedSubtasks = dailyFailures?.failed_tasks.filter(f => {
       if (!f.is_subtask || !f.parent_content) return false;
@@ -199,58 +203,63 @@ async function completeParentInTodoistIfAllDone(
     }) || [];
 
     const totalSubtasks = completedSubtasks.length + failedSubtasks.length;
-    
+
     console.log(`📊 Parent "${parentCleanName}":`);
-    console.log(`   Completed subtasks: ${completedSubtasks.length}`);
-    console.log(`   Failed subtasks: ${failedSubtasks.length}`);
-    console.log(`   Total subtasks: ${totalSubtasks}`);
+    console.log(`   Completed: ${completedSubtasks.length}`);
+    console.log(`   Failed: ${failedSubtasks.length}`);
+    console.log(`   Total: ${totalSubtasks}`);
 
-    // If there are ANY failed subtasks, don't complete parent
-    if (failedSubtasks.length > 0) {
-      console.log(`⚠️ Parent has ${failedSubtasks.length} failed subtasks - NOT completing in Todoist`);
+    // If no subtasks or has failed subtasks, don't complete
+    if (totalSubtasks === 0 || failedSubtasks.length > 0) {
+      console.log(`⚠️ Not autocompleting (${failedSubtasks.length} failed subtasks)`);
       return;
     }
+
+    // All subtasks completed - autocomplete parent in Todoist
+    console.log(`✅ All ${totalSubtasks} subtasks done - autocompleting parent`);
     
-    // If no subtasks at all, don't complete
-    if (totalSubtasks === 0) {
-      console.log(`ℹ️ Parent has no subtasks - NOT completing`);
+    const todoistToken = await settings.get('todoist_api_token');
+    if (!todoistToken) {
+      console.error('❌ No Todoist token');
       return;
     }
 
-    // If all subtasks are done (and none failed), complete parent in Todoist
-    if (completedSubtasks.length === totalSubtasks) {
-      console.log(`✅ All ${totalSubtasks} subtasks done - completing parent in Todoist`);
-      
-      const todoistToken = await settings.get('todoist_api_token');
-      if (!todoistToken) {
-        console.error('❌ No Todoist token - cannot complete parent');
-        return;
-      }
-
-      // Complete the parent task in Todoist
-      const response = await fetch(
-        `https://api.todoist.com/rest/v2/tasks/${parentId}/close`,
-        {
-          method: 'POST',
-          headers: {
-            'Authorization': `Bearer ${todoistToken.trim()}`,
-          },
-        }
-      );
-
-      if (response.ok) {
-        console.log(`🎉 Parent task ${parentId} completed in Todoist!`);
-      } else {
-        const errorText = await response.text();
-        console.error(`❌ Failed to complete parent in Todoist: ${response.status} ${errorText}`);
-      }
-    } else {
-      console.log(`ℹ️ Only ${completedSubtasks.length}/${totalSubtasks} subtasks done - NOT completing yet`);
+    // Get the original Todoist task ID (without timestamp suffix)
+    const originalTaskId = parentTask.task_id?.split('_')[0];
+    if (!originalTaskId) {
+      console.error('❌ No valid parent task ID');
+      return;
     }
+
+    const response = await fetch(
+      `https://api.todoist.com/rest/v2/tasks/${originalTaskId}/close`,
+      {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${todoistToken.trim()}`,
+        },
+      }
+    );
+
+    if (response.ok) {
+      console.log(`🎉 Parent task ${originalTaskId} autocompleted in Todoist!`);
+      
+      // Update parent status in database
+      await db.update(
+        'tasks',
+        { id: op.eq(parentTask.id as string) },
+        { status: 'done' }
+      );
+    } else {
+      const errorText = await response.text();
+      console.error(`❌ Failed to autocomplete parent: ${response.status} ${errorText}`);
+    }
+
   } catch (error) {
-    console.error('❌ Error completing parent in Todoist:', error);
+    console.error('❌ Error in completeParentInTodoistIfAllDone:', error);
   }
 }
+
 
 /**
  * Main webhook handler

@@ -22,7 +22,7 @@ import { createGoalsManager } from '../services/goals-manager';
 import { createMediaStorageService } from '../services/supabase-storage';
 import { getTodayInEgypt, getYesterdayInEgypt } from '../utils/timezone';
 import { handleConfirmCommand } from './confirm-handler';
-import { syncFailuresFromTodoist } from '../handlers/todoist';
+import { syncFailuresFromTodoist, completeParentInTodoistIfAllDone } from '../handlers/todoist';
 
 /**
  * Wrapper for commands that require exclusive lock
@@ -1182,86 +1182,368 @@ bot.command(['starttask', 'start_task'], async (ctx) => {
   }
 });
 
-  // Complete the active task
-  bot.command(['completetask', 'complete_task'], async (ctx) => {
-    try {
-      const chatId = ctx.chat?.id.toString() || '';
-      const taskKey = `active_task_${chatId}`;
+  // ============================================
+// 1. Add Duration Command (before completion)
+// ============================================
+bot.command(['addduration', 'add_duration'], async (ctx) => {
+  try {
+    const chatId = ctx.chat?.id.toString() || '';
+    const taskKey = `active_task_${chatId}`;
+    const args = ctx.message?.text?.split(' ').slice(1).join(' ') || '';
 
-      // Get active task
-      const existingTask = await ctx.db.select('conversation_state', {
-        filter: { chat_id: op.eq(taskKey) },
+    // Get active task
+    const existingTask = await ctx.db.select('conversation_state', {
+      filter: { chat_id: op.eq(taskKey) },
+    });
+
+    if (existingTask.length === 0) {
+      await ctx.reply('❌ لا توجد مهمة نشطة.\nاستخدم /starttask لبدء مهمة جديدة');
+      return;
+    }
+
+    const taskData = (existingTask[0] as any).data || {};
+
+    // If no args, prompt for duration
+    if (!args.trim()) {
+      await ctx.reply(
+        '⏱️ **إضافة مدة زمنية**\n\n' +
+        `📌 المهمة: ${taskData.taskName}\n\n` +
+        'أرسل المدة بأحد الصيغ التالية:\n' +
+        '• 30m (30 دقيقة)\n' +
+        '• 2h (ساعتان)\n' +
+        '• 1.5h (ساعة ونصف)\n' +
+        '• 30د (30 دقيقة بالعربي)\n' +
+        '• 2س (ساعتان بالعربي)\n\n' +
+        'أو /cancel للإلغاء',
+        { parse_mode: 'Markdown' }
+      );
+
+      // Store pending state
+      await ctx.db.insert('conversation_state', {
+        chat_id: `pending_duration_${chatId}`,
+        conversation_type: 'pending_duration',
+        data: {},
+        expires_at: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
       });
+      return;
+    }
 
-      if (existingTask.length === 0) {
-        await ctx.reply('❌ لا توجد مهمة نشطة.\nاستخدم /starttask لبدء مهمة جديدة');
-        return;
+    // Parse duration from args
+    const { parseTaskMetadata } = await import('../utils/task-parser');
+    const metadata = parseTaskMetadata(`[${args}]`);
+
+    if (!metadata.duration_minutes) {
+      await ctx.reply('❌ صيغة المدة غير صحيحة. أمثلة: 30m، 2h، 1.5h، 30د، 2س');
+      return;
+    }
+
+    // Update task with manual duration
+    await ctx.db.update(
+      'conversation_state',
+      { chat_id: op.eq(taskKey) },
+      {
+        data: {
+          ...taskData,
+          manualDuration: metadata.duration_minutes,
+        }
       }
+    );
 
-      const taskData = (existingTask[0] as any).data || {};
-      const startTime = taskData.startTime;
-      const taskName = taskData.taskName;
-      const todoistTaskId = taskData.todoistTaskId; // Get the Todoist task ID
-      const startDate = taskData.startDate || getTodayInEgypt(); // Egypt date when task started (for midnight boundary)
+    await ctx.reply(
+      `✅ تم إضافة المدة: ${metadata.duration_minutes} دقيقة\n\n` +
+      `📌 ${taskData.taskName}\n\n` +
+      'استخدم /completetask لإكمال المهمة الآن'
+    );
 
-      if (!startTime || !taskName) {
-        await ctx.reply('❌ بيانات المهمة غير صحيحة');
-        await ctx.db.delete('conversation_state', { chat_id: op.eq(taskKey) });
-        return;
+  } catch (error) {
+    console.error('Add duration error:', error);
+    await ctx.reply('❌ حدث خطأ: ' + (error instanceof Error ? error.message : 'Unknown'));
+  }
+});
+
+// ============================================
+// 2. Add Quantity Command (before completion)
+// ============================================
+bot.command(['addquantity', 'add_quantity'], async (ctx) => {
+  try {
+    const chatId = ctx.chat?.id.toString() || '';
+    const taskKey = `active_task_${chatId}`;
+    const args = ctx.message?.text?.split(' ').slice(1).join(' ') || '';
+
+    // Get active task
+    const existingTask = await ctx.db.select('conversation_state', {
+      filter: { chat_id: op.eq(taskKey) },
+    });
+
+    if (existingTask.length === 0) {
+      await ctx.reply('❌ لا توجد مهمة نشطة.\nاستخدم /starttask لبدء مهمة جديدة');
+      return;
+    }
+
+    const taskData = (existingTask[0] as any).data || {};
+
+    // If no args, prompt for quantity
+    if (!args.trim()) {
+      await ctx.reply(
+        '📊 **إضافة كمية**\n\n' +
+        `📌 المهمة: ${taskData.taskName}\n\n` +
+        'أرسل الكمية والوحدة:\n' +
+        'أمثلة:\n' +
+        '• 20 صفحة\n' +
+        '• 5 تمارين\n' +
+        '• 10 مهام\n\n' +
+        'أو /cancel للإلغاء',
+        { parse_mode: 'Markdown' }
+      );
+
+      // Store pending state
+      await ctx.db.insert('conversation_state', {
+        chat_id: `pending_quantity_${chatId}`,
+        conversation_type: 'pending_quantity_input',
+        data: {},
+        expires_at: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
+      });
+      return;
+    }
+
+    // Parse quantity: "20 صفحة" -> quantity=20, unit=صفحة
+    const quantityMatch = args.match(/^(\d+)\s*(.+)$/);
+    if (!quantityMatch || !quantityMatch[1] || !quantityMatch[2]) {
+      await ctx.reply('❌ صيغة الكمية غير صحيحة. أمثلة: 20 صفحة، 5 تمارين');
+      return;
+    }
+
+    const quantity = quantityMatch[1];
+    const unit = quantityMatch[2].trim();
+
+    // Update task with manual quantity
+    await ctx.db.update(
+      'conversation_state',
+      { chat_id: op.eq(taskKey) },
+      {
+        data: {
+          ...taskData,
+          manualQuantity: quantity,
+          manualQuantityUnit: unit,
+        }
       }
+    );
 
-      // Calculate duration
+    await ctx.reply(
+      `✅ تم إضافة الكمية: ${quantity} ${unit}\n\n` +
+      `📌 ${taskData.taskName}\n\n` +
+      'استخدم /completetask لإكمال المهمة الآن'
+    );
+
+  } catch (error) {
+    console.error('Add quantity error:', error);
+    await ctx.reply('❌ حدث خطأ: ' + (error instanceof Error ? error.message : 'Unknown'));
+  }
+});
+
+// ============================================
+// 3. Complete Task Command (IMMEDIATE COMPLETION)
+// ============================================
+bot.command(['completetask', 'complete_task'], async (ctx) => {
+  try {
+    const chatId = ctx.chat?.id.toString() || '';
+    const taskKey = `active_task_${chatId}`;
+
+    // Get active task
+    const existingTask = await ctx.db.select('conversation_state', {
+      filter: { chat_id: op.eq(taskKey) },
+    });
+
+    if (existingTask.length === 0) {
+      await ctx.reply('❌ لا توجد مهمة نشطة.\nاستخدم /starttask لبدء مهمة جديدة');
+      return;
+    }
+
+    const taskData = (existingTask[0] as any).data || {};
+    const startTime = taskData.startTime;
+    const taskName = taskData.taskName;
+    const todoistTaskId = taskData.todoistTaskId;
+    const startDate = taskData.startDate || getTodayInEgypt();
+    const manualDuration = taskData.manualDuration; // From /addduration
+    const manualQuantity = taskData.manualQuantity; // From /addquantity
+    const manualQuantityUnit = taskData.manualQuantityUnit;
+
+    if (!startTime || !taskName) {
+      await ctx.reply('❌ بيانات المهمة غير صحيحة');
+      await ctx.db.delete('conversation_state', { chat_id: op.eq(taskKey) });
+      return;
+    }
+
+    // Calculate duration (use manual if set, otherwise calculate)
+    let durationMinutes: number;
+    if (manualDuration) {
+      durationMinutes = manualDuration;
+    } else {
       const endTime = Date.now();
       const durationMs = endTime - startTime;
-      const durationMinutes = Math.round(durationMs / 60000);
+      durationMinutes = Math.round(durationMs / 60000);
+    }
 
-      // Format duration
-      let durationStr: string;
-      if (durationMinutes < 60) {
-        durationStr = `${durationMinutes}m`;
-      } else {
-        const hours = Math.floor(durationMinutes / 60);
-        const mins = durationMinutes % 60;
-        durationStr = mins > 0 ? `${hours}h${mins}m` : `${hours}h`;
+    // Build task name with metadata
+    const { extractCleanTaskName } = await import('../utils/task-parser');
+    const cleanTaskName = extractCleanTaskName(taskName);
+
+    // Format duration
+    let durationStr: string;
+    if (durationMinutes < 60) {
+      durationStr = `${durationMinutes}م`;
+    } else {
+      const hours = Math.floor(durationMinutes / 60);
+      const mins = durationMinutes % 60;
+      durationStr = mins > 0 ? `${hours}س${mins}م` : `${hours}س`;
+    }
+
+    // Build final task name
+    let updatedTaskName = `${cleanTaskName} [${durationStr}]`;
+    if (manualQuantity && manualQuantityUnit) {
+      updatedTaskName += ` [${manualQuantity} ${manualQuantityUnit}]`;
+    }
+
+    // Delete the active task record
+    await ctx.db.delete('conversation_state', { chat_id: op.eq(taskKey) });
+
+    // Complete the task in Todoist
+    const todoistToken = await ctx.settings.get('todoist_api_token');
+
+    if (todoistToken && todoistTaskId) {
+      try {
+        // Store pending update
+        const pendingUpdateKey = `pending_update_${todoistTaskId}`;
+        await ctx.db.insert('conversation_state', {
+          chat_id: pendingUpdateKey,
+          conversation_type: 'pending_task_update',
+          data: {
+            taskId: todoistTaskId,
+            updatedContent: updatedTaskName,
+            durationMinutes: durationMinutes,
+            createdAt: Date.now(),
+          },
+          expires_at: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
+        });
+
+        // Update task content
+        const updateResponse = await fetch(`https://api.todoist.com/rest/v2/tasks/${todoistTaskId}`, {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${todoistToken.trim()}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ content: updatedTaskName }),
+        });
+
+        if (updateResponse.ok) {
+          await new Promise(resolve => setTimeout(resolve, 500));
+          
+          // Complete the task
+          await fetch(`https://api.todoist.com/rest/v2/tasks/${todoistTaskId}/close`, {
+            method: 'POST',
+            headers: { 'Authorization': `Bearer ${todoistToken.trim()}` },
+          });
+
+          // ✅ FIX: Check if parent should autocomplete
+          await completeParentInTodoistIfAllDone(
+            ctx.db,
+            ctx.settings,
+            todoistTaskId,
+            startDate
+          );
+
+          await ctx.reply(
+            `✅ **تم إكمال المهمة!**\n\n` +
+            `📌 ${updatedTaskName}\n` +
+            `⏱️ المدة: ${durationMinutes} دقيقة\n` +
+            `${manualQuantity ? `📊 الكمية: ${manualQuantity} ${manualQuantityUnit}\n` : ''}` +
+            `✓ تم التحديث في Todoist\n\n` +
+            `━━━━━━━━━━━━━━━━━━\n` +
+            `🚀 **جاهز للمزيد؟**\n` +
+            `استخدم /starttask لبدء مهمة جديدة`
+          );
+        } else {
+          throw new Error('Todoist update failed');
+        }
+      } catch (todoistError) {
+        console.error('Todoist error:', todoistError);
+        await ctx.reply(
+          `✅ **تم إكمال المهمة محلياً!**\n\n` +
+          `📌 ${updatedTaskName}\n` +
+          `⚠️ فشل التحديث في Todoist\n\n` +
+          `━━━━━━━━━━━━━━━━━━\n` +
+          `🚀 **جاهز للمزيد؟**\n` +
+          `استخدم /starttask لبدء مهمة جديدة`
+        );
       }
+    } else if (todoistToken && !todoistTaskId) {
+      // Create new task
+      try {
+        const todoistProjectId = await ctx.settings.get('todoist_project_id');
+        const createResponse = await fetch('https://api.todoist.com/rest/v2/tasks', {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${todoistToken.trim()}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            content: updatedTaskName,
+            project_id: todoistProjectId?.trim() || undefined,
+          }),
+        });
 
-      // Clean task name - remove all existing [...] parameters first
-      const cleanTaskName = taskName.replace(/\s*\[[^\]]+\]/g, '').trim();
+        if (createResponse.ok) {
+          const newTask = await createResponse.json() as { id: string };
+          await fetch(`https://api.todoist.com/rest/v2/tasks/${newTask.id}/close`, {
+            method: 'POST',
+            headers: { 'Authorization': `Bearer ${todoistToken.trim()}` },
+          });
 
-      // Build updated task name with new duration
-      const updatedTaskName = `${cleanTaskName} [${durationStr}]`;
-
-      // Delete the active task record
-      await ctx.db.delete('conversation_state', { chat_id: op.eq(taskKey) });
-
-      // Check if user wants to add quantity - pass todoistTaskId for later completion
-      const quantityKey = `task_quantity_${chatId}`;
-      await ctx.db.insert('conversation_state', {
-        chat_id: quantityKey,
-        conversation_type: 'pending_quantity',
-        data: {
-          taskName: updatedTaskName,
-          originalTaskName: taskName,
-          durationMinutes: durationMinutes,
-          todoistTaskId: todoistTaskId, // Pass the Todoist task ID
-          startDate: startDate, // Egypt date when task started (for midnight boundary)
-        },
-        expires_at: new Date(Date.now() + 5 * 60 * 1000).toISOString(), // 5 minutes
+          await ctx.reply(
+            `✅ **تم إكمال المهمة!**\n\n` +
+            `📌 ${updatedTaskName}\n` +
+            `✓ تم الإنشاء في Todoist\n\n` +
+            `━━━━━━━━━━━━━━━━━━\n` +
+            `🚀 **جاهز للمزيد؟**\n` +
+            `استخدم /starttask لبدء مهمة جديدة`
+          );
+        }
+      } catch (e) {
+        await ctx.reply(
+          `✅ **تم إكمال المهمة محلياً!**\n\n` +
+          `📌 ${updatedTaskName}\n\n` +
+          `━━━━━━━━━━━━━━━━━━\n` +
+          `🚀 **جاهز للمزيد؟**\n` +
+          `استخدم /starttask لبدء مهمة جديدة`
+        );
+      }
+    } else {
+      // No Todoist - save locally
+      const completedAt = new Date(`${startDate}T23:59:59+02:00`);
+      await ctx.db.insert('tasks', {
+        task_id: `timer_${Date.now()}`,
+        content: updatedTaskName,
+        completed_at: completedAt.toISOString(),
+        status: 'done',
+        duration_minutes: durationMinutes,
+        created_at: new Date().toISOString(),
       });
 
-      const hasExistingTask = todoistTaskId ? '(سيتم تحديث المهمة في Todoist)' : '(سيتم إنشاء مهمة جديدة)';
-
       await ctx.reply(
-        `✅ تم إكمال المهمة!\n📌 ${updatedTaskName}\n⏱️ المدة: ${durationMinutes} دقيقة\n${hasExistingTask}\n\n` +
-        `هل تريد إضافة كمية؟ أرسل الكمية والوحدة:\n` +
-        `مثال: 20 صفحة\n` +
-        `أو أرسل "لا" لتخطي هذه الخطوة`
+        `✅ **تم إكمال المهمة!**\n\n` +
+        `📌 ${updatedTaskName}\n\n` +
+        `━━━━━━━━━━━━━━━━━━\n` +
+        `🚀 **جاهز للمزيد؟**\n` +
+        `استخدم /starttask لبدء مهمة جديدة`
       );
-    } catch (error) {
-      console.error('Complete task error:', error);
-      await ctx.reply('❌ حدث خطأ: ' + (error instanceof Error ? error.message : 'Unknown'));
     }
-  });
+
+  } catch (error) {
+    console.error('Complete task error:', error);
+    await ctx.reply('❌ حدث خطأ: ' + (error instanceof Error ? error.message : 'Unknown'));
+  }
+});
 
   // Cancel the active task
   bot.command(['canceltask', 'cancel_task'], async (ctx) => {
@@ -1980,6 +2262,99 @@ if (pendingConfirm.length > 0) {
 
         return;
       }
+
+// Check for pending duration input
+const pendingDurationKey = `pending_duration_${chatId}`;
+const pendingDurationState = await ctx.db.select('conversation_state', {
+  filter: { chat_id: op.eq(pendingDurationKey) },
+});
+
+if (pendingDurationState.length > 0) {
+  await ctx.db.delete('conversation_state', { chat_id: op.eq(pendingDurationKey) });
+  
+  // Parse duration
+  const { parseTaskMetadata } = await import('../utils/task-parser');
+  const metadata = parseTaskMetadata(`[${text}]`);
+
+  if (!metadata.duration_minutes) {
+    await ctx.reply('❌ صيغة المدة غير صحيحة. حاول مرة أخرى أو /cancel');
+    return;
+  }
+
+  const taskKey = `active_task_${chatId}`;
+  const existingTask = await ctx.db.select('conversation_state', {
+    filter: { chat_id: op.eq(taskKey) },
+  });
+
+  if (existingTask.length > 0) {
+    const taskData = (existingTask[0] as any).data || {};
+    
+    await ctx.db.update(
+      'conversation_state',
+      { chat_id: op.eq(taskKey) },
+      {
+        data: {
+          ...taskData,
+          manualDuration: metadata.duration_minutes,
+        }
+      }
+    );
+
+    await ctx.reply(
+      `✅ تم إضافة المدة: ${metadata.duration_minutes} دقيقة\n\n` +
+      'استخدم /completetask لإكمال المهمة الآن'
+    );
+  }
+  return;
+}
+
+// Check for pending quantity input
+const pendingQuantityInputKey = `pending_quantity_${chatId}`;
+const pendingQuantityInputState = await ctx.db.select('conversation_state', {
+  filter: { chat_id: op.eq(pendingQuantityInputKey) },
+});
+
+if (pendingQuantityInputState.length > 0) {
+  await ctx.db.delete('conversation_state', { chat_id: op.eq(pendingQuantityInputKey) });
+  
+  // Parse quantity
+  const quantityMatch = text.match(/^(\d+)\s*(.+)$/);
+  if (!quantityMatch || !quantityMatch[1] || !quantityMatch[2]) {
+    await ctx.reply('❌ صيغة الكمية غير صحيحة. حاول مرة أخرى أو /cancel');
+    return;
+  }
+
+  const quantity = quantityMatch[1];
+  const unit = quantityMatch[2].trim();
+
+  const taskKey = `active_task_${chatId}`;
+  const existingTask = await ctx.db.select('conversation_state', {
+    filter: { chat_id: op.eq(taskKey) },
+  });
+
+  if (existingTask.length > 0) {
+    const taskData = (existingTask[0] as any).data || {};
+    
+    await ctx.db.update(
+      'conversation_state',
+      { chat_id: op.eq(taskKey) },
+      {
+        data: {
+          ...taskData,
+          manualQuantity: quantity,
+          manualQuantityUnit: unit,
+        }
+      }
+    );
+
+    await ctx.reply(
+      `✅ تم إضافة الكمية: ${quantity} ${unit}\n\n` +
+      'استخدم /completetask لإكمال المهمة الآن'
+    );
+  }
+  return;
+}
+
 
       // First, try to add to journal if there's an active session
       const journalResult = await journalMgr.addTextEntry(text);
