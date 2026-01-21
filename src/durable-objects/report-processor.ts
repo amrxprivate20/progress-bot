@@ -205,22 +205,61 @@ private async processReport(jobData: ReportJobData): Promise<void> {
       const startTime = Date.now();
 
       // Generate formatted report first
-      console.log('📋 Generating formatted report for AI...');
-      const formattedReport = await reportGen.getFormattedReportForAI(reportData.date);
-      console.log('✅ Formatted report generated:', formattedReport.length, 'chars');
-
-      // ✅ NEW: Explicitly log that we're about to send the prompt
-      if (debugLogger.isEnabled()) {
-        await debugLogger.log(
-          `📤 **About to send AI request**\n\n` +
-          `Report date: ${reportData.date}\n` +
-          `Tasks: ${reportData.tasks.length}\n` +
-          `User answers: ${Object.keys(userAnswers).length}\n` +
-          `Report length: ${formattedReport.length} chars\n\n` +
-          `Prompt will be logged by AI client...`
-        );
-      }
+console.log('📋 Generating formatted report for AI...');
+const formattedReport = await reportGen.getFormattedReportForAI(reportData.date);
 console.log('✅ Formatted report generated:', formattedReport.length, 'chars');
+
+// ✅ NEW: Log the COMPLETE formatted report if debug enabled
+if (debugLogger.isEnabled()) {
+  await debugLogger.log(
+    `📋 **FORMATTED REPORT (Complete)**\n\n` +
+    `Length: ${formattedReport.length} characters\n` +
+    `Date: ${reportData.date}\n\n` +
+    `─────────────────────────────\n\n` +
+    formattedReport,
+    '📋'
+  );
+}
+
+// ✅ NEW: Build and log the EXACT prompt that will be sent
+if (debugLogger.isEnabled()) {
+  // Manually build the prompt (same logic as buildUnifiedPrompt)
+  let fullPrompt = `# تحليل التقدم اليومي - ${reportData.date}\n\n`;
+  
+  if (userAnswers && Object.keys(userAnswers).length > 0) {
+    fullPrompt += `## إجابات المستخدم:\n`;
+    fullPrompt += Object.entries(userAnswers).map(([q, a]) => `**س:** ${q}\n**ج:** ${a}`).join('\n\n') + '\n\n';
+  }
+  
+  fullPrompt += `## التقرير اليومي:\n${formattedReport || 'لا توجد بيانات للتقرير'}\n\n`;
+  
+  if (reportData.journal) {
+    fullPrompt += `## يوميات اليوم:\n${reportData.journal}\n\n`;
+  }
+  
+  fullPrompt += `## ملخص الأسبوع الماضي:\n${pastWeekSummary}\n\n`;
+  fullPrompt += `## الأهداف الأسبوعية:\n${reportData.weeklyGoals?.goals_text || 'لا توجد أهداف محددة لهذا الأسبوع'}\n\n`;
+  fullPrompt += `## التحدي اليومي:\n${reportData.dailyChallenge?.challenge_text || 'لا يوجد تحدي محدد لهذا اليوم'}\n\n`;
+  fullPrompt += `## الأهداف الاستراتيجية طويلة المدى:\n${reportData.strategicGoals}\n\n`;
+  
+  fullPrompt += `## الذاكرة المنظمة:\n`;
+  for (const [category, content] of Object.entries(reportData.memory)) {
+    fullPrompt += `### ${category}\n${content || 'لا توجد معلومات'}\n\n`;
+  }
+  
+  fullPrompt += `\n[... rest of prompt template with QUESTIONS, COMMENTARY, etc. sections ...]\n`;
+  
+  // Log the complete prompt
+  await debugLogger.log(
+    `📤 **COMPLETE UNIFIED PROMPT**\n\n` +
+    `Total Length: ${fullPrompt.length} characters\n\n` +
+    `─────────────────────────────\n\n` +
+    fullPrompt,
+    '📤'
+  );
+  
+  console.log(`✅ Complete unified prompt logged (${fullPrompt.length} chars)`);
+}
 
 // Call AI - THIS IS THE LONG OPERATION (no timeout here!)
 const aiResponse = await aiClient.generateDailyReport({
@@ -235,7 +274,7 @@ const aiResponse = await aiClient.generateDailyReport({
   strategicGoals: reportData.strategicGoals,
   userAnswers: Object.keys(userAnswers).length > 0 ? userAnswers : undefined,
   journalContent: reportData.journal,
-  formattedReport, // ✅ NEW: Pass the exact formatted report
+  formattedReport,
 });
     // ✅ TEMPORARY DEBUG: Log raw AI response
     console.log('🤖 RAW AI RESPONSE - MEMORY_UPDATES section:');
