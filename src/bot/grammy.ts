@@ -25,6 +25,40 @@ import { handleConfirmCommand } from './confirm-handler';
 import { syncFailuresFromTodoist } from '../handlers/todoist';
 
 /**
+ * Wrapper for commands that require exclusive lock
+ */
+async function withCommandLock<T>(
+  ctx: BotContext,
+  commandName: string,
+  operation: () => Promise<T>
+): Promise<T | void> {
+  const { acquireCommandLock, releaseCommandLock, getLockedCommand } = await import('../utils/command-lock');
+  const chatId = ctx.chat?.id.toString() || '';
+  
+  // Try to acquire lock
+  const acquired = await acquireCommandLock(ctx.db, chatId, commandName);
+  
+  if (!acquired) {
+    // Get the command that's currently running
+    const lockedCommand = await getLockedCommand(ctx.db, chatId);
+    
+    await ctx.reply(
+      `⚠️ يوجد أمر قيد التنفيذ حالياً: ${lockedCommand}\n\n` +
+      'يرجى الانتظار حتى ينتهي، أو استخدم /cancel لإلغائه.'
+    );
+    return;
+  }
+  
+  try {
+    // Execute the operation
+    return await operation();
+  } finally {
+    // Always release lock
+    await releaseCommandLock(ctx.db, chatId);
+  }
+}
+
+/**
  * Extended context with Durable Objects namespace
  */
 export interface BotContext extends Context {
@@ -498,8 +532,10 @@ async function sendLongMessage(ctx: Context, message: string) {
 
   // Confirm command
   bot.command('confirm', async (ctx) => {
+    await withCommandLock(ctx, '/confirm', async () => {
     await handleConfirmCommand(ctx, ctx.reportProcessorNamespace);
   });
+});
 
   // NEW: Skip questions command
   bot.command(['skip_questions', 'skipquestions'], async (ctx) => {

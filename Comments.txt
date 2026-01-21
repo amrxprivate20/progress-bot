@@ -2,8 +2,8 @@ There are few notes and fixes that need to be done, I will address them all, and
 
 due to usage limits send me the fixes and how to implement one by one.
 
-    - If a command is in process and another command is sent it should be rejected till the first process ends
     - the /cancel prompt should be used to cancel any pending command not just the current conversation
+    - Wrap All Commands with global Locking (simillar to /confirm command) (22 JAN)
 
 DONE:
    - I noticed in supabase streak and tasks tables, tasks names are not clean which leads to duplicates with diffrent paremeters and thus problems in streak tracking because it counts as different tasks
@@ -27,4 +27,5 @@ DONE:
    - The response of ai fairly write memory outputs to other memory categories except for the first one, maybe the prompt need fixing!
    - The tasks in the group aren't grouped! all subtasks (failed or completed) should be grouped with their parent tasks (failed or completed)
    - Even if debugger mode is on. still I don't get the unified prompt that is sent to the model .. I want to see it completely!
+   - If a command is in process and another command is sent it should be rejected till the first process ends
 
