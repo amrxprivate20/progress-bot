@@ -955,187 +955,232 @@ bot.command('clearmemory', async (ctx) => {
   // ============================================
 
   // Start tracking a task (finds existing Todoist task)
-  bot.command(['starttask', 'start_task'], async (ctx) => {
-    try {
-      const args = ctx.message?.text?.split(' ').slice(1).join(' ') || '';
-
-      if (!args.trim()) {
-        await ctx.reply('❌ أدخل اسم المهمة\nمثال: /starttask قراءة كتاب');
-        return;
-      }
-
-      const chatId = ctx.chat?.id.toString() || '';
-      const taskKey = `active_task_${chatId}`;
-
-      // Check if there's already an active task
-      const existingActiveTask = await ctx.db.select('conversation_state', {
-        filter: { chat_id: op.eq(taskKey) },
-      });
-
-      if (existingActiveTask.length > 0) {
-        const existing = existingActiveTask[0] as any;
-        const taskData = existing.data || {};
-        await ctx.reply(
-          `⚠️ لديك مهمة نشطة بالفعل:\n📌 ${taskData.taskName}\n\n` +
-          `استخدم /completetask لإكمالها أو /canceltask لإلغائها`
-        );
-        return;
-      }
-
-      // Search for the task in Todoist
-const todoistToken = await ctx.settings.get('todoist_api_token');
-let todoistTaskId: string | null = null;
-let todoistTaskContent: string = args.trim();
-let availableToday: any[] = [];
-
-if (todoistToken) {
+bot.command(['starttask', 'start_task'], async (ctx) => {
   try {
-    // ✅ NEW: Get today's date in Egypt timezone
+    const args = ctx.message?.text?.split(' ').slice(1).join(' ') || '';
+    const chatId = ctx.chat?.id.toString() || '';
+    const taskKey = `active_task_${chatId}`;
+
+    // Check if there's already an active task
+    const existingActiveTask = await ctx.db.select('conversation_state', {
+      filter: { chat_id: op.eq(taskKey) },
+    });
+
+    if (existingActiveTask.length > 0) {
+      const existing = existingActiveTask[0] as any;
+      const taskData = existing.data || {};
+      await ctx.reply(
+        `⚠️ لديك مهمة نشطة بالفعل:\n📌 ${taskData.taskName}\n\n` +
+        `استخدم /completetask لإكمالها أو /canceltask لإلغائها`
+      );
+      return;
+    }
+
+    // Get Todoist token
+    const todoistToken = await ctx.settings.get('todoist_api_token');
+    
+    if (!todoistToken) {
+      await ctx.reply('❌ Todoist API token غير مكون');
+      return;
+    }
+
+    // Get available tasks (due today or overdue)
     const { getTodayInEgypt } = await import('../utils/timezone');
     const today = getTodayInEgypt();
     const todayDate = new Date(today + 'T00:00:00Z');
-    
-    console.log('📅 Searching for tasks available today:', today);
 
-    // Get all active tasks from Todoist
     const response = await fetch('https://api.todoist.com/rest/v2/tasks', {
       headers: { 'Authorization': `Bearer ${todoistToken.trim()}` },
     });
 
-    if (response.ok) {
-      const allTasks = await response.json() as Array<{ 
-        id: string; 
-        content: string; 
-        due?: { date: string };
-        is_completed?: boolean;
-      }>;
-      
-      // ✅ NEW: Filter to only tasks available today (due today or overdue, not completed)
-      const availableToday = allTasks.filter(t => {
-        // Skip completed tasks
-        if (t.is_completed) return false;
-        
-        // If no due date, include it (could be started anytime)
-        if (!t.due?.date) return true;
-        
-        // ✅ FIX: Safely extract date and handle undefined
-        const dueDateStr = t.due.date.split('T')[0];
-        if (!dueDateStr) return false;
-        
-        // Check if due date is today or in the past (overdue)
-        const taskDueDate = new Date(dueDateStr + 'T00:00:00Z');
-        return taskDueDate <= todayDate;
-      });
-      
-      console.log(`📋 Found ${availableToday.length} tasks available today (out of ${allTasks.length} total)`);
-      
-      // Find tasks that match the search term (case-insensitive, partial match)
-      const searchTerm = args.trim().toLowerCase();
-      const matchedTasks = availableToday.filter(t =>
-        t.content.toLowerCase().includes(searchTerm) ||
-        searchTerm.includes(t.content.toLowerCase())
-      );
-      
-      console.log(`🔍 Matched ${matchedTasks.length} tasks for search: "${searchTerm}"`);
-
-            if (matchedTasks.length === 1) {
-              // Only one match - use it directly
-              const matchedTask = matchedTasks[0];
-              if (matchedTask) {
-                todoistTaskId = matchedTask.id;
-                todoistTaskContent = matchedTask.content;
-              }
-            } else if (matchedTasks.length > 1) {
-  // Multiple matches - show list and wait for selection
-  let message = '📋 **تم العثور على عدة مهام مطابقة:**\n\n';
-  matchedTasks.forEach((t, i) => {
-    // ✅ FIX: Show due date if available with proper null checks
-    let dueInfo = '';
-    if (t.due?.date) {
-      const dueDateStr = t.due.date.split('T')[0];
-      if (dueDateStr) {
-        const isToday = dueDateStr === today;
-        const isPast = new Date(dueDateStr) < todayDate;
-        
-        if (isToday) {
-          dueInfo = ' 📅 اليوم';
-        } else if (isPast) {
-          dueInfo = ` ⚠️ متأخرة (${dueDateStr})`;
-        } else {
-          dueInfo = ` 📅 ${dueDateStr}`;
-        }
-      }
-    } else {
-      dueInfo = ' 📌 بدون موعد';
+    if (!response.ok) {
+      await ctx.reply('❌ فشل الاتصال بـ Todoist');
+      return;
     }
-    
-    message += `${i + 1}. ${t.content}${dueInfo}\n`;
-  });
-  message += '\n🔢 أرسل رقم المهمة التي تريد بدء تتبعها:';
 
-              // Store matched tasks for selection
-              const selectKey = `task_select_${chatId}`;
-              await ctx.db.insert('conversation_state', {
-                chat_id: selectKey,
-                conversation_type: 'task_selection',
-                data: {
-                  originalSearch: args.trim(),
-                  matchedTasks: matchedTasks,
-                },
-                expires_at: new Date(Date.now() + 5 * 60 * 1000).toISOString(), // 5 minutes
-              });
+    const allTasks = await response.json() as Array<{ 
+      id: string; 
+      content: string; 
+      due?: { date: string };
+      is_completed?: boolean;
+    }>;
 
-              await ctx.reply(message, { parse_mode: 'Markdown' });
-              return;
-            }
-          }
-        } catch (err) {
-          console.error('Error searching Todoist tasks:', err);
-        }
-      }
+    // Filter to tasks available today (due today or overdue, not completed)
+    const availableToday = allTasks.filter(t => {
+      if (t.is_completed) return false;
+      if (!t.due?.date) return true; // Tasks without due date
+      
+      const dueDateStr = t.due.date.split('T')[0];
+      if (!dueDateStr) return false;
+      
+      const taskDueDate = new Date(dueDateStr + 'T00:00:00Z');
+      return taskDueDate <= todayDate;
+    });
 
-      // ✅ FIX: Check availableToday within the same scope
-      if (!todoistTaskId && availableToday.length === 0) {
+    // NO PARAMETERS - Show list of all available tasks
+    if (!args.trim()) {
+      if (availableToday.length === 0) {
         await ctx.reply(
           '📋 لا توجد مهام متاحة اليوم في Todoist.\n\n' +
-          'يمكنك:\n' +
-          '• إضافة مهام جديدة لليوم\n' +
-          '• أو كتابة اسم المهمة يدوياً (سيتم إنشاء مهمة جديدة)'
+          '📝 يمكنك كتابة اسم مهمة جديدة:\n' +
+          '/starttask [اسم المهمة]'
         );
+        return;
       }
-        // Save the active task with Todoist ID if found
-        // Store both startTime (timestamp) and startDate (Egypt date) for midnight boundary handling
-      const startDate = getTodayInEgypt(); // Egypt date when task started
+
+      // Show list with "Add new task" option
+      let message = '📋 **المهام المتاحة اليوم:**\n\n';
+      availableToday.forEach((t, i) => {
+        let dueInfo = '';
+        if (t.due?.date) {
+          const dueDateStr = t.due.date.split('T')[0];
+          if (dueDateStr) {
+            const isToday = dueDateStr === today;
+            const isPast = new Date(dueDateStr) < todayDate;
+            
+            if (isToday) {
+              dueInfo = ' 📅 اليوم';
+            } else if (isPast) {
+              dueInfo = ` ⚠️ متأخرة (${dueDateStr})`;
+            }
+          }
+        } else {
+          dueInfo = ' 📌 بدون موعد';
+        }
+        
+        message += `${i + 1}. ${t.content}${dueInfo}\n`;
+      });
+      
+      message += `\n0. ➕ إضافة مهمة جديدة\n\n`;
+      message += `🔢 أرسل رقم المهمة أو اسم المهمة الجديدة:`;
+
+      // Store available tasks for selection
+      const selectKey = `task_select_${chatId}`;
       await ctx.db.insert('conversation_state', {
-        chat_id: taskKey,
-        conversation_type: 'active_task',
+        chat_id: selectKey,
+        conversation_type: 'task_selection',
         data: {
-          taskName: todoistTaskContent,
-          originalSearch: args.trim(),
-          todoistTaskId: todoistTaskId,
-          startTime: Date.now(),
-          startDate: startDate, // Egypt date for midnight boundary handling
+          availableTasks: availableToday,
+          allowNewTask: true,
         },
-        expires_at: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(), // 24 hours
+        expires_at: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
       });
 
-      const now = new Date();
-      const timeStr = now.toLocaleTimeString('ar-EG', { timeZone: 'Africa/Cairo', hour: '2-digit', minute: '2-digit' });
-
-      const todoistStatus = todoistTaskId
-        ? `✅ تم العثور على المهمة في Todoist`
-        : `⚠️ لم يتم العثور على المهمة في Todoist (سيتم إنشاء مهمة جديدة)`;
-
-      await ctx.reply(
-        `⏱️ بدأ تتبع المهمة:\n📌 ${todoistTaskContent}\n🕐 وقت البدء: ${timeStr}\n\n` +
-        `${todoistStatus}\n\n` +
-        `استخدم /completetask عند الانتهاء`
-      );
-    } catch (error) {
-      console.error('Start task error:', error);
-      await ctx.reply('❌ حدث خطأ: ' + (error instanceof Error ? error.message : 'Unknown'));
+      await ctx.reply(message, { parse_mode: 'Markdown' });
+      return;
     }
-  });
+
+    // WITH PARAMETERS - Search for matching tasks
+    const searchTerm = args.trim().toLowerCase();
+    const matchedTasks = availableToday.filter(t =>
+      t.content.toLowerCase().includes(searchTerm) ||
+      searchTerm.includes(t.content.toLowerCase())
+    );
+
+    if (matchedTasks.length === 0) {
+      // No matches - ask if they want to create new task
+      await ctx.reply(
+        `🔍 لم أجد مهمة تطابق "${args.trim()}"\n\n` +
+        `هل تريد إنشاء مهمة جديدة بهذا الاسم؟\n` +
+        `أرسل "نعم" للتأكيد أو /cancel للإلغاء`
+      );
+
+      // Store for confirmation
+      const confirmKey = `task_create_confirm_${chatId}`;
+      await ctx.db.insert('conversation_state', {
+        chat_id: confirmKey,
+        conversation_type: 'task_create_confirm',
+        data: { taskName: args.trim() },
+        expires_at: new Date(Date.now() + 2 * 60 * 1000).toISOString(),
+      });
+      return;
+    }
+
+    if (matchedTasks.length === 1) {
+      // Exactly one match - show confirmation with this task + "Add new task"
+      const task = matchedTasks[0]!;
+      let message = '📋 **هل تريد تتبع هذه المهمة؟**\n\n';
+      
+      let dueInfo = '';
+      if (task.due?.date) {
+        const dueDateStr = task.due.date.split('T')[0];
+        if (dueDateStr) {
+          const isToday = dueDateStr === today;
+          const isPast = new Date(dueDateStr) < todayDate;
+          
+          if (isToday) {
+            dueInfo = ' 📅 اليوم';
+          } else if (isPast) {
+            dueInfo = ` ⚠️ متأخرة (${dueDateStr})`;
+          }
+        }
+      }
+      
+      message += `1. ${task.content}${dueInfo}\n`;
+      message += `0. ➕ إضافة مهمة جديدة: "${args.trim()}"\n\n`;
+      message += `🔢 أرسل 1 لتتبع المهمة أو 0 لإنشاء مهمة جديدة:`;
+
+      // Store for selection
+      const selectKey = `task_select_${chatId}`;
+      await ctx.db.insert('conversation_state', {
+        chat_id: selectKey,
+        conversation_type: 'task_selection',
+        data: {
+          matchedTasks: [task],
+          newTaskName: args.trim(),
+          allowNewTask: true,
+        },
+        expires_at: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
+      });
+
+      await ctx.reply(message, { parse_mode: 'Markdown' });
+      return;
+    }
+
+    // Multiple matches - show list with "Add new task" option
+    let message = '📋 **تم العثور على عدة مهام مطابقة:**\n\n';
+    matchedTasks.forEach((t, i) => {
+      let dueInfo = '';
+      if (t.due?.date) {
+        const dueDateStr = t.due.date.split('T')[0];
+        if (dueDateStr) {
+          const isToday = dueDateStr === today;
+          const isPast = new Date(dueDateStr) < todayDate;
+          
+          if (isToday) {
+            dueInfo = ' 📅 اليوم';
+          } else if (isPast) {
+            dueInfo = ` ⚠️ متأخرة (${dueDateStr})`;
+          }
+        }
+      }
+      
+      message += `${i + 1}. ${t.content}${dueInfo}\n`;
+    });
+    
+    message += `\n0. ➕ إضافة مهمة جديدة: "${args.trim()}"\n\n`;
+    message += `🔢 أرسل رقم المهمة المطلوبة أو 0 لإنشاء مهمة جديدة:`;
+
+    // Store matched tasks for selection
+    const selectKey = `task_select_${chatId}`;
+    await ctx.db.insert('conversation_state', {
+      chat_id: selectKey,
+      conversation_type: 'task_selection',
+      data: {
+        matchedTasks: matchedTasks,
+        newTaskName: args.trim(),
+        allowNewTask: true,
+      },
+      expires_at: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
+    });
+
+    await ctx.reply(message, { parse_mode: 'Markdown' });
+
+  } catch (error) {
+    console.error('Start task error:', error);
+    await ctx.reply('❌ حدث خطأ: ' + (error instanceof Error ? error.message : 'Unknown'));
+  }
+});
 
   // Complete the active task
   bot.command(['completetask', 'complete_task'], async (ctx) => {
@@ -1650,60 +1695,148 @@ if (todoistToken) {
         return;
       }
 
-      // Check for pending task selection (from /starttask with multiple matches)
-      const selectKey = `task_select_${chatId}`;
-      const pendingSelection = await ctx.db.select('conversation_state', {
-        filter: { chat_id: op.eq(selectKey) },
-      });
+      // Check for pending task selection (from /starttask)
+const selectKey = `task_select_${chatId}`;
+const pendingSelection = await ctx.db.select('conversation_state', {
+  filter: { chat_id: op.eq(selectKey) },
+});
 
-      if (pendingSelection.length > 0) {
-        const selectionData = (pendingSelection[0] as any).data || {};
-        const matchedTasks = selectionData.matchedTasks as Array<{ id: string; content: string }> || [];
+if (pendingSelection.length > 0) {
+  const selectionData = (pendingSelection[0] as any).data || {};
+  const matchedTasks = selectionData.matchedTasks as Array<{ id: string; content: string }> || [];
+  const availableTasks = selectionData.availableTasks as Array<{ id: string; content: string }> || [];
+  const newTaskName = selectionData.newTaskName as string;
+  const allowNewTask = selectionData.allowNewTask as boolean;
 
-        // Parse user selection
-        const selection = parseInt(text.trim(), 10);
+  // Determine which list to use
+  const taskList = matchedTasks.length > 0 ? matchedTasks : availableTasks;
 
-        if (isNaN(selection) || selection < 1 || selection > matchedTasks.length) {
-          await ctx.reply(`❌ أدخل رقماً صحيحاً بين 1 و ${matchedTasks.length}`);
-          return;
-        }
+  // Parse user selection
+  const selection = parseInt(text.trim(), 10);
 
-        const selectedTask = matchedTasks[selection - 1];
-        if (!selectedTask) {
-          await ctx.reply('❌ حدث خطأ. حاول مرة أخرى.');
-          await ctx.db.delete('conversation_state', { chat_id: op.eq(selectKey) });
-          return;
-        }
+  // Check if user wants to create new task (0)
+  if (selection === 0 && allowNewTask) {
+    // Delete selection state
+    await ctx.db.delete('conversation_state', { chat_id: op.eq(selectKey) });
 
-        // Delete selection state
-        await ctx.db.delete('conversation_state', { chat_id: op.eq(selectKey) });
+    // Start tracking new task (not in Todoist)
+    const taskKey = `active_task_${chatId}`;
+    const startDate = getTodayInEgypt();
+    
+    await ctx.db.insert('conversation_state', {
+      chat_id: taskKey,
+      conversation_type: 'active_task',
+      data: {
+        taskName: newTaskName || text.trim(),
+        originalSearch: newTaskName || text.trim(),
+        todoistTaskId: null, // No Todoist task
+        startTime: Date.now(),
+        startDate: startDate,
+      },
+      expires_at: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
+    });
 
-        // Save the active task with Todoist ID
-        const taskKey = `active_task_${chatId}`;
-        const startDate = getTodayInEgypt();
-        await ctx.db.insert('conversation_state', {
-          chat_id: taskKey,
-          conversation_type: 'active_task',
-          data: {
-            taskName: selectedTask.content,
-            originalSearch: selectionData.originalSearch,
-            todoistTaskId: selectedTask.id,
-            startTime: Date.now(),
-            startDate: startDate,
-          },
-          expires_at: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
-        });
+    const now = new Date();
+    const timeStr = now.toLocaleTimeString('ar-EG', { timeZone: 'Africa/Cairo', hour: '2-digit', minute: '2-digit' });
 
-        const now = new Date();
-        const timeStr = now.toLocaleTimeString('ar-EG', { timeZone: 'Africa/Cairo', hour: '2-digit', minute: '2-digit' });
+    await ctx.reply(
+      `⏱️ بدأ تتبع المهمة:\n📌 ${newTaskName || text.trim()}\n🕐 وقت البدء: ${timeStr}\n\n` +
+      `📝 مهمة جديدة (سيتم إنشاؤها في Todoist عند الإكمال)\n\n` +
+      `استخدم /completetask عند الانتهاء`
+    );
+    return;
+  }
 
-        await ctx.reply(
-          `⏱️ بدأ تتبع المهمة:\n📌 ${selectedTask.content}\n🕐 وقت البدء: ${timeStr}\n\n` +
-          `✅ تم العثور على المهمة في Todoist\n\n` +
-          `استخدم /completetask عند الانتهاء`
-        );
-        return;
-      }
+  // Validate selection number
+  if (isNaN(selection) || selection < 1 || selection > taskList.length) {
+    await ctx.reply(`❌ أدخل رقماً صحيحاً بين ${allowNewTask ? '0' : '1'} و ${taskList.length}`);
+    return;
+  }
+
+  const selectedTask = taskList[selection - 1];
+  if (!selectedTask) {
+    await ctx.reply('❌ حدث خطأ. حاول مرة أخرى.');
+    await ctx.db.delete('conversation_state', { chat_id: op.eq(selectKey) });
+    return;
+  }
+
+  // Delete selection state
+  await ctx.db.delete('conversation_state', { chat_id: op.eq(selectKey) });
+
+  // Save the active task with Todoist ID
+  const taskKey = `active_task_${chatId}`;
+  const startDate = getTodayInEgypt();
+  
+  await ctx.db.insert('conversation_state', {
+    chat_id: taskKey,
+    conversation_type: 'active_task',
+    data: {
+      taskName: selectedTask.content,
+      originalSearch: selectionData.originalSearch || '',
+      todoistTaskId: selectedTask.id,
+      startTime: Date.now(),
+      startDate: startDate,
+    },
+    expires_at: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
+  });
+
+  const now = new Date();
+  const timeStr = now.toLocaleTimeString('ar-EG', { timeZone: 'Africa/Cairo', hour: '2-digit', minute: '2-digit' });
+
+  await ctx.reply(
+    `⏱️ بدأ تتبع المهمة:\n📌 ${selectedTask.content}\n🕐 وقت البدء: ${timeStr}\n\n` +
+    `✅ تم العثور على المهمة في Todoist\n\n` +
+    `استخدم /completetask عند الانتهاء`
+  );
+  return;
+}
+
+// Also handle task create confirmation
+const confirmKey = `task_create_confirm_${chatId}`;
+const pendingConfirm = await ctx.db.select('conversation_state', {
+  filter: { chat_id: op.eq(confirmKey) },
+});
+
+if (pendingConfirm.length > 0) {
+  const confirmData = (pendingConfirm[0] as any).data || {};
+  const taskName = confirmData.taskName;
+
+  // Delete confirmation state
+  await ctx.db.delete('conversation_state', { chat_id: op.eq(confirmKey) });
+
+  const lowerText = text.trim().toLowerCase();
+  
+  if (lowerText === 'نعم' || lowerText === 'yes') {
+    // Start tracking new task
+    const taskKey = `active_task_${chatId}`;
+    const startDate = getTodayInEgypt();
+    
+    await ctx.db.insert('conversation_state', {
+      chat_id: taskKey,
+      conversation_type: 'active_task',
+      data: {
+        taskName: taskName,
+        originalSearch: taskName,
+        todoistTaskId: null,
+        startTime: Date.now(),
+        startDate: startDate,
+      },
+      expires_at: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
+    });
+
+    const now = new Date();
+    const timeStr = now.toLocaleTimeString('ar-EG', { timeZone: 'Africa/Cairo', hour: '2-digit', minute: '2-digit' });
+
+    await ctx.reply(
+      `⏱️ بدأ تتبع المهمة:\n📌 ${taskName}\n🕐 وقت البدء: ${timeStr}\n\n` +
+      `📝 مهمة جديدة (سيتم إنشاؤها في Todoist عند الإكمال)\n\n` +
+      `استخدم /completetask عند الانتهاء`
+    );
+  } else {
+    await ctx.reply('✅ تم الإلغاء');
+  }
+  return;
+}
 
       // Check for pending quantity (after /completetask)
       const quantityKey = `task_quantity_${chatId}`;

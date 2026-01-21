@@ -2,13 +2,14 @@ There are few notes and fixes that need to be done, I will address them all, and
 
 due to usage limits send me the fixes and how to implement one by one.
 
-    - /starttask behavior: Without parameters list all available tasks plus “add new task”; with a task name, if exactly one similar task exists do not start it immediately but show a confirmation list with that task as the first item plus “add new task”; ignore and do not store duration if it equals zero.
     - /completetask & /addquantity flow: /completetask must immediately complete the current active task with no parameters, /addquantity must add quantity to the current task before completion when needed, and after completion send a permanent message encouraging the user to start again using /starttask.
+    - the currently availble tasks list shown with /starttask don't need to write beside every task that this tasks is for (today), it is enough for this info to be included in the title of the message only, letting the tasks name to be clear!
     - /log_failure behavior: Acts like /completetask but logs a failure; if called without parameters list all available tasks plus “add new task”; when a task is selected or written register it as a failure, and if the task is recurring postpone it in Todoist to the next due date, if not recurring then delete it from Todoist.
      - Reporting aggregation rule: If a task with the same name is completed more than once in the same day, show it in reports as Task Name xN where N is the number of completions.
     - /status command fix: Make /status functional so it shows the current task status and whether there is any pending or incomplete command flow awaiting user input.
     - Debugging & AI configuration commands: Add commands to enable and disable debugging mode and to edit or switch the OpenRouter AI model dynamically.
-    - Wrap All Commands with global Locking (simillar to /confirm command) (22 JAN)
+    - a /cancel command should be included in any message in the system to cancel current pending command (22 JAN)
+    - Wrap All Commands with global Locking (simillar to /confirm command) to prevent multiple actions in the same time! (22 JAN)
     - detect all the commands in the system and rewrite both the start message and help message (22 JAN)
 
 DONE:
@@ -35,3 +36,4 @@ DONE:
    - Even if debugger mode is on. still I don't get the unified prompt that is sent to the model .. I want to see it completely!
    - If a command is in process and another command is sent it should be rejected till the first process ends
    - the /cancel prompt should be used to cancel any pending command not just the current conversation
+   - /starttask behavior: Without parameters list all available tasks plus “add new task”; with a task name, if exactly one similar task exists do not start it immediately but show a confirmation list with that task as the first item plus “add new task”; ignore and do not store duration if it equals zero.
