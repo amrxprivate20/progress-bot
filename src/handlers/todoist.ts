@@ -87,7 +87,7 @@ async function syncParentTaskFromTodoist(
     }
 
     const response = await fetch(
-      `https://api.todoist.com/rest/v2/tasks/${parentId}`,
+      `https://api.todoist.com/rest/v3/tasks/${parentId}`,
       {
         headers: {
           'Authorization': `Bearer ${todoistToken}`,
@@ -232,7 +232,7 @@ export async function completeParentInTodoistIfAllDone(
     }
 
     const response = await fetch(
-      `https://api.todoist.com/rest/v2/tasks/${originalTaskId}/close`,
+      `https://api.todoist.com/rest/v3/tasks/${originalTaskId}/close`,
       {
         method: 'POST',
         headers: {
@@ -961,7 +961,7 @@ export async function syncFailuresFromTodoist(
     console.log('🎯 Priority threshold: P1-P' + priorityThreshold);
 
     const response = await fetch(
-      `https://api.todoist.com/rest/v2/tasks?project_id=${projectId}`,
+      `https://api.todoist.com/rest/v3/tasks?project_id=${projectId}`,
       {
         headers: {
           Authorization: `Bearer ${todoistToken}`,

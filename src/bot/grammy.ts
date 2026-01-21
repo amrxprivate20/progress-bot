@@ -295,7 +295,7 @@ function registerCommands(bot: Bot<BotContext>) {
 
     if (todoistToken) {
       try {
-        const response = await fetch('https://api.todoist.com/rest/v2/tasks', {
+        const response = await fetch('https://api.todoist.com/rest/v3/tasks', {
           headers: { 'Authorization': `Bearer ${todoistToken.trim()}` },
         });
 
@@ -997,28 +997,49 @@ bot.command(['starttask', 'start_task'], async (ctx) => {
       return;
     }
 
+// Get Todoist project ID
+    const todoistProjectId = await ctx.settings.get('todoist_project_id');
+    
+    console.log('🔍 DEBUG - Todoist Token length:', todoistToken?.length);
+    console.log('🔍 DEBUG - Todoist Token starts with:', todoistToken?.substring(0, 10));
+    console.log('🔍 DEBUG - Project ID:', todoistProjectId);
+    console.log('🔍 DEBUG - Project ID length:', todoistProjectId?.length);
+    
+    if (!todoistProjectId) {
+      await ctx.reply('❌ Todoist Project ID غير مكون في الإعدادات');
+      return;
+    }
+
     // Get available tasks (due today or overdue)
     const { getTodayInEgypt } = await import('../utils/timezone');
     const today = getTodayInEgypt();
     const todayDate = new Date(today + 'T00:00:00Z');
 
-    const response = await fetch('https://api.todoist.com/rest/v2/tasks', {
-  headers: { 
-    'Authorization': `Bearer ${todoistToken.trim()}`,
-    'Content-Type': 'application/json',
-  },
-});
+    const url = `https://api.todoist.com/rest/v3/tasks?project_id=${todoistProjectId.trim()}`;
+    console.log('🔍 DEBUG - Full URL:', url);
 
-if (!response.ok) {
-  const errorText = await response.text();
-  console.error('Todoist API error:', response.status, errorText);
-  await ctx.reply(
-    `❌ فشل الاتصال بـ Todoist (${response.status})\n` +
-    `تأكد من صحة API token في الإعدادات`
-  );
-  return;
-}
+    const response = await fetch(url, {
+      headers: { 
+        'Authorization': `Bearer ${todoistToken.trim()}`,
+        'Content-Type': 'application/json',
+      },
+    });
 
+    console.log('🔍 DEBUG - Response status:', response.status);
+    console.log('🔍 DEBUG - Response headers:', JSON.stringify(Object.fromEntries(response.headers.entries())));
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error('❌ Todoist API error:', response.status, errorText);
+      await ctx.reply(
+        `❌ فشل الاتصال بـ Todoist (${response.status})\n` +
+        `URL: ${url}\n` +
+        `Token length: ${todoistToken.length}\n` +
+        `Project ID: ${todoistProjectId}\n` +
+        `Error: ${errorText.substring(0, 200)}`
+      );
+      return;
+    }
     const allTasks = await response.json() as Array<{ 
       id: string; 
       content: string; 
@@ -1027,53 +1048,52 @@ if (!response.ok) {
     }>;
 
     // Filter to tasks available today (due today or overdue, not completed)
-    const availableToday = allTasks.filter(t => {
-      if (t.is_completed) return false;
-      if (!t.due?.date) return true; // Tasks without due date
-      
-      const dueDateStr = t.due.date.split('T')[0];
-      if (!dueDateStr) return false;
-      
-      const taskDueDate = new Date(dueDateStr + 'T00:00:00Z');
-      return taskDueDate <= todayDate;
-    });
+   const availableToday = allTasks.filter(t => {
+     if (t.is_completed) return false;
+     if (!t.due?.date) return true; // Tasks without due date
+     
+     const dueDateStr = t.due.date.split('T')[0];
+     if (!dueDateStr) return false;
+     
+     const taskDueDate = new Date(dueDateStr + 'T00:00:00Z');
+     return taskDueDate <= todayDate;
+   });
 
-    // NO PARAMETERS - Show list of all available tasks
-    if (!args.trim()) {
-      if (availableToday.length === 0) {
-        await ctx.reply(
-          '📋 لا توجد مهام متاحة اليوم في Todoist.\n\n' +
-          '📝 يمكنك كتابة اسم مهمة جديدة:\n' +
-          '/starttask [اسم المهمة]'
-        );
-        return;
-      }
+   // Count tasks by due status for context
+   const todayTasks = availableToday.filter(t => {
+     if (!t.due?.date) return false;
+     const dueDateStr = t.due.date.split('T')[0];
+     return dueDateStr === today;
+   });
+   const overdueTasks = availableToday.filter(t => {
+     if (!t.due?.date) return false;
+     const dueDateStr = t.due.date.split('T')[0];
+     if (!dueDateStr) return false;
+     return new Date(dueDateStr) < todayDate;
+   });
+   const noDueDateTasks = availableToday.filter(t => !t.due?.date);
 
-      // Show list with "Add new task" option
-      let message = '📋 **المهام المتاحة اليوم:**\n\n';
-      availableToday.forEach((t, i) => {
-        let dueInfo = '';
-        if (t.due?.date) {
-          const dueDateStr = t.due.date.split('T')[0];
-          if (dueDateStr) {
-            const isToday = dueDateStr === today;
-            const isPast = new Date(dueDateStr) < todayDate;
-            
-            if (isToday) {
-              dueInfo = ' 📅 اليوم';
-            } else if (isPast) {
-              dueInfo = ` ⚠️ متأخرة (${dueDateStr})`;
-            }
-          }
-        } else {
-          dueInfo = ' 📌 بدون موعد';
-        }
-        
-        message += `${i + 1}. ${t.content}${dueInfo}\n`;
-      });
-      
-      message += `\n0. ➕ إضافة مهمة جديدة\n\n`;
-      message += `🔢 أرسل رقم المهمة أو اسم المهمة الجديدة:`;
+   // NO PARAMETERS - Show list of all available tasks
+   if (!args.trim()) {
+     if (availableToday.length === 0) {
+       await ctx.reply(
+         '📋 لا توجد مهام متاحة اليوم في Todoist.\n\n' +
+         '📝 يمكنك كتابة اسم مهمة جديدة:\n' +
+         '/starttask [اسم المهمة]'
+       );
+       return;
+     }
+
+     // Show list with context header
+     let message = '📋 **المهام المتاحة:**\n';
+     message += `📅 اليوم: ${todayTasks.length} | ⚠️ متأخرة: ${overdueTasks.length} | 📌 بدون موعد: ${noDueDateTasks.length}\n\n`;
+     
+     availableToday.forEach((t, i) => {
+       message += `${i + 1}. ${t.content}\n`;
+     });
+     
+     message += `\n0. ➕ إضافة مهمة جديدة\n\n`;
+     message += `🔢 أرسل رقم المهمة أو اسم المهمة الجديدة:`;
 
       // Store available tasks for selection
       const selectKey = `task_select_${chatId}`;
@@ -1118,26 +1138,10 @@ if (!response.ok) {
     }
 
     if (matchedTasks.length === 1) {
-      // Exactly one match - show confirmation with this task + "Add new task"
-      const task = matchedTasks[0]!;
-      let message = '📋 **هل تريد تتبع هذه المهمة؟**\n\n';
-      
-      let dueInfo = '';
-      if (task.due?.date) {
-        const dueDateStr = task.due.date.split('T')[0];
-        if (dueDateStr) {
-          const isToday = dueDateStr === today;
-          const isPast = new Date(dueDateStr) < todayDate;
-          
-          if (isToday) {
-            dueInfo = ' 📅 اليوم';
-          } else if (isPast) {
-            dueInfo = ` ⚠️ متأخرة (${dueDateStr})`;
-          }
-        }
-      }
-      
-      message += `1. ${task.content}${dueInfo}\n`;
+     // Exactly one match - show confirmation with this task + "Add new task"
+     const task = matchedTasks[0]!;
+     let message = '📋 **هل تريد تتبع هذه المهمة؟**\n\n';
+     message += `1. ${task.content}\n`;
       message += `0. ➕ إضافة مهمة جديدة: "${args.trim()}"\n\n`;
       message += `🔢 أرسل 1 لتتبع المهمة أو 0 لإنشاء مهمة جديدة:`;
 
@@ -1158,26 +1162,11 @@ if (!response.ok) {
       return;
     }
 
-    // Multiple matches - show list with "Add new task" option
-    let message = '📋 **تم العثور على عدة مهام مطابقة:**\n\n';
-    matchedTasks.forEach((t, i) => {
-      let dueInfo = '';
-      if (t.due?.date) {
-        const dueDateStr = t.due.date.split('T')[0];
-        if (dueDateStr) {
-          const isToday = dueDateStr === today;
-          const isPast = new Date(dueDateStr) < todayDate;
-          
-          if (isToday) {
-            dueInfo = ' 📅 اليوم';
-          } else if (isPast) {
-            dueInfo = ` ⚠️ متأخرة (${dueDateStr})`;
-          }
-        }
-      }
-      
-      message += `${i + 1}. ${t.content}${dueInfo}\n`;
-    });
+   // Multiple matches - show list with "Add new task" option
+   let message = '📋 **تم العثور على عدة مهام مطابقة:**\n\n';
+   matchedTasks.forEach((t, i) => {
+     message += `${i + 1}. ${t.content}\n`;
+   });
     
     message += `\n0. ➕ إضافة مهمة جديدة: "${args.trim()}"\n\n`;
     message += `🔢 أرسل رقم المهمة المطلوبة أو 0 لإنشاء مهمة جديدة:`;
@@ -1448,7 +1437,7 @@ bot.command(['completetask', 'complete_task'], async (ctx) => {
         });
 
         // Update task content
-        const updateResponse = await fetch(`https://api.todoist.com/rest/v2/tasks/${todoistTaskId}`, {
+        const updateResponse = await fetch(`https://api.todoist.com/rest/v3/tasks/${todoistTaskId}`, {
           method: 'POST',
           headers: {
             'Authorization': `Bearer ${todoistToken.trim()}`,
@@ -1461,7 +1450,7 @@ bot.command(['completetask', 'complete_task'], async (ctx) => {
           await new Promise(resolve => setTimeout(resolve, 500));
           
           // Complete the task
-          await fetch(`https://api.todoist.com/rest/v2/tasks/${todoistTaskId}/close`, {
+          await fetch(`https://api.todoist.com/rest/v3/tasks/${todoistTaskId}/close`, {
             method: 'POST',
             headers: { 'Authorization': `Bearer ${todoistToken.trim()}` },
           });
@@ -1502,7 +1491,7 @@ bot.command(['completetask', 'complete_task'], async (ctx) => {
       // Create new task
       try {
         const todoistProjectId = await ctx.settings.get('todoist_project_id');
-        const createResponse = await fetch('https://api.todoist.com/rest/v2/tasks', {
+        const createResponse = await fetch('https://api.todoist.com/rest/v3/tasks', {
           method: 'POST',
           headers: {
             'Authorization': `Bearer ${todoistToken.trim()}`,
@@ -1516,7 +1505,7 @@ bot.command(['completetask', 'complete_task'], async (ctx) => {
 
         if (createResponse.ok) {
           const newTask = await createResponse.json() as { id: string };
-          await fetch(`https://api.todoist.com/rest/v2/tasks/${newTask.id}/close`, {
+          await fetch(`https://api.todoist.com/rest/v3/tasks/${newTask.id}/close`, {
             method: 'POST',
             headers: { 'Authorization': `Bearer ${todoistToken.trim()}` },
           });
@@ -2199,7 +2188,7 @@ if (pendingConfirm.length > 0) {
 
               // UPDATE existing Todoist task content, then complete it
               // Step 1: Update task content with duration/quantity
-              const updateResponse = await fetch(`https://api.todoist.com/rest/v2/tasks/${todoistTaskId}`, {
+              const updateResponse = await fetch(`https://api.todoist.com/rest/v3/tasks/${todoistTaskId}`, {
                 method: 'POST',
                 headers: {
                   'Authorization': `Bearer ${todoistToken.trim()}`,
@@ -2215,7 +2204,7 @@ if (pendingConfirm.length > 0) {
                 await new Promise(resolve => setTimeout(resolve, 500));
 
                 // Step 2: Complete the task
-                await fetch(`https://api.todoist.com/rest/v2/tasks/${todoistTaskId}/close`, {
+                await fetch(`https://api.todoist.com/rest/v3/tasks/${todoistTaskId}/close`, {
                   method: 'POST',
                   headers: { 'Authorization': `Bearer ${todoistToken.trim()}` },
                 });
@@ -2231,7 +2220,7 @@ if (pendingConfirm.length > 0) {
             } else {
               // CREATE new task and complete it (no existing task found)
               const todoistProjectId = await ctx.settings.get('todoist_project_id');
-              const createResponse = await fetch('https://api.todoist.com/rest/v2/tasks', {
+              const createResponse = await fetch('https://api.todoist.com/rest/v3/tasks', {
                 method: 'POST',
                 headers: {
                   'Authorization': `Bearer ${todoistToken.trim()}`,
@@ -2245,7 +2234,7 @@ if (pendingConfirm.length > 0) {
 
               if (createResponse.ok) {
                 const newTask = await createResponse.json() as { id: string };
-                await fetch(`https://api.todoist.com/rest/v2/tasks/${newTask.id}/close`, {
+                await fetch(`https://api.todoist.com/rest/v3/tasks/${newTask.id}/close`, {
                   method: 'POST',
                   headers: { 'Authorization': `Bearer ${todoistToken.trim()}` },
                 });
