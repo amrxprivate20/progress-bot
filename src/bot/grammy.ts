@@ -215,7 +215,20 @@ function registerCommands(bot: Bot<BotContext>) {
 
       const today = getTodayInEgypt();
 
-      await syncFailuresFromTodoist(today, ctx.db, ctx.settings);
+      try {
+  await syncFailuresFromTodoist(today, ctx.db, ctx.settings);
+  await ctx.reply('✅ تمت المزامنة بنجاح! تم تحديث حالة المهام.');
+} catch (error) {
+  console.error('Sync error:', error);
+  const errorMsg = error instanceof Error ? error.message : 'Unknown error';
+  await ctx.reply(
+    `❌ حدث خطأ أثناء المزامنة:\n${errorMsg}\n\n` +
+    `تحقق من:\n` +
+    `• صحة Todoist API token\n` +
+    `• صحة Project ID\n` +
+    `• اتصال الإنترنت`
+  );
+}
 
       await ctx.reply('✅ تمت المزامنة بنجاح! تم تحديث حالة المهام.');
     } catch (error) {
@@ -990,13 +1003,21 @@ bot.command(['starttask', 'start_task'], async (ctx) => {
     const todayDate = new Date(today + 'T00:00:00Z');
 
     const response = await fetch('https://api.todoist.com/rest/v2/tasks', {
-      headers: { 'Authorization': `Bearer ${todoistToken.trim()}` },
-    });
+  headers: { 
+    'Authorization': `Bearer ${todoistToken.trim()}`,
+    'Content-Type': 'application/json',
+  },
+});
 
-    if (!response.ok) {
-      await ctx.reply('❌ فشل الاتصال بـ Todoist');
-      return;
-    }
+if (!response.ok) {
+  const errorText = await response.text();
+  console.error('Todoist API error:', response.status, errorText);
+  await ctx.reply(
+    `❌ فشل الاتصال بـ Todoist (${response.status})\n` +
+    `تأكد من صحة API token في الإعدادات`
+  );
+  return;
+}
 
     const allTasks = await response.json() as Array<{ 
       id: string; 
