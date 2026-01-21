@@ -143,18 +143,18 @@ async function syncParentTaskFromTodoist(
 
 /**
  * Complete parent task in Todoist if all subtasks are done
- * FIXED: Uses clean name matching for reliability
+ * FIXED: Uses ONLY clean name matching for reliability
  */
 export async function completeParentInTodoistIfAllDone(
   db: SupabaseClient,
   settings: SettingsManager,
-  taskId: string,
+  subtaskId: string,
   egyptDate: string
 ): Promise<void> {
   try {
-    console.log(`🔍 Checking if any parent should autocomplete after completing subtask ${taskId}...`);
+    console.log(`🔍 Checking parent autocomplete after subtask ${subtaskId}...`);
     
-    // Get all completed tasks for today
+    // Get all tasks for today (Egypt timezone)
     const { start, end } = getEgyptDayBoundaries(egyptDate);
     const allTasks = await db.select<Task>('tasks', {});
     const todayTasks = allTasks.filter(t => {
@@ -162,48 +162,72 @@ export async function completeParentInTodoistIfAllDone(
       return taskDate >= start && taskDate <= end;
     });
     
-    // Find the completed subtask
+    // Find the completed subtask by ID (could be timestamped)
     const subtask = todayTasks.find(t => 
-      t.task_id === taskId || t.task_id?.startsWith(taskId + '_')
+      t.task_id === subtaskId || t.task_id?.startsWith(subtaskId + '_')
     );
     
     if (!subtask || !subtask.origin_task) {
-      console.log('Not a subtask, skipping parent check');
+      console.log('Not a subtask or no origin_task, skipping');
       return;
     }
 
-    // Find parent by origin_task reference
+    // ✅ METHOD 1: Try to find parent by origin_task reference
     const parentId = subtask.origin_task;
     const parentBaseId = parentId.split('_')[0];
     
-    // Find parent in TODAY's tasks
-    const parentTask = todayTasks.find(t => {
-      const baseId = t.task_id?.split('_')[0];
+    let parentTask = todayTasks.find(t => {
+      if (!t.task_id) return false;
+      const baseId = t.task_id.split('_')[0];
       return baseId === parentBaseId || t.task_id === parentId;
     });
 
+    // ✅ METHOD 2: If not found by ID, extract parent name from subtask content
     if (!parentTask) {
-      console.log(`⚠️ Parent ${parentId} not found in today's tasks`);
-      return;
+      const originMatch = subtask.content.match(/\(origin:\s*([^)]+)\)/i);
+      if (originMatch && originMatch[1]) {
+        const originParentName = extractCleanTaskName(originMatch[1]);
+        console.log(`🔍 Trying to find parent by name from origin marker: "${originParentName}"`);
+        
+        parentTask = todayTasks.find(t => {
+          if (t.origin_task) return false; // Skip subtasks
+          const cleanName = extractCleanTaskName(t.content);
+          return cleanName === originParentName;
+        });
+      }
     }
 
-    // Check if parent is already completed
-    if (parentTask.status === 'done') {
-      console.log(`✅ Parent "${parentTask.content}" already completed - skipping`);
+    if (!parentTask) {
+      console.log(`⚠️ Parent task not found for subtask ${subtaskId}`);
       return;
     }
 
     const parentCleanName = extractCleanTaskName(parentTask.content);
     console.log(`📋 Checking parent: "${parentCleanName}"`);
 
-    // Get ALL subtasks for this parent (completed from DB)
+    // Already completed?
+    if (parentTask.status === 'done') {
+      console.log(`✅ Parent already completed - skipping`);
+      return;
+    }
+
+    // ✅ CRITICAL: Get ALL subtasks by PARENT CLEAN NAME (not ID!)
     const completedSubtasks = todayTasks.filter(t => {
       if (!t.origin_task) return false;
+      
+      // Check if content has origin marker with matching parent name
+      const originMatch = t.content.match(/\(origin:\s*([^)]+)\)/i);
+      if (originMatch && originMatch[1]) {
+        const originParentName = extractCleanTaskName(originMatch[1]);
+        return originParentName === parentCleanName;
+      }
+      
+      // Fallback: match by origin_task ID
       const originBase = t.origin_task.split('_')[0];
       return originBase === parentBaseId && t.status === 'done';
     });
 
-    // Get failed subtasks from JSON (by parent name)
+    // Get failed subtasks from JSON by parent NAME
     const dailyFailures = await getDailyFailures(db, egyptDate);
     const failedSubtasks = dailyFailures?.failed_tasks.filter(f => {
       if (!f.is_subtask || !f.parent_content) return false;
@@ -218,13 +242,13 @@ export async function completeParentInTodoistIfAllDone(
     console.log(`   Failed: ${failedSubtasks.length}`);
     console.log(`   Total: ${totalSubtasks}`);
 
-    // If no subtasks or has failed subtasks, don't complete
+    // Don't complete if no subtasks or has failures
     if (totalSubtasks === 0 || failedSubtasks.length > 0) {
-      console.log(`⚠️ Not autocompleting (${failedSubtasks.length} failed subtasks)`);
+      console.log(`⚠️ Not autocompleting (${failedSubtasks.length} failed)`);
       return;
     }
 
-    // All subtasks completed - autocomplete parent in Todoist
+    // All subtasks done - autocomplete!
     console.log(`✅ All ${totalSubtasks} subtasks done - autocompleting parent`);
     
     const todoistToken = await settings.get('todoist_api_token');
@@ -233,7 +257,6 @@ export async function completeParentInTodoistIfAllDone(
       return;
     }
 
-    // Get the original Todoist task ID (without timestamp suffix)
     const originalTaskId = parentTask.task_id?.split('_')[0];
     if (!originalTaskId) {
       console.error('❌ No valid parent task ID');
@@ -244,16 +267,14 @@ export async function completeParentInTodoistIfAllDone(
       `https://api.todoist.com/rest/v3/tasks/${originalTaskId}/close`,
       {
         method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${todoistToken.trim()}`,
-        },
+        headers: { 'Authorization': `Bearer ${todoistToken.trim()}` },
       }
     );
 
     if (response.ok) {
-      console.log(`🎉 Parent task ${originalTaskId} autocompleted in Todoist!`);
+      console.log(`🎉 Parent ${originalTaskId} autocompleted!`);
       
-      // Update parent status in database
+      // Update status in DB
       await db.update(
         'tasks',
         { id: op.eq(parentTask.id as string) },
@@ -261,7 +282,7 @@ export async function completeParentInTodoistIfAllDone(
       );
     } else {
       const errorText = await response.text();
-      console.error(`❌ Failed to autocomplete parent: ${response.status} ${errorText}`);
+      console.error(`❌ Autocomplete failed: ${response.status} ${errorText}`);
     }
 
   } catch (error) {
@@ -451,15 +472,6 @@ export async function handleTodoistWebhook(
     console.error('❌ Error checking pending update:', err);
   }
 
-  // NOW check for duplicates using the final task content (with updated duration/quantity)
-  if (!isRecurring) {
-    const isDuplicate = await checkDuplicate(db, event.event_data.id, taskContent, completedAt.toISOString());
-    if (isDuplicate) {
-      console.log('⚠️ Duplicate task detected - skipping save');
-      return { success: true, message: 'Duplicate task ignored' };
-    }
-  }
-
   const metadata = parseTaskMetadata(taskContent);
   console.log('📊 Parsed metadata:', metadata);
 
@@ -525,8 +537,52 @@ export async function handleTodoistWebhook(
   }
 
   try {
-    let savedTask: Task | undefined;
+  let savedTask: Task | undefined;
 
+  // ✅ NEW: Check if we should replace an existing task instead of inserting
+  const shouldReplace = await replaceDuplicateIfExists(
+    db,
+    event.event_data.id,
+    taskContent,
+    completedAt,
+    {
+      duration_minutes: timerDuration || metadata.duration_minutes || 0,
+      quantity: metadata.quantity,
+      quantity_unit: metadata.quantity_unit,
+      category: category,
+      priority: event.event_data.priority,
+      description: event.event_data.description,
+      status: 'done',
+    }
+  );
+
+  if (shouldReplace) {
+    console.log('✅ Task replaced instead of duplicated');
+    
+    // Get the updated task
+    const updatedTasks = await db.select<Task>('tasks', {});
+    savedTask = updatedTasks.find(t => {
+      const taskCleanName = extractCleanTaskName(t.content);
+      const searchCleanName = extractCleanTaskName(taskContent);
+      return taskCleanName === searchCleanName;
+    });
+
+    if (!savedTask) {
+      throw new Error('Could not find replaced task');
+    }
+    
+    // Update streak for recurring tasks
+    if (isRecurring) {
+      await updateStreakFromDueDate(
+        db,
+        task.content,
+        completedAt,
+        event.event_data.due?.string || '',
+        isSubtask
+      );
+    }
+  } else {
+    // No duplicate found - insert as new task
     if (isRecurring && !isSubtask) {
       const uniqueTaskId = `${event.event_data.id}_${completedAt.getTime()}`;
 
@@ -542,7 +598,7 @@ export async function handleTodoistWebhook(
       await updateStreakFromDueDate(
         db,
         task.content,
-        completedAt, // ✅ Date object
+        completedAt,
         event.event_data.due?.string || '',
         isSubtask
       );
@@ -563,7 +619,7 @@ export async function handleTodoistWebhook(
       await updateStreakFromDueDate(
         db,
         task.content,
-        completedAt, // ✅ Date object
+        completedAt,
         event.event_data.due?.string || '',
         isSubtask
       );
@@ -576,51 +632,53 @@ export async function handleTodoistWebhook(
       });
       savedTask = inserted[0];
     }
-
-    if (isSubtask && event.event_data.parent_id) {
-  console.log('🔗 Updating parent task status...');
-  
-  const { withLock } = await import('../utils/locks');
-  const lockKey = `parent_update_${event.event_data.parent_id}`;
-  
-  await withLock(db, lockKey, async () => {
-    await updateParentTaskStatus(db, event.event_data.parent_id!);
-    await completeParentInTodoistIfAllDone(db, settings, event.event_data.parent_id!, egyptDate);
-  });
-}
-
-    if (!savedTask) {
-      throw new Error('Failed to save task - no data returned');
-    }
-
-    console.log('✅ Task saved successfully');
-
-    // ✅ FIX: Await sync so notification has updated failure data
-    console.log('🔄 Syncing failures from Todoist...');
-    try {
-      await syncFailuresFromTodoist(egyptDate, db, settings);
-      console.log(`✅ Sync complete - failures updated in JSON`);
-    } catch (err) {
-      console.error('❌ Sync failed (non-critical):', err);
-    }
-
-    return {
-      success: true,
-      message: `Task completed: ${task.content}`,
-      task: savedTask,
-    };
-  } catch (error) {
-    console.error('❌ Failed to save task:', error);
-    logError(error as Error, {
-      operation: 'handleTodoistWebhook',
-      additionalInfo: { 
-        taskId: task.task_id, 
-        isRecurring,
-        completedAt: completedAt.toISOString()
-      },
-    });
-    throw error;
   }
+
+  // Update parent status if this is a subtask
+  if (isSubtask && event.event_data.parent_id) {
+    console.log('🔗 Updating parent task status...');
+    
+    const { withLock } = await import('../utils/locks');
+    const lockKey = `parent_update_${event.event_data.parent_id}`;
+    
+    await withLock(db, lockKey, async () => {
+      await updateParentTaskStatus(db, event.event_data.parent_id!);
+      await completeParentInTodoistIfAllDone(db, settings, event.event_data.parent_id!, egyptDate);
+    });
+  }
+
+  if (!savedTask) {
+    throw new Error('Failed to save task - no data returned');
+  }
+
+  console.log('✅ Task saved successfully');
+
+  // ✅ FIX: Await sync so notification has updated failure data
+  console.log('🔄 Syncing failures from Todoist...');
+  try {
+    await syncFailuresFromTodoist(egyptDate, db, settings);
+    console.log(`✅ Sync complete - failures updated in JSON`);
+  } catch (err) {
+    console.error('❌ Sync failed (non-critical):', err);
+  }
+
+  return {
+    success: true,
+    message: `Task completed: ${task.content}`,
+    task: savedTask,
+  };
+} catch (error) {
+  console.error('❌ Failed to save task:', error);
+  logError(error as Error, {
+    operation: 'handleTodoistWebhook',
+    additionalInfo: { 
+      taskId: task.task_id, 
+      isRecurring,
+      completedAt: completedAt.toISOString()
+    },
+  });
+  throw error;
+}
 }
 
 /**
@@ -891,52 +949,108 @@ function extractWeeklyPattern(dueString: string): string | undefined {
 
 async function checkDuplicate(
   db: SupabaseClient,
-  taskId: string,
   taskContent: string,
   completedAt: string
 ): Promise<boolean> {
   try {
     const completedDate = new Date(completedAt);
-    const windowStart = new Date(completedDate.getTime() - 20 * 60 * 1000);
-    const windowEnd = new Date(completedDate.getTime() + 20 * 60 * 1000);
+    const egyptDate = getEgyptDateString(completedDate);
+    const { start, end } = getEgyptDayBoundaries(egyptDate);
 
-    // Get clean task name for matching (remove all [...] parameters)
+    // ✅ Use clean name for matching
     const cleanName = extractCleanTaskName(taskContent);
-    console.log('🔍 Checking duplicate for clean name:', cleanName);
+    console.log('🔍 Duplicate check for:', cleanName, 'on', egyptDate);
 
-    // Get all tasks in the time window
-    const recentTasks = await db.select<{ id: number; task_id: string; content: string; completed_at: string }>('tasks', {
-      columns: 'id,task_id,content,completed_at',
-      filter: {
-        completed_at: op.gte(windowStart.toISOString()),
-      },
-      limit: 50,
+    // Get all tasks for this Egypt day
+    const allTasks = await db.select<Task>('tasks', {});
+    const todayTasks = allTasks.filter(t => {
+      const taskDate = new Date(t.completed_at);
+      return taskDate >= start && taskDate <= end;
     });
 
-    // Check for duplicates by CLEAN NAME (not task ID)
-    for (const existing of recentTasks) {
-      const existingCleanName = extractCleanTaskName(existing.content);
-      const existingDate = new Date(existing.completed_at);
+    // Check by clean name
+    const duplicate = todayTasks.find(t => {
+      const existingCleanName = extractCleanTaskName(t.content);
+      return existingCleanName === cleanName;
+    });
 
-      if (existingCleanName === cleanName && existingDate <= windowEnd) {
-        console.log('⚠️ Found duplicate by clean name:', existingCleanName, 'existing task_id:', existing.task_id);
-        return true;
-      }
-    }
-
-    // Also check by task ID (original logic)
-    const existingById = recentTasks.find(t => t.task_id === taskId);
-    if (existingById) {
-      const existingDate = new Date(existingById.completed_at);
-      if (existingDate <= windowEnd) {
-        console.log('⚠️ Found duplicate by task ID:', taskId);
-        return true;
-      }
+    if (duplicate) {
+      console.log(`⚠️ Duplicate found (will be replaced):`, duplicate.id);
+      // Note: We return false here because we'll handle replacement separately
+      // This prevents the INSERT attempt, and replaceDuplicateIfExists will UPDATE instead
+      return false; // Allow the replacement logic to run
     }
 
     return false;
   } catch (error) {
     console.error('Duplicate check failed:', error);
+    return false;
+  }
+}
+
+/**
+ * Replace duplicate task if same name completed on same day
+ * Returns true if a duplicate was found and replaced
+ */
+async function replaceDuplicateIfExists(
+  db: SupabaseClient,
+  taskId: string,
+  taskContent: string,
+  completedAt: Date,
+  newTaskData: Partial<Task>
+): Promise<boolean> {
+  try {
+    const egyptDate = getEgyptDateString(completedAt);
+    const { start, end } = getEgyptDayBoundaries(egyptDate);
+    
+    const cleanName = extractCleanTaskName(taskContent);
+    console.log('🔍 Checking for same-day duplicate to replace:', cleanName);
+
+    // Get all tasks for this day
+    const allTasks = await db.select<Task>('tasks', {});
+    const todayTasks = allTasks.filter(t => {
+      const taskDate = new Date(t.completed_at);
+      return taskDate >= start && taskDate <= end;
+    });
+
+    // Find existing task with same clean name
+    const existingTask = todayTasks.find(t => {
+      const existingCleanName = extractCleanTaskName(t.content);
+      return existingCleanName === cleanName;
+    });
+
+    if (!existingTask || !existingTask.id) {
+      console.log('No duplicate found - can insert as new');
+      return false;
+    }
+
+    console.log(`🔄 Found duplicate task from today: ${existingTask.id}`);
+    console.log(`   Old content: "${existingTask.content}"`);
+    console.log(`   New content: "${taskContent}"`);
+
+    // Replace the existing task with new data
+    await db.update(
+      'tasks',
+      { id: op.eq(existingTask.id) },
+      {
+        task_id: taskId, // Update with new task ID
+        content: taskContent, // Update content (may have new metadata)
+        completed_at: completedAt.toISOString(),
+        duration_minutes: newTaskData.duration_minutes || existingTask.duration_minutes,
+        quantity: newTaskData.quantity || existingTask.quantity,
+        quantity_unit: newTaskData.quantity_unit || existingTask.quantity_unit,
+        category: newTaskData.category || existingTask.category,
+        priority: newTaskData.priority || existingTask.priority,
+        description: newTaskData.description || existingTask.description,
+        status: newTaskData.status || existingTask.status,
+      }
+    );
+
+    console.log('✅ Replaced duplicate task with updated data');
+    return true;
+
+  } catch (error) {
+    console.error('Error checking/replacing duplicate:', error);
     return false;
   }
 }

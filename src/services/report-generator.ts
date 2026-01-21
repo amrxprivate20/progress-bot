@@ -695,94 +695,80 @@ private async checkChallengeCompletion(
     }
 
     // ===============================================================================
-    // Step 3: Group completed subtasks by parent NAME (not ID!)
-    // ===============================================================================
-    const completedSubtasksByParentName = new Map<string, Task[]>();
-    const processedSubtasks = new Set<string>();
+// Step 3: Group completed subtasks by parent NAME - SIMPLIFIED
+// ===============================================================================
+const completedSubtasksByParentName = new Map<string, Task[]>();
+const processedSubtasks = new Set<string>();
 
-    // ✅ NEW APPROACH: Extract parent name from task content, not from ID lookup
-    for (const task of data.tasks) {
-      if (!task.origin_task || !task.task_id) continue;  // Not a subtask or missing ID
+for (const task of data.tasks) {
+  if (!task.origin_task || !task.task_id) continue;
+  
+  const cleanSubtaskName = extractCleanTaskName(task.content);
+  console.log(`🔍 Processing completed subtask: "${cleanSubtaskName}"`);
+  
+  // ✅ PRIORITY 1: Check for origin marker in content
+  const originMatch = task.content.match(/\(origin:\s*([^)]+)\)/i);
+  if (originMatch && originMatch[1]) {
+    const parentName = extractCleanTaskName(originMatch[1]);
+    console.log(`   📌 Origin marker found: "${parentName}"`);
+    
+    if (!completedSubtasksByParentName.has(parentName)) {
+      completedSubtasksByParentName.set(parentName, []);
+    }
+    completedSubtasksByParentName.get(parentName)!.push(task);
+    processedSubtasks.add(task.task_id);
+    console.log(`   ✓ Grouped under: "${parentName}"`);
+    continue;
+  }
+  
+  // ✅ PRIORITY 2: Try to find parent by origin_task ID
+  const parentId = task.origin_task;
+  const parentBaseId = parentId.split('_')[0];
+  
+  const parentTask = data.tasks.find(t => {
+    if (!t.task_id || t.origin_task) return false; // Must be main task
+    const baseId = t.task_id.split('_')[0];
+    return baseId === parentBaseId;
+  });
+  
+  if (parentTask) {
+    const parentName = extractCleanTaskName(parentTask.content);
+    console.log(`   📌 Found parent by ID: "${parentName}"`);
+    
+    if (!completedSubtasksByParentName.has(parentName)) {
+      completedSubtasksByParentName.set(parentName, []);
+    }
+    completedSubtasksByParentName.get(parentName)!.push(task);
+    processedSubtasks.add(task.task_id);
+    console.log(`   ✓ Grouped under: "${parentName}"`);
+    continue;
+  }
+  
+  // ✅ PRIORITY 3: Check if subtask matches a failed parent name
+  if (data.failedTasksJson) {
+    for (const [parentName, failedSubs] of failedSubtasksByParentName.entries()) {
+      const matchingFailedSub = failedSubs.find(fs => 
+        extractCleanTaskName(fs.content) === cleanSubtaskName
+      );
       
-      const cleanSubtaskName = extractCleanTaskName(task.content);
-      
-      console.log(`🔍 Processing completed subtask: "${cleanSubtaskName}"`);
-      
-      // ✅ METHOD 1: Check if task content has origin marker like "(origin: ParentName)"
-      const originMatch = task.content.match(/\(origin:\s*([^)]+)\)/i);
-      if (originMatch && originMatch[1]) {
-        const originParentName = extractCleanTaskName(originMatch[1]);
-        console.log(`   📌 Found origin marker: "${originParentName}"`);
+      if (matchingFailedSub) {
+        console.log(`   📌 Matched via failed subtasks: "${parentName}"`);
         
-        if (!completedSubtasksByParentName.has(originParentName)) {
-          completedSubtasksByParentName.set(originParentName, []);
+        if (!completedSubtasksByParentName.has(parentName)) {
+          completedSubtasksByParentName.set(parentName, []);
         }
-        completedSubtasksByParentName.get(originParentName)!.push(task);
+        completedSubtasksByParentName.get(parentName)!.push(task);
         processedSubtasks.add(task.task_id);
-        
-        console.log(`   ✓ Grouped under parent name: "${originParentName}"`);
-        continue;
-      }
-      
-      // ✅ METHOD 2: STRICT - Only group if we find exact parent match in failed subtasks
-      // (This means we rely on failedTasksJson having correct parent_content)
-      let foundParent = false;
-      
-      // Check if this subtask appears in failed subtasks JSON with a parent name
-      if (data.failedTasksJson) {
-        for (const [parentName, failedSubs] of failedSubtasksByParentName.entries()) {
-          // Check if any failed subtask with this parent has the same clean name
-          const matchingFailedSub = failedSubs.find(fs => 
-            extractCleanTaskName(fs.content) === cleanSubtaskName
-          );
-          
-          if (matchingFailedSub) {
-            console.log(`   📌 Found same subtask in failed list under parent: "${parentName}"`);
-            
-            if (!completedSubtasksByParentName.has(parentName)) {
-              completedSubtasksByParentName.set(parentName, []);
-            }
-            completedSubtasksByParentName.get(parentName)!.push(task);
-            processedSubtasks.add(task.task_id);
-            foundParent = true;
-            
-            console.log(`   ✓ Grouped under parent name: "${parentName}"`);
-            break;
-          }
-        }
-      }
-      
-      // If still not found, try to match by exact first word
-      if (!foundParent) {
-        const subtaskFirstWord = cleanSubtaskName.split(' ')[0]?.toLowerCase();
-        
-        if (subtaskFirstWord && subtaskFirstWord.length > 3) { // At least 4 characters
-          for (const [parentName] of tasksByName.entries()) {
-            const parentFirstWord = parentName.split(' ')[0]?.toLowerCase();
-            
-            // Only match if first words are EXACTLY the same and > 3 chars
-            if (parentFirstWord === subtaskFirstWord) {
-              console.log(`   📌 Matched by exact first word: "${parentName}"`);
-              
-              if (!completedSubtasksByParentName.has(parentName)) {
-                completedSubtasksByParentName.set(parentName, []);
-              }
-              completedSubtasksByParentName.get(parentName)!.push(task);
-              processedSubtasks.add(task.task_id);
-              foundParent = true;
-              
-              console.log(`   ✓ Grouped under parent name: "${parentName}"`);
-              break;
-            }
-          }
-        }
-      }
-      
-      if (!foundParent) {
-        console.log(`   ⚠️ Could not match subtask to any parent by name`);
+        console.log(`   ✓ Grouped under: "${parentName}"`);
+        break;
       }
     }
-
+  }
+  
+  if (!processedSubtasks.has(task.task_id)) {
+    console.log(`   ⚠️ Could not match subtask to parent`);
+  }
+}
     console.log('\n📊 Grouping Summary:');
     console.log(`   Completed main tasks: ${tasksByName.size}`);
     console.log(`   Completed subtasks grouped: ${processedSubtasks.size}`);

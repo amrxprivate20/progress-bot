@@ -20,7 +20,7 @@ import { createJournalManager } from '../services/journal';
 import { createGoalsManager } from '../services/goals-manager';
 // createTaskGeneratorService is now used only in Durable Object
 import { createMediaStorageService } from '../services/supabase-storage';
-import { getTodayInEgypt, getYesterdayInEgypt } from '../utils/timezone';
+import { getTodayInEgypt, getYesterdayInEgypt, getEgyptDayBoundaries } from '../utils/timezone';
 import { handleConfirmCommand } from './confirm-handler';
 import { syncFailuresFromTodoist, completeParentInTodoistIfAllDone } from '../handlers/todoist';
 
@@ -644,33 +644,108 @@ bot.command('cancel', async (ctx) => {
   }
 });
 
-  // NEW: Log failure command
-  bot.command('log_failure', async (ctx) => {
+  // NEW: Log failure command - Lists tasks or creates new failure
+bot.command('log_failure', async (ctx) => {
+  await withCommandLock(ctx, '/log_failure', async () => {
     try {
-      await ctx.reply(
-        '📝 **تسجيل مهمة فاشلة**\n\n' +
-        'أرسل اسم المهمة التي فشلت في إنجازها:\n' +
-        'مثال: "قراءة كتاب"\n\n' +
-        'أو استخدم /cancel للإلغاء'
-      );
-
-      // Store state
       const chatId = ctx.chat?.id.toString() || '';
       
-      await ctx.db.insert('conversation_state', {
-        chat_id: chatId,
-        conversation_type: 'log_failure',
-        current_step: 0,
-        total_steps: 1,
-        data: {},
-        expires_at: new Date(Date.now() + 10 * 60 * 1000).toISOString(),
+      await ctx.reply('🔄 جاري تحميل المهام...');
+
+      // Get Todoist credentials
+      const todoistToken = await ctx.settings.get('todoist_api_token');
+      const todoistProjectId = await ctx.settings.get('todoist_project_id');
+
+      if (!todoistToken || !todoistProjectId) {
+        await ctx.reply('❌ Todoist غير مكون بشكل صحيح');
+        return;
+      }
+
+      // Get today's date in Egypt
+      const today = getTodayInEgypt();
+      const todayDate = new Date(today + 'T00:00:00Z');
+
+      // Fetch all tasks from Todoist project
+      const response = await fetch(
+        `https://api.todoist.com/rest/v3/tasks?project_id=${todoistProjectId.trim()}`,
+        {
+          headers: { 
+            'Authorization': `Bearer ${todoistToken.trim()}`,
+          },
+        }
+      );
+
+      if (!response.ok) {
+        const error = await response.text();
+        await ctx.reply(`❌ فشل الاتصال بـ Todoist: ${response.status}\n${error.substring(0, 100)}`);
+        return;
+      }
+
+      const allTasks = await response.json() as Array<{
+        id: string;
+        content: string;
+        due?: { date: string; is_recurring: boolean };
+        is_completed?: boolean;
+      }>;
+
+      // Filter to tasks available today (due today or overdue, not completed)
+      const availableToday = allTasks.filter(t => {
+        if (t.is_completed) return false;
+        if (!t.due?.date) return true; // Tasks without due date
+        
+        const dueDateStr = t.due.date.split('T')[0];
+        if (!dueDateStr) return false;
+        
+        const taskDueDate = new Date(dueDateStr + 'T00:00:00Z');
+        return taskDueDate <= todayDate;
       });
+
+      if (availableToday.length === 0) {
+        await ctx.reply(
+          '📋 لا توجد مهام متاحة اليوم في Todoist.\n\n' +
+          '📝 يمكنك كتابة اسم مهمة جديدة:\n' +
+          '/log_failure [اسم المهمة]'
+        );
+        return;
+      }
+
+      // Show list with "Add new task" option
+      let message = '📋 **المهام المتاحة:**\n\n';
+      
+      availableToday.forEach((t, i) => {
+        message += `${i + 1}. ${t.content}\n`;
+      });
+      
+      message += `\n0. ➕ إضافة مهمة جديدة\n\n`;
+      message += `🔢 أرسل رقم المهمة أو اسم المهمة الجديدة:`;
+
+      // Store available tasks for selection
+      const selectKey = `failure_select_${chatId}`;
+      
+      // Delete any existing selection state
+      try {
+        await ctx.db.delete('conversation_state', { chat_id: op.eq(selectKey) });
+      } catch (e) { /* ignore */ }
+      
+      // Create new selection state
+      await ctx.db.insert('conversation_state', {
+        chat_id: selectKey,
+        conversation_type: 'failure_selection',
+        data: {
+          availableTasks: availableToday,
+          allowNewTask: true,
+        },
+        expires_at: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
+      });
+
+      await ctx.reply(message, { parse_mode: 'Markdown' });
 
     } catch (error) {
       console.error('Log failure error:', error);
-      await ctx.reply('❌ حدث خطأ. حاول مرة أخرى.');
+      await ctx.reply('❌ حدث خطأ: ' + (error instanceof Error ? error.message : 'Unknown'));
     }
   });
+});
 
   // Memory command
   bot.command('memory', async (ctx) => {
@@ -1384,7 +1459,7 @@ bot.command(['completetask', 'complete_task'], async (ctx) => {
       return;
     }
 
-    // Calculate duration (use manual if set, otherwise calculate)
+        // Calculate duration (use manual if set, otherwise calculate)
     let durationMinutes: number;
     if (manualDuration) {
       durationMinutes = manualDuration;
@@ -1394,10 +1469,34 @@ bot.command(['completetask', 'complete_task'], async (ctx) => {
       durationMinutes = Math.round(durationMs / 60000);
     }
 
-    // Build task name with metadata
+    // Import utilities
     const { extractCleanTaskName } = await import('../utils/task-parser');
-    const cleanTaskName = extractCleanTaskName(taskName);
+    const { getEgyptDayBoundaries } = await import('../utils/timezone');
 
+    // ✅ Check if this task was already completed today
+    const cleanName = extractCleanTaskName(taskName);
+    const { start, end } = getEgyptDayBoundaries(startDate);
+
+    const allTasks = await ctx.db.select('tasks', {});
+    const todayTasks = allTasks.filter((t: any) => {
+      const taskDate = new Date(t.completed_at);
+      return taskDate >= start && taskDate <= end;
+    });
+
+    const existingCompletion = todayTasks.find((t: any) => {
+      const existingCleanName = extractCleanTaskName(t.content);
+      return existingCleanName === cleanName;
+    });
+
+    if (existingCompletion) {
+      console.log(`🔄 Task already completed today - will replace`);
+      await ctx.reply(
+        `⚠️ تنبيه: تم إكمال هذه المهمة بالفعل اليوم.\n` +
+        `سيتم تحديث البيانات بدلاً من التكرار.`
+      );
+    }
+
+    // Build task name with metadata
     // Format duration
     let durationStr: string;
     if (durationMinutes < 60) {
@@ -1409,7 +1508,7 @@ bot.command(['completetask', 'complete_task'], async (ctx) => {
     }
 
     // Build final task name
-    let updatedTaskName = `${cleanTaskName} [${durationStr}]`;
+    let updatedTaskName = `${cleanName} [${durationStr}]`;
     if (manualQuantity && manualQuantityUnit) {
       updatedTaskName += ` [${manualQuantity} ${manualQuantityUnit}]`;
     }
@@ -1866,11 +1965,201 @@ bot.command(['completetask', 'complete_task'], async (ctx) => {
     }
   });
 
+/**
+ * Process a task failure - log to DB and handle Todoist (postpone or delete)
+ */
+async function processTaskFailure(
+  ctx: BotContext,
+  todoistTaskId: string | null,
+  taskName: string,
+  due?: { date: string; is_recurring: boolean } | null
+): Promise<void> {
+  try {
+    const today = getTodayInEgypt();
+    
+    // Log failure to database
+    await ctx.db.insert('tasks', {
+      task_id: todoistTaskId || `manual_fail_${Date.now()}`,
+      content: taskName,
+      completed_at: new Date(`${today}T23:59:59+02:00`).toISOString(),
+      status: 'failed',
+      duration_minutes: 0,
+      created_at: new Date().toISOString(),
+    });
+
+    console.log(`✅ Logged failure: ${taskName}`);
+
+    // If no Todoist task ID, just confirm
+    if (!todoistTaskId) {
+      await ctx.reply(
+        `✅ تم تسجيل المهمة الفاشلة:\n` +
+        `❌ ${taskName}\n\n` +
+        `ستظهر في تقرير اليوم`
+      );
+      return;
+    }
+
+    // Handle Todoist task
+    const todoistToken = await ctx.settings.get('todoist_api_token');
+    if (!todoistToken) {
+      await ctx.reply(
+        `✅ تم تسجيل الفشل محلياً:\n` +
+        `❌ ${taskName}\n\n` +
+        `(لم يتم التعامل مع Todoist - لا يوجد token)`
+      );
+      return;
+    }
+
+    const isRecurring = due?.is_recurring || false;
+
+    if (isRecurring) {
+      // Recurring task - postpone to next occurrence
+      console.log(`🔄 Recurring task - postponing to next due date`);
+      
+      // Todoist automatically moves recurring tasks to next date when you complete them
+      // So we just close it and it will reappear on next due date
+      const closeResponse = await fetch(
+        `https://api.todoist.com/rest/v3/tasks/${todoistTaskId}/close`,
+        {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${todoistToken.trim()}` },
+        }
+      );
+
+      if (closeResponse.ok) {
+        await ctx.reply(
+          `✅ تم تسجيل الفشل وتأجيل المهمة:\n` +
+          `❌ ${taskName}\n\n` +
+          `📅 ستظهر المهمة في الموعد التالي`
+        );
+      } else {
+        const error = await closeResponse.text();
+        console.error('Failed to postpone task:', error);
+        await ctx.reply(
+          `✅ تم تسجيل الفشل محلياً:\n` +
+          `❌ ${taskName}\n\n` +
+          `⚠️ فشل تأجيل المهمة في Todoist`
+        );
+      }
+    } else {
+      // Non-recurring task - delete it
+      console.log(`🗑️ Non-recurring task - deleting from Todoist`);
+      
+      const deleteResponse = await fetch(
+        `https://api.todoist.com/rest/v3/tasks/${todoistTaskId}`,
+        {
+          method: 'DELETE',
+          headers: { 'Authorization': `Bearer ${todoistToken.trim()}` },
+        }
+      );
+
+      if (deleteResponse.ok) {
+        await ctx.reply(
+          `✅ تم تسجيل الفشل وحذف المهمة:\n` +
+          `❌ ${taskName}\n\n` +
+          `🗑️ تم حذف المهمة من Todoist`
+        );
+      } else {
+        const error = await deleteResponse.text();
+        console.error('Failed to delete task:', error);
+        await ctx.reply(
+          `✅ تم تسجيل الفشل محلياً:\n` +
+          `❌ ${taskName}\n\n` +
+          `⚠️ فشل حذف المهمة من Todoist`
+        );
+      }
+    }
+
+    // Sync failures to update JSON
+    await syncFailuresFromTodoist(today, ctx.db, ctx.settings);
+
+  } catch (error) {
+    console.error('Error processing task failure:', error);
+    await ctx.reply('❌ حدث خطأ أثناء معالجة الفشل: ' + (error instanceof Error ? error.message : 'Unknown'));
+  }
+}
+
   // Handle text messages (for Q&A flow, log_failure, task quantity, and journal)
   bot.on('message:text', async (ctx) => {
     try {
       const chatId = ctx.chat?.id.toString() || '';
       const text = ctx.message?.text || '';
+
+// Handle failure selection
+const failureSelectKey = `failure_select_${chatId}`;
+const pendingFailureSelect = await ctx.db.select('conversation_state', {
+  filter: { chat_id: op.eq(failureSelectKey) },
+});
+
+if (pendingFailureSelect.length > 0) {
+  const selectionData = (pendingFailureSelect[0] as any).data || {};
+  const availableTasks = selectionData.availableTasks as Array<{
+    id: string;
+    content: string;
+    due?: { date: string; is_recurring: boolean };
+  }> || [];
+
+  // Delete selection state
+  await ctx.db.delete('conversation_state', { chat_id: op.eq(failureSelectKey) });
+
+  // Parse selection
+  const selection = parseInt(text.trim(), 10);
+
+  // Check if user wants to add new task (0)
+  if (selection === 0) {
+    await ctx.reply(
+      '📝 **إضافة مهمة فاشلة جديدة**\n\n' +
+      'أرسل اسم المهمة التي فشلت في إنجازها:\n' +
+      'أو /cancel للإلغاء'
+    );
+
+    // Store state for new task name input
+    await ctx.db.insert('conversation_state', {
+      chat_id: `failure_new_task_${chatId}`,
+      conversation_type: 'failure_new_task_input',
+      data: {},
+      expires_at: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
+    });
+    return;
+  }
+
+  // Validate selection
+  if (isNaN(selection) || selection < 1 || selection > availableTasks.length) {
+    await ctx.reply(`❌ أدخل رقماً صحيحاً بين 0 و ${availableTasks.length}`);
+    return;
+  }
+
+  const selectedTask = availableTasks[selection - 1];
+  if (!selectedTask) {
+    await ctx.reply('❌ حدث خطأ. حاول مرة أخرى.');
+    return;
+  }
+
+  // Process the failure
+  await processTaskFailure(ctx, selectedTask.id, selectedTask.content, selectedTask.due);
+  return;
+}
+
+// Handle new failure task name input
+const failureNewTaskKey = `failure_new_task_${chatId}`;
+const pendingFailureNewTask = await ctx.db.select('conversation_state', {
+  filter: { chat_id: op.eq(failureNewTaskKey) },
+});
+
+if (pendingFailureNewTask.length > 0) {
+  await ctx.db.delete('conversation_state', { chat_id: op.eq(failureNewTaskKey) });
+
+  const taskName = text.trim();
+
+  if (!taskName || taskName.length === 0) {
+    await ctx.reply('⚠️ اسم المهمة مطلوب');
+    return;
+  }
+
+  // Log as failed task (no Todoist task to postpone/delete)
+  await processTaskFailure(ctx, null, taskName, null);
+  return;
+}
 
       // Skip if it's a command
       if (text.startsWith('/')) {
@@ -2379,35 +2668,6 @@ if (pendingQuantityInputState.length > 0) {
 
       if (!conversation) {
         return; // No active conversation
-      }
-
-      // Handle log_failure conversation
-      if (conversation.conversation_type === 'log_failure') {
-        const taskName = text;
-
-        if (!taskName || taskName.trim().length === 0) {
-          await ctx.reply('⚠️ اسم المهمة مطلوب');
-          return;
-        }
-
-        // Log as failed task
-        await ctx.db.insert('tasks', {
-          task_id: `manual_fail_${Date.now()}`,
-          content: taskName,
-          completed_at: new Date().toISOString(),
-          status: 'failed',
-          duration_minutes: 0,
-          created_at: new Date().toISOString(),
-        });
-
-        await conversationMgr.clearConversation(chatId);
-
-        await ctx.reply(
-          `✅ تم تسجيل المهمة الفاشلة:\n` +
-          `❌ ${taskName}\n\n` +
-          `ستظهر في تقرير اليوم`
-        );
-        return;
       }
 
       // Handle Q&A conversation
