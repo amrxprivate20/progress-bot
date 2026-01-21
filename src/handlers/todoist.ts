@@ -143,6 +143,7 @@ async function syncParentTaskFromTodoist(
 
 /**
  * Complete parent task in Todoist if all subtasks are done
+ * FIXED: Uses clean name matching for reliability
  */
 export async function completeParentInTodoistIfAllDone(
   db: SupabaseClient,
@@ -153,11 +154,18 @@ export async function completeParentInTodoistIfAllDone(
   try {
     console.log(`🔍 Checking if any parent should autocomplete after completing subtask ${taskId}...`);
     
-    // Get all completed tasks
+    // Get all completed tasks for today
+    const { start, end } = getEgyptDayBoundaries(egyptDate);
     const allTasks = await db.select<Task>('tasks', {});
+    const todayTasks = allTasks.filter(t => {
+      const taskDate = new Date(t.completed_at);
+      return taskDate >= start && taskDate <= end;
+    });
     
     // Find the completed subtask
-    const subtask = allTasks.find(t => t.task_id === taskId || t.task_id?.startsWith(taskId + '_'));
+    const subtask = todayTasks.find(t => 
+      t.task_id === taskId || t.task_id?.startsWith(taskId + '_')
+    );
     
     if (!subtask || !subtask.origin_task) {
       console.log('Not a subtask, skipping parent check');
@@ -168,13 +176,14 @@ export async function completeParentInTodoistIfAllDone(
     const parentId = subtask.origin_task;
     const parentBaseId = parentId.split('_')[0];
     
-    const parentTask = allTasks.find(t => {
+    // Find parent in TODAY's tasks
+    const parentTask = todayTasks.find(t => {
       const baseId = t.task_id?.split('_')[0];
       return baseId === parentBaseId || t.task_id === parentId;
     });
 
     if (!parentTask) {
-      console.log(`⚠️ Parent ${parentId} not found`);
+      console.log(`⚠️ Parent ${parentId} not found in today's tasks`);
       return;
     }
 
@@ -187,8 +196,8 @@ export async function completeParentInTodoistIfAllDone(
     const parentCleanName = extractCleanTaskName(parentTask.content);
     console.log(`📋 Checking parent: "${parentCleanName}"`);
 
-    // Get ALL subtasks for this parent (by name matching)
-    const completedSubtasks = allTasks.filter(t => {
+    // Get ALL subtasks for this parent (completed from DB)
+    const completedSubtasks = todayTasks.filter(t => {
       if (!t.origin_task) return false;
       const originBase = t.origin_task.split('_')[0];
       return originBase === parentBaseId && t.status === 'done';
@@ -259,7 +268,6 @@ export async function completeParentInTodoistIfAllDone(
     console.error('❌ Error in completeParentInTodoistIfAllDone:', error);
   }
 }
-
 
 /**
  * Main webhook handler
@@ -1013,17 +1021,8 @@ export async function syncFailuresFromTodoist(
 }
 
 /**
- * ✅ FIX 3: FIXED - NAME-BASED notification with ALL subtasks
- * 
- * WHAT CHANGED:
- * - Old: Matched failed subtasks by parent_id (IDs change daily!)
- * - New: Matches by parent_content (names are stable!)
- * 
- * HOW IT WORKS:
- * 1. Get main task (completed or parent)
- * 2. Get completed subtasks from DB (by origin_task relationship)
- * 3. Get failed subtasks from JSON BY MATCHING CLEAN NAMES ✅ NEW!
- * 4. Build notification with ALL subtasks
+ * Send task completion notification with proper hierarchy
+ * FIXED: Better parent-child matching and grouping
  */
 export async function sendTaskNotification(
   task: Task,
@@ -1032,37 +1031,52 @@ export async function sendTaskNotification(
   db: SupabaseClient
 ): Promise<void> {
   try {
-    console.log('📤 Sending notification to:', chatId);
-    console.log('📤 Building complete hierarchy...');
+    console.log('📤 Sending notification for task:', task.content);
     
-    let message = '';
-    let mainTask: Task | null = null;
-    let completedSubtasks: Task[] = [];
-    const failedSubtasks: FailedTask[] = [];
-
-    // ✅ FIX: Ensure we use Date object for Egypt date
     const completedAtDate = task.completed_at instanceof Date 
       ? task.completed_at 
       : new Date(task.completed_at);
     const egyptDate = getEgyptDateString(completedAtDate);
+    
+    // Get day boundaries to filter tasks
+    const { start, end } = getEgyptDayBoundaries(egyptDate);
+    
+    // Get all tasks for today
+    const allTasks = await db.select<Task>('tasks', {});
+    const todayTasks = allTasks.filter(t => {
+      const taskDate = new Date(t.completed_at);
+      return taskDate >= start && taskDate <= end;
+    });
+    
+    let mainTask: Task | null = null;
+    let completedSubtasks: Task[] = [];
+    let failedSubtasks: FailedTask[] = [];
 
-    // STEP 1: Determine parent task
+    // STEP 1: Determine the main (parent) task
     if (task.origin_task) {
+      // This is a subtask - find its parent
       console.log(`🔍 Subtask completed, finding parent: ${task.origin_task}`);
       
-      const allTasks = await db.select<Task>('tasks', {});
-      const parentTasks = allTasks.filter(t => 
-        t.task_id === task.origin_task || t.task_id?.startsWith(task.origin_task + '_')
-      );
+      const parentBaseId = task.origin_task.split('_')[0];
+      const parentCandidates = todayTasks.filter(t => {
+        if (!t.task_id) return false;
+        const baseId = t.task_id.split('_')[0];
+        return baseId === parentBaseId;
+      });
 
-      if (parentTasks.length > 0) {
-        mainTask = parentTasks.sort((a, b) => 
+      if (parentCandidates.length > 0) {
+        // Get most recent parent
+        mainTask = parentCandidates.sort((a, b) => 
           new Date(b.completed_at).getTime() - new Date(a.completed_at).getTime()
         )[0] || null;
         
-        console.log(`✅ Found parent in DB: ${mainTask?.content}`);
+        console.log(`✅ Found parent: ${mainTask?.content}`);
+      } else {
+        console.log(`⚠️ Parent not found, using subtask as main`);
+        mainTask = task;
       }
     } else {
+      // This is already a main task
       console.log(`📌 Main task completed: ${task.content}`);
       mainTask = task;
     }
@@ -1071,116 +1085,94 @@ export async function sendTaskNotification(
       mainTask = task;
     }
 
-    // STEP 2: Get completed subtasks from DATABASE - FILTERED BY DATE
-if (mainTask) {
-  const parentId = task.origin_task || task.task_id;
-  const parentBaseId = parentId.split('_')[0];
-  
-  const allTasks = await db.select<Task>('tasks', {});
-  completedSubtasks = allTasks.filter(t => {
-    if (!t.origin_task) return false;
-    const originBase = t.origin_task.split('_')[0];
+    const mainTaskCleanName = extractCleanTaskName(mainTask.content);
     
-    // ✅ NEW: Only include subtasks from the same Egypt date
-    const subtaskDate = getEgyptDateString(new Date(t.completed_at));
-    const mainTaskDate = getEgyptDateString(completedAtDate);
+    // STEP 2: Get all completed subtasks for this parent (from today's tasks)
+    const mainTaskBaseId = mainTask.task_id?.split('_')[0];
     
-    return originBase === parentBaseId && subtaskDate === mainTaskDate;
-  });
+    completedSubtasks = todayTasks.filter(t => {
+      if (!t.origin_task) return false;
       
-      console.log(`📋 Found ${completedSubtasks.length} completed subtasks in DB`);
-    }
+      // Match by origin_task ID
+      const originBase = t.origin_task.split('_')[0];
+      if (originBase === mainTaskBaseId) {
+        return true;
+      }
+      
+      // Also try matching by parent name in description (fallback)
+      if (t.description?.includes(`(parent: ${mainTaskCleanName})`)) {
+        return true;
+      }
+      
+      return false;
+    });
+    
+    console.log(`📋 Found ${completedSubtasks.length} completed subtasks`);
 
-   // ✅ STEP 3: Get failed subtasks from JSON - NAME-BASED MATCHING
-    if (mainTask) {
-      const parentId = mainTask.task_id;
-      const parentBaseId = parentId.split('_')[0];
+    // STEP 3: Get failed subtasks from JSON (by parent name)
+    try {
+      const dailyFailures = await getDailyFailures(db, egyptDate);
       
-      // ✅ NEW: Extract clean name for matching
-      const mainTaskCleanName = extractCleanTaskName(mainTask.content);
-      
-      console.log(`📊 Fetching failed subtasks for parent: "${mainTaskCleanName}"`);
-      console.log(`   (ID: ${parentId}, base: ${parentBaseId})`);
-      
-      try {
-        const dailyFailures = await getDailyFailures(db, egyptDate);
-        
-        if (dailyFailures) {
-          // ✅ NEW: Match by CLEAN NAME instead of ID
-          for (const failed of dailyFailures.failed_tasks) {
-            if (!failed.is_subtask || !failed.parent_content) continue;
-            
-            // Clean the parent name from JSON
-            const failedParentCleanName = extractCleanTaskName(failed.parent_content);
-            
-            // ✅ CRITICAL: Match by NAME, not ID!
-            if (failedParentCleanName === mainTaskCleanName) {
-              failedSubtasks.push(failed);
-              console.log(`  ✕ Matched failed subtask: ${failed.content}`);
-              console.log(`     (parent name: "${failedParentCleanName}" === "${mainTaskCleanName}" ✅)`);
-            }
+      if (dailyFailures) {
+        for (const failed of dailyFailures.failed_tasks) {
+          if (!failed.is_subtask || !failed.parent_content) continue;
+          
+          const failedParentCleanName = extractCleanTaskName(failed.parent_content);
+          
+          // Match by clean name
+          if (failedParentCleanName === mainTaskCleanName) {
+            failedSubtasks.push(failed);
+            console.log(`  ✕ Failed subtask: ${failed.content}`);
           }
         }
-        
-        console.log(`📊 Found ${failedSubtasks.length} failed subtasks`);
-        
-      } catch (error) {
-        console.error('❌ Error fetching failed subtasks:', error);
       }
+      
+      console.log(`📊 Found ${failedSubtasks.length} failed subtasks`);
+      
+    } catch (error) {
+      console.error('❌ Error fetching failed subtasks:', error);
     }
 
-    console.log(`📊 Summary: ${completedSubtasks.length} completed, ${failedSubtasks.length} failed`);
-
-    // STEP 4: Build notification message (unchanged)
+    // STEP 4: Build notification message
     const totalSubtasks = completedSubtasks.length + failedSubtasks.length;
-
-
-    // === SIMPLIFIED NOTIFICATION FORMAT ===
-    // Line 1: symbol + task name [duration] [quantity] [streak]
-    // Line 2: description (if any)
-    // Then: subtasks (if any)
-
-    const displayTask = mainTask;
+    
+    // Determine symbol
     const symbol = totalSubtasks === 0
       ? (mainTask.status === 'done' ? '✅' : '❌')
       : (failedSubtasks.length === 0 ? '✅' : (completedSubtasks.length === 0 ? '❌' : '⚠️'));
 
-    const cleanName = extractCleanTaskName(mainTask.content);
-
-    // Build first line: name + metadata inline
-    let firstLine = `${symbol} ${cleanName}`;
+    let message = `${symbol} ${mainTaskCleanName}`;
 
     // Add duration if present
-    if (displayTask.duration_minutes && displayTask.duration_minutes > 0) {
-      firstLine += ` [${formatArabicTime(displayTask.duration_minutes)}]`;
+    if (mainTask.duration_minutes && mainTask.duration_minutes > 0) {
+      message += ` [${formatArabicTime(mainTask.duration_minutes)}]`;
     }
 
     // Add quantity if present
-    if (displayTask.quantity && displayTask.quantity_unit) {
-      firstLine += ` [${displayTask.quantity} ${displayTask.quantity_unit}]`;
+    if (mainTask.quantity && mainTask.quantity_unit) {
+      message += ` [${mainTask.quantity} ${mainTask.quantity_unit}]`;
     }
 
     // Add streak if present
-    const cleanTaskNameForStreak = extractCleanTaskName(task.content);
-    const streakName = cleanTaskNameForStreak + (task.origin_task ? ' [subtask]' : '');
-    const streaks = await db.select('streaks', { filter: { task_name: op.eq(streakName) } });
+    const streakName = mainTaskCleanName + (task.origin_task ? ' [subtask]' : '');
+    const streaks = await db.select('streaks', { 
+      filter: { task_name: op.eq(streakName) } 
+    });
 
     if (streaks && streaks.length > 0) {
       const streak = streaks[0];
       if (streak.current_streak > 1) {
         const isRecord = streak.current_streak === streak.best_streak;
-        firstLine += ` [🔥${streak.current_streak}${isRecord ? '🎉' : ''}]`;
+        message += ` [🔥${streak.current_streak}${isRecord ? '🎉' : ''}]`;
       }
     }
 
-    message = firstLine;
-
-    // Line 2: description (if any)
-    if (displayTask.description) {
-      message += `\n📝 ${displayTask.description}`;
+    // Add description if present
+    if (mainTask.description && !mainTask.description.includes('(parent:')) {
+      message += `\n📝 ${mainTask.description}`;
     }
 
-    // Subtasks (if any)
+    // Add subtasks
     if (totalSubtasks > 0) {
       // Completed subtasks
       for (const sub of completedSubtasks) {
@@ -1201,11 +1193,13 @@ if (mainTask) {
 
     await sendTelegramMessage(botToken, chatId, message);
     console.log('✅ Notification sent successfully');
+    
   } catch (error) {
     console.error('❌ Error sending notification:', error);
     throw error;
   }
 }
+
 async function sendTelegramMessage(
   botToken: string,
   chatId: string,

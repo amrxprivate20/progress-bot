@@ -973,7 +973,6 @@ private async checkChallengeCompletion(
     return text;
   }
 }
-
 // ============================================
 // Factory Function
 // ============================================

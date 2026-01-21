@@ -2,8 +2,7 @@ There are few notes and fixes that need to be done, I will address them all, and
 General note: always rely on clean tasks names for matching, NEVER rely only tasks ID!
 due to usage limits send me the fixes and how to implement one by one.
    
-    - After making few code adjustments, now when I try /starttask or /sync there is an error about failing to connect to Todoist!
-    - the currently availble tasks list shown with /starttask don't need to write beside every task that this tasks is for (today), it is enough for this info to be included in the title of the message only, letting the tasks name to be clear!
+    - due to mutliple modifications in the code, now the autocomplete logic for parent task if there no remaing subtask to be completed, isnot working. Also the report task grouping is not good enough, as some completed subtasks are not shown and other are shown seperately, other completed subtasks are grouped with a simillar parent leaving their parent.   
     - /log_failure behavior: Acts like /completetask but logs a failure; if called without parameters list all available tasks plus “add new task”; when a task is selected or written register it as a failure, and if the task is recurring postpone it in Todoist to the next due date, if not recurring then delete it from Todoist.
     - If a task with the same name is completed more than once in the same day, then it should be replaced not duplicated!
     - /status command fix: Make /status functional so it shows the current task status and whether there is any pending or incomplete command flow awaiting user input.
