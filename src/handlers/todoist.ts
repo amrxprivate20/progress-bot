@@ -143,7 +143,7 @@ async function syncParentTaskFromTodoist(
 
 /**
  * Complete parent task in Todoist if all subtasks are done
- * FIXED: Uses ONLY clean name matching for reliability
+ * ✅ FIXED: Uses clean name matching for reliability
  */
 export async function completeParentInTodoistIfAllDone(
   db: SupabaseClient,
@@ -162,7 +162,7 @@ export async function completeParentInTodoistIfAllDone(
       return taskDate >= start && taskDate <= end;
     });
     
-    // Find the completed subtask by ID (could be timestamped)
+    // Find the completed subtask
     const subtask = todayTasks.find(t => 
       t.task_id === subtaskId || t.task_id?.startsWith(subtaskId + '_')
     );
@@ -172,38 +172,94 @@ export async function completeParentInTodoistIfAllDone(
       return;
     }
 
-    // ✅ METHOD 1: Try to find parent by origin_task reference
-    const parentId = subtask.origin_task;
-    const parentBaseId = parentId.split('_')[0];
-    
-    let parentTask = todayTasks.find(t => {
-      if (!t.task_id) return false;
-      const baseId = t.task_id.split('_')[0];
-      return baseId === parentBaseId || t.task_id === parentId;
-    });
+    // ✅ STEP 1: Find parent using multiple methods
+    let parentTask: Task | null = null;
+    let parentCleanName: string | null = null;
 
-    // ✅ METHOD 2: If not found by ID, extract parent name from subtask content
-    if (!parentTask) {
-      const originMatch = subtask.content.match(/\(origin:\s*([^)]+)\)/i);
-      if (originMatch && originMatch[1]) {
-        const originParentName = extractCleanTaskName(originMatch[1]);
-        console.log(`🔍 Trying to find parent by name from origin marker: "${originParentName}"`);
-        
-        parentTask = todayTasks.find(t => {
-          if (t.origin_task) return false; // Skip subtasks
-          const cleanName = extractCleanTaskName(t.content);
-          return cleanName === originParentName;
-        });
+    // Method 1: Extract parent name from subtask content (origin marker)
+    const originMatch = subtask.content.match(/\(origin:\s*([^)]+)\)/i);
+    if (originMatch && originMatch[1]) {
+      parentCleanName = extractCleanTaskName(originMatch[1]);
+      console.log(`📌 Parent name from origin marker: "${parentCleanName}"`);
+      
+      // Find parent by clean name
+      parentTask = todayTasks.find(t => {
+        if (t.origin_task) return false; // Skip subtasks
+        const cleanName = extractCleanTaskName(t.content);
+        return cleanName === parentCleanName;
+      }) ?? null;
+    }
+
+    // Method 2: Try origin_task ID if name match failed
+    if (!parentTask && subtask.origin_task) {
+      const parentId = subtask.origin_task;
+      const parentBaseId = parentId.split('_')[0];
+      
+      parentTask = todayTasks.find(t => {
+        if (!t.task_id || t.origin_task) return false;
+        const baseId = t.task_id.split('_')[0];
+        return baseId === parentBaseId || t.task_id === parentId;
+      }) ?? null;
+      
+      if (parentTask) {
+        parentCleanName = extractCleanTaskName(parentTask.content);
+        console.log(`📌 Found parent by ID: "${parentCleanName}"`);
       }
     }
 
-    if (!parentTask) {
+    // Method 3: Check failed tasks JSON for parent
+    if (!parentTask || !parentCleanName) {
+      const dailyFailures = await getDailyFailures(db, egyptDate);
+      
+      if (dailyFailures) {
+        // Check if this subtask exists in failed JSON with parent info
+        const failedMatch = dailyFailures.failed_tasks.find(f => 
+          f.is_subtask && 
+          f.id === subtaskId &&
+          f.parent_content
+        );
+        
+        if (failedMatch && failedMatch.parent_content) {
+          parentCleanName = extractCleanTaskName(failedMatch.parent_content);
+          console.log(`📌 Parent name from failed JSON: "${parentCleanName}"`);
+          
+          // Try to find parent in tasks OR create pseudo-parent from failed JSON
+          parentTask = todayTasks.find(t => {
+            if (t.origin_task) return false;
+            const cleanName = extractCleanTaskName(t.content);
+            return cleanName === parentCleanName;
+          }) ?? null;
+          
+          // If still not found, check if parent exists in failed JSON
+          if (!parentTask) {
+            const failedParent = dailyFailures.failed_tasks.find(f =>
+              !f.is_subtask && 
+              extractCleanTaskName(f.content) === parentCleanName
+            );
+            
+            if (failedParent) {
+              // Create pseudo-task for the failed parent
+              parentTask = {
+                task_id: failedParent.id,
+                content: failedParent.content,
+                completed_at: new Date(),
+                status: 'failed',
+                category: failedParent.category,
+                priority: failedParent.priority,
+              } as Task;
+              console.log(`📌 Using failed parent from JSON`);
+            }
+          }
+        }
+      }
+    }
+
+    if (!parentTask || !parentCleanName) {
       console.log(`⚠️ Parent task not found for subtask ${subtaskId}`);
       return;
     }
 
-    const parentCleanName = extractCleanTaskName(parentTask.content);
-    console.log(`📋 Checking parent: "${parentCleanName}"`);
+    console.log(`📋 Checking parent: "${parentCleanName}" (status: ${parentTask.status})`);
 
     // Already completed?
     if (parentTask.status === 'done') {
@@ -211,20 +267,18 @@ export async function completeParentInTodoistIfAllDone(
       return;
     }
 
-    // ✅ CRITICAL: Get ALL subtasks by PARENT CLEAN NAME (not ID!)
+    // ✅ STEP 2: Count ALL subtasks (completed + failed) by PARENT CLEAN NAME
     const completedSubtasks = todayTasks.filter(t => {
       if (!t.origin_task) return false;
       
-      // Check if content has origin marker with matching parent name
+      // Check origin marker first
       const originMatch = t.content.match(/\(origin:\s*([^)]+)\)/i);
       if (originMatch && originMatch[1]) {
         const originParentName = extractCleanTaskName(originMatch[1]);
-        return originParentName === parentCleanName;
+        return originParentName === parentCleanName && t.status === 'done';
       }
       
-      // Fallback: match by origin_task ID
-      const originBase = t.origin_task.split('_')[0];
-      return originBase === parentBaseId && t.status === 'done';
+      return false;
     });
 
     // Get failed subtasks from JSON by parent NAME
@@ -238,17 +292,22 @@ export async function completeParentInTodoistIfAllDone(
     const totalSubtasks = completedSubtasks.length + failedSubtasks.length;
 
     console.log(`📊 Parent "${parentCleanName}":`);
-    console.log(`   Completed: ${completedSubtasks.length}`);
-    console.log(`   Failed: ${failedSubtasks.length}`);
-    console.log(`   Total: ${totalSubtasks}`);
+    console.log(`   Completed subtasks: ${completedSubtasks.length}`);
+    console.log(`   Failed subtasks: ${failedSubtasks.length}`);
+    console.log(`   Total subtasks: ${totalSubtasks}`);
 
     // Don't complete if no subtasks or has failures
-    if (totalSubtasks === 0 || failedSubtasks.length > 0) {
-      console.log(`⚠️ Not autocompleting (${failedSubtasks.length} failed)`);
+    if (totalSubtasks === 0) {
+      console.log(`⚠️ No subtasks found - skipping autocomplete`);
       return;
     }
 
-    // All subtasks done - autocomplete!
+    if (failedSubtasks.length > 0) {
+      console.log(`⚠️ Not autocompleting - ${failedSubtasks.length} failed subtask(s)`);
+      return;
+    }
+
+    // ✅ STEP 3: All subtasks done - autocomplete parent!
     console.log(`✅ All ${totalSubtasks} subtasks done - autocompleting parent`);
     
     const todoistToken = await settings.get('todoist_api_token');
@@ -257,12 +316,14 @@ export async function completeParentInTodoistIfAllDone(
       return;
     }
 
+    // Get original task ID (without timestamp suffix)
     const originalTaskId = parentTask.task_id?.split('_')[0];
     if (!originalTaskId) {
       console.error('❌ No valid parent task ID');
       return;
     }
 
+    // Complete in Todoist
     const response = await fetch(
       `https://api.todoist.com/rest/v3/tasks/${originalTaskId}/close`,
       {
@@ -272,14 +333,17 @@ export async function completeParentInTodoistIfAllDone(
     );
 
     if (response.ok) {
-      console.log(`🎉 Parent ${originalTaskId} autocompleted!`);
+      console.log(`🎉 Parent ${originalTaskId} autocompleted in Todoist!`);
       
       // Update status in DB
-      await db.update(
-        'tasks',
-        { id: op.eq(parentTask.id as string) },
-        { status: 'done' }
-      );
+      if (parentTask.id) {
+        await db.update(
+          'tasks',
+          { id: op.eq(parentTask.id as string) },
+          { status: 'done' }
+        );
+        console.log(`✅ Updated parent status to 'done' in database`);
+      }
     } else {
       const errorText = await response.text();
       console.error(`❌ Autocomplete failed: ${response.status} ${errorText}`);
@@ -947,7 +1011,7 @@ function extractWeeklyPattern(dueString: string): string | undefined {
   return days.length > 0 ? days.sort().join(',') : undefined;
 }
 
-async function checkDuplicate(
+export async function checkDuplicate(
   db: SupabaseClient,
   taskContent: string,
   completedAt: string
@@ -1136,7 +1200,7 @@ export async function syncFailuresFromTodoist(
 
 /**
  * Send task completion notification with proper hierarchy
- * FIXED: Better parent-child matching and grouping
+ * ✅ FIXED: Uses clean name matching for reliable parent-child grouping
  */
 export async function sendTaskNotification(
   task: Task,
@@ -1162,60 +1226,83 @@ export async function sendTaskNotification(
       return taskDate >= start && taskDate <= end;
     });
     
-    let mainTask: Task | null = null;
+    let mainTask: Task;
+    let mainTaskCleanName: string;
     let completedSubtasks: Task[] = [];
     let failedSubtasks: FailedTask[] = [];
 
-    // STEP 1: Determine the main (parent) task
+    // ✅ STEP 1: Determine the main (parent) task
     if (task.origin_task) {
-      // This is a subtask - find its parent
-      console.log(`🔍 Subtask completed, finding parent: ${task.origin_task}`);
+      // This is a subtask - find its parent by NAME
+      console.log(`🔍 Subtask completed, finding parent...`);
       
-      const parentBaseId = task.origin_task.split('_')[0];
-      const parentCandidates = todayTasks.filter(t => {
-        if (!t.task_id) return false;
-        const baseId = t.task_id.split('_')[0];
-        return baseId === parentBaseId;
-      });
-
-      if (parentCandidates.length > 0) {
-        // Get most recent parent
-        mainTask = parentCandidates.sort((a, b) => 
-          new Date(b.completed_at).getTime() - new Date(a.completed_at).getTime()
-        )[0] || null;
+      let parentCleanName: string | null = null;
+      
+      // Method 1: Extract from origin marker
+      const originMatch = task.content.match(/\(origin:\s*([^)]+)\)/i);
+      if (originMatch && originMatch[1]) {
+        parentCleanName = extractCleanTaskName(originMatch[1]);
+        console.log(`  📌 Parent name from origin: "${parentCleanName}"`);
+      }
+      
+      // Method 2: Check failed JSON for sibling subtasks with parent info
+      if (!parentCleanName) {
+        const dailyFailures = await getDailyFailures(db, egyptDate);
+        if (dailyFailures) {
+          const taskCleanName = extractCleanTaskName(task.content);
+          const sibling = dailyFailures.failed_tasks.find(f =>
+            f.is_subtask &&
+            extractCleanTaskName(f.content) === taskCleanName &&
+            f.parent_content
+          );
+          
+          if (sibling && sibling.parent_content) {
+            parentCleanName = extractCleanTaskName(sibling.parent_content);
+            console.log(`  📌 Parent name from sibling: "${parentCleanName}"`);
+          }
+        }
+      }
+      
+      // Find parent in today's tasks
+      if (parentCleanName) {
+        const parentTask = todayTasks.find(t => {
+          if (t.origin_task) return false; // Skip subtasks
+          const cleanName = extractCleanTaskName(t.content);
+          return cleanName === parentCleanName;
+        });
         
-        console.log(`✅ Found parent: ${mainTask?.content}`);
+        if (parentTask) {
+          mainTask = parentTask;
+          mainTaskCleanName = parentCleanName;
+          console.log(`  ✅ Found parent: "${mainTaskCleanName}"`);
+        } else {
+          // Parent not found in completed tasks - use subtask as main
+          console.log(`  ⚠️ Parent not found, using subtask as main`);
+          mainTask = task;
+          mainTaskCleanName = extractCleanTaskName(task.content);
+        }
       } else {
-        console.log(`⚠️ Parent not found, using subtask as main`);
+        // Couldn't determine parent - use subtask as main
+        console.log(`  ⚠️ Couldn't determine parent, using subtask as main`);
         mainTask = task;
+        mainTaskCleanName = extractCleanTaskName(task.content);
       }
     } else {
       // This is already a main task
       console.log(`📌 Main task completed: ${task.content}`);
       mainTask = task;
+      mainTaskCleanName = extractCleanTaskName(task.content);
     }
 
-    if (!mainTask) {
-      mainTask = task;
-    }
-
-    const mainTaskCleanName = extractCleanTaskName(mainTask.content);
-    
-    // STEP 2: Get all completed subtasks for this parent (from today's tasks)
-    const mainTaskBaseId = mainTask.task_id?.split('_')[0];
-    
+    // ✅ STEP 2: Get ALL completed subtasks for this parent (by CLEAN NAME)
     completedSubtasks = todayTasks.filter(t => {
       if (!t.origin_task) return false;
       
-      // Match by origin_task ID
-      const originBase = t.origin_task.split('_')[0];
-      if (originBase === mainTaskBaseId) {
-        return true;
-      }
-      
-      // Also try matching by parent name in description (fallback)
-      if (t.description?.includes(`(parent: ${mainTaskCleanName})`)) {
-        return true;
+      // Check origin marker
+      const originMatch = t.content.match(/\(origin:\s*([^)]+)\)/i);
+      if (originMatch && originMatch[1]) {
+        const originParentName = extractCleanTaskName(originMatch[1]);
+        return originParentName === mainTaskCleanName;
       }
       
       return false;
@@ -1223,31 +1310,26 @@ export async function sendTaskNotification(
     
     console.log(`📋 Found ${completedSubtasks.length} completed subtasks`);
 
-    // STEP 3: Get failed subtasks from JSON (by parent name)
+    // ✅ STEP 3: Get failed subtasks from JSON (by PARENT NAME)
     try {
       const dailyFailures = await getDailyFailures(db, egyptDate);
       
       if (dailyFailures) {
-        for (const failed of dailyFailures.failed_tasks) {
-          if (!failed.is_subtask || !failed.parent_content) continue;
+        failedSubtasks = dailyFailures.failed_tasks.filter(f => {
+          if (!f.is_subtask || !f.parent_content) return false;
           
-          const failedParentCleanName = extractCleanTaskName(failed.parent_content);
-          
-          // Match by clean name
-          if (failedParentCleanName === mainTaskCleanName) {
-            failedSubtasks.push(failed);
-            console.log(`  ✕ Failed subtask: ${failed.content}`);
-          }
-        }
+          const failedParentCleanName = extractCleanTaskName(f.parent_content);
+          return failedParentCleanName === mainTaskCleanName;
+        });
+        
+        console.log(`📊 Found ${failedSubtasks.length} failed subtasks`);
       }
-      
-      console.log(`📊 Found ${failedSubtasks.length} failed subtasks`);
       
     } catch (error) {
       console.error('❌ Error fetching failed subtasks:', error);
     }
 
-    // STEP 4: Build notification message
+    // ✅ STEP 4: Build notification message
     const totalSubtasks = completedSubtasks.length + failedSubtasks.length;
     
     // Determine symbol
@@ -1281,27 +1363,26 @@ export async function sendTaskNotification(
       }
     }
 
-    // Add description if present
+    // Add description if present (exclude parent marker)
     if (mainTask.description && !mainTask.description.includes('(parent:')) {
       message += `\n📝 ${mainTask.description}`;
     }
 
-    // Add subtasks
+    // ✅ STEP 5: Add ALL subtasks (completed + failed)
     if (totalSubtasks > 0) {
-      // Completed subtasks
-      for (const sub of completedSubtasks) {
+      // Sort: completed first, then failed
+      completedSubtasks.forEach(sub => {
         const subClean = extractCleanTaskName(sub.content);
         message += `\n  ✓ ${subClean}`;
-      }
+      });
 
-      // Failed subtasks
-      for (const sub of failedSubtasks) {
+      failedSubtasks.forEach(sub => {
         const subClean = extractCleanTaskName(sub.content);
         message += `\n  ✗ ${subClean}`;
-      }
+      });
     }
 
-    // Send notification
+    // ✅ STEP 6: Send notification
     console.log('📨 Sending notification:');
     console.log(message);
 

@@ -20,7 +20,7 @@ import { createJournalManager } from '../services/journal';
 import { createGoalsManager } from '../services/goals-manager';
 // createTaskGeneratorService is now used only in Durable Object
 import { createMediaStorageService } from '../services/supabase-storage';
-import { getTodayInEgypt, getYesterdayInEgypt, getEgyptDayBoundaries } from '../utils/timezone';
+import { getTodayInEgypt, getYesterdayInEgypt } from '../utils/timezone';
 import { handleConfirmCommand } from './confirm-handler';
 import { syncFailuresFromTodoist, completeParentInTodoistIfAllDone } from '../handlers/todoist';
 
