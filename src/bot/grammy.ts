@@ -1335,10 +1335,12 @@ bot.command(['addduration', 'add_duration'], async (ctx) => {
     );
 
     await ctx.reply(
-      `✅ تم إضافة المدة: ${metadata.duration_minutes} دقيقة\n\n` +
-      `📌 ${taskData.taskName}\n\n` +
-      'استخدم /completetask لإكمال المهمة الآن'
-    );
+  `✅ تم إضافة المدة: ${metadata.duration_minutes} دقيقة\n\n` +
+  `📌 ${taskData.taskName}\n\n` +
+  `**التالي:**\n` +
+  `• /addquantity - إضافة كمية\n` +
+  `• /completetask - إنهاء المهمة الآن`
+);
 
   } catch (error) {
     console.error('Add duration error:', error);
@@ -1415,10 +1417,12 @@ bot.command(['addquantity', 'add_quantity'], async (ctx) => {
     );
 
     await ctx.reply(
-      `✅ تم إضافة الكمية: ${quantity} ${unit}\n\n` +
-      `📌 ${taskData.taskName}\n\n` +
-      'استخدم /completetask لإكمال المهمة الآن'
-    );
+  `✅ تم إضافة الكمية: ${quantity} ${unit}\n\n` +
+  `📌 ${taskData.taskName}\n\n` +
+  `**التالي:**\n` +
+  `• /addduration - إضافة مدة\n` +
+  `• /completetask - إنهاء المهمة الآن`
+);
 
   } catch (error) {
     console.error('Add quantity error:', error);
@@ -1562,16 +1566,16 @@ bot.command(['completetask', 'complete_task'], async (ctx) => {
             startDate
           );
 
-          await ctx.reply(
-            `✅ **تم إكمال المهمة!**\n\n` +
-            `📌 ${updatedTaskName}\n` +
-            `⏱️ المدة: ${durationMinutes} دقيقة\n` +
-            `${manualQuantity ? `📊 الكمية: ${manualQuantity} ${manualQuantityUnit}\n` : ''}` +
-            `✓ تم التحديث في Todoist\n\n` +
-            `━━━━━━━━━━━━━━━━━━\n` +
-            `🚀 **جاهز للمزيد؟**\n` +
-            `استخدم /starttask لبدء مهمة جديدة`
-          );
+           await ctx.reply(
+    `✅ **تم إكمال المهمة!**\n\n` +
+    `📌 ${updatedTaskName}\n` +
+    `⏱️ المدة: ${durationMinutes} دقيقة\n` +
+    `${manualQuantity ? `📊 الكمية: ${manualQuantity} ${manualQuantityUnit}\n` : ''}` +
+    `✓ تم التحديث في Todoist\n\n` +
+    `━━━━━━━━━━━━━━━━━━\n` +
+    `🚀 **جاهز للمزيد؟**\n` +
+    `استخدم /starttask لبدء مهمة جديدة`
+  );
         } else {
           throw new Error('Todoist update failed');
         }
@@ -2369,10 +2373,16 @@ if (pendingSelection.length > 0) {
   const timeStr = now.toLocaleTimeString('ar-EG', { timeZone: 'Africa/Cairo', hour: '2-digit', minute: '2-digit' });
 
   await ctx.reply(
-    `⏱️ بدأ تتبع المهمة:\n📌 ${selectedTask.content}\n🕐 وقت البدء: ${timeStr}\n\n` +
-    `✅ تم العثور على المهمة في Todoist\n\n` +
-    `استخدم /completetask عند الانتهاء`
-  );
+  `⏱️ **بدأ تتبع المهمة**\n\n` +
+  `📌 ${selectedTask.content}\n` +
+  `🕐 البداية: ${timeStr}\n\n` +
+  `━━━━━━━━━━━━━━━━━━\n` +
+  `**أوامر مفيدة:**\n` +
+  `• /addduration - إضافة مدة يدوياً\n` +
+  `• /addquantity - إضافة كمية\n` +
+  `• /completetask - إنهاء المهمة\n` +
+  `• /canceltask - إلغاء المهمة`
+);
   return;
 }
 
@@ -2604,9 +2614,12 @@ if (pendingDurationState.length > 0) {
     );
 
     await ctx.reply(
-      `✅ تم إضافة المدة: ${metadata.duration_minutes} دقيقة\n\n` +
-      'استخدم /completetask لإكمال المهمة الآن'
-    );
+  `✅ تم إضافة المدة: ${metadata.duration_minutes} دقيقة\n\n` +
+  `📌 ${taskData.taskName}\n\n` +
+  `**التالي:**\n` +
+  `• /addquantity - إضافة كمية\n` +
+  `• /completetask - إنهاء المهمة الآن`
+);
   }
   return;
 }
@@ -2651,9 +2664,12 @@ if (pendingQuantityInputState.length > 0) {
     );
 
     await ctx.reply(
-      `✅ تم إضافة الكمية: ${quantity} ${unit}\n\n` +
-      'استخدم /completetask لإكمال المهمة الآن'
-    );
+  `✅ تم إضافة الكمية: ${quantity} ${unit}\n\n` +
+  `📌 ${taskData.taskName}\n\n` +
+  `**التالي:**\n` +
+  `• /addduration - إضافة مدة\n` +
+  `• /completetask - إنهاء المهمة الآن`
+);
   }
   return;
 }

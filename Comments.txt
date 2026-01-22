@@ -1,12 +1,19 @@
 There are few notes and fixes that need to be done, I will address them all, and I want you to tell me how to implement the fixes.
 General note: always rely on clean tasks names for matching, NEVER rely only tasks ID!
 due to usage limits send me the fixes and how to implement one by one.
+you need to type-check then deploy  then confirm with tail that everything is done correctly!
    
-    - /status command fix: Make /status functional so it shows the current task status and whether there is any pending or incomplete command flow awaiting user input.
+    - in the report, the partially completed are not calculated, take a look on it!
+    - /status command fix: Make /status functional so it shows the current task status and whether there is any pending or incomplete command flow awaiting user input, and it should be sent automatically at the end of any process!
+    - the task completetion notification is not showing the whole group when a sub task is completed!
+    - Commands for day planning need more improvements, it need to distinguish all passive tasks like (not eating something or committing to something during the day) and put it in separate section as it don't need active tasking time, also every tasks that is not of the right priority according to settings, need to be put in a separate section for improvement if there is time, then the tasks left are what needs to be distributed on the day, the planning should write the estimated time needed for each task not just the time it should be done, it should recommend when to wake up, when to sleep, putting into consideration the saved answer of this day circumstances!
     - Debugging & AI configuration commands: Add commands to enable and disable debugging mode and to edit or switch the OpenRouter AI model dynamically.
+    - make sure that the task duplication prevention logic is working, as any task completed while it has already been completed is replaced with the new version, not duplicated!
     - a /cancel command should be included in any message in the system to cancel current pending command (22 JAN)
+    - Also read all the done notes, if you ever find anything not made propely then you need to readjust!
     - Wrap All Commands with global Locking (simillar to /confirm command) to prevent multiple actions in the same time! (22 JAN)
     - detect all the commands in the system and check they are all working properly, and rewrite both the start message and help message and the final list to update telegram bot with descriptions (22 JAN)
+    - DUE TO MANY CODE FIXING AND IMPROVEMENTS, make sure that all features are working! and Remove any unneeded codes or files, clean the project, making sure always to use clean name match and totally remove any matching logic relying on IDs!
 
 DONE:
    - I noticed in supabase streak and tasks tables, tasks names are not clean which leads to duplicates with diffrent paremeters and thus problems in streak tracking because it counts as different tasks
@@ -39,3 +46,4 @@ DONE:
     - If a task with the same name is completed more than once in the same day, then it should be replaced not duplicated!
     - in report view sub-tasks standalone not being grouped in its parent!
     - /log_failure when choosing a task, instead of postponing it after registering it as a daily failure, It completes it in todoist, make is marked as success in both database and todoist!
+    - the commands for adding duration and quantity must always be presented in every message with /comletetask
