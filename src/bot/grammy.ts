@@ -105,6 +105,27 @@ export function createBot(
   return bot;
 }
 
+async function sendAutoStatus(ctx: BotContext) {
+  try {
+    const chatId = ctx.chat?.id.toString() || '';
+    
+    // Check for remaining pending operations
+    const allPending = await ctx.db.select('conversation_state', {});
+    const userPending = allPending.filter(s => 
+      (s.chat_id as string).includes(chatId)
+    );
+    
+    if (userPending.length > 0) {
+      let msg = '📊 **حالة النظام:**\n';
+      msg += `عمليات معلقة: ${userPending.length}\n`;
+      msg += `استخدم /status لمزيد من التفاصيل`;
+      await ctx.reply(msg, { parse_mode: 'Markdown' });
+    }
+  } catch (error) {
+    console.error('Auto-status error:', error);
+  }
+}
+
 /**
  * Register all bot commands
  */
@@ -145,7 +166,119 @@ function registerCommands(bot: Bot<BotContext>) {
     `.trim();
 
     await ctx.reply(welcomeMessage, { parse_mode: 'Markdown' });
+    await sendAutoStatus(ctx);
   });
+
+// Status command - show current system status and pending operations
+bot.command('status', async (ctx) => {
+  try {
+    const chatId = ctx.chat?.id.toString() || '';
+    
+    await ctx.reply('🔄 جاري فحص الحالة...');
+
+    // Check for active task timer
+    const taskKey = `active_task_${chatId}`;
+    const activeTaskState = await ctx.db.select('conversation_state', {
+      filter: { chat_id: op.eq(taskKey) },
+    });
+
+    // Check for any pending conversations/operations
+    const allPending = await ctx.db.select('conversation_state', {});
+    const userPending = allPending.filter(s => 
+      (s.chat_id as string).includes(chatId)
+    );
+
+    // Build status message
+    let statusMsg = '📊 **حالة النظام**\n\n';
+    
+    // Active task timer
+    if (activeTaskState.length > 0) {
+      const taskData = (activeTaskState[0] as any).data || {};
+      const taskName = taskData.taskName || 'مهمة غير معروفة';
+      const startTime = taskData.startTime;
+      
+      if (startTime) {
+        const elapsed = Date.now() - startTime;
+        const elapsedMinutes = Math.round(elapsed / 60000);
+        statusMsg += `⏱️ **مهمة نشطة:**\n`;
+        statusMsg += `   📌 ${taskName}\n`;
+        statusMsg += `   🕐 الوقت المنقضي: ${elapsedMinutes} دقيقة\n\n`;
+      }
+    } else {
+      statusMsg += `⏱️ **مهمة نشطة:** لا يوجد\n\n`;
+    }
+
+    // Pending operations
+    if (userPending.length > 0) {
+      statusMsg += `📋 **عمليات معلقة:** ${userPending.length}\n`;
+      
+      const operationTypes = new Map<string, number>();
+      for (const op of userPending) {
+        const type = op.conversation_type;
+        operationTypes.set(type, (operationTypes.get(type) || 0) + 1);
+      }
+      
+      for (const [type, count] of operationTypes) {
+        const arabicType = getArabicOperationType(type);
+        statusMsg += `   • ${arabicType}: ${count}\n`;
+      }
+      
+      statusMsg += `\n💡 استخدم /cancel لإلغاء العمليات المعلقة\n\n`;
+    } else {
+      statusMsg += `📋 **عمليات معلقة:** لا يوجد\n\n`;
+    }
+
+    // System info
+    const today = getTodayInEgypt();
+    const reportGen = createReportGenerator(ctx.db, ctx.settings);
+    const data = await reportGen.collectReportData(today);
+    
+    statusMsg += `📅 **إحصائيات اليوم:**\n`;
+    statusMsg += `   ✅ مهام مكتملة: ${data.tasks.length}\n`;
+    statusMsg += `   ❌ مهام فاشلة: ${data.failedTasksJson?.failed_tasks.length || 0}\n\n`;
+
+    // Journal status
+    const journalMgr = createJournalManager(ctx.db);
+    const journalEntries = await journalMgr.getEntriesForDate(today);
+    const hasActiveJournal = journalEntries.some(e => e.is_session_start && !journalEntries.some(end => end.is_session_end));
+    
+    statusMsg += `📔 **اليوميات:**\n`;
+    if (hasActiveJournal) {
+      const entryCount = journalEntries.filter(e => e.message_text || e.media_url).length;
+      statusMsg += `   🟢 جلسة نشطة (${entryCount} إدخالات)\n`;
+    } else {
+      statusMsg += `   ⚪ لا توجد جلسة نشطة\n`;
+    }
+
+    statusMsg += `\n━━━━━━━━━━━━━━━━━━\n`;
+    statusMsg += `✅ النظام يعمل بشكل طبيعي`;
+
+    await ctx.reply(statusMsg, { parse_mode: 'Markdown' });
+
+  } catch (error) {
+    console.error('Status command error:', error);
+    await ctx.reply('❌ حدث خطأ أثناء فحص الحالة');
+  }
+});
+
+// Helper function to translate operation types to Arabic
+function getArabicOperationType(type: string): string {
+  const typeMap: Record<string, string> = {
+    'active_task': 'مهمة نشطة',
+    'qa_report': 'أسئلة التقرير',
+    'task_selection': 'اختيار مهمة',
+    'failure_selection': 'تسجيل فشل',
+    'edit_goals': 'تعديل أهداف',
+    'edit_challenges': 'تعديل تحديات',
+    'clearmemory_confirmation': 'تأكيد مسح الذاكرة',
+    'command_lock': 'أمر قيد التنفيذ',
+    'createtasks_lock': 'إنشاء مهام',
+    'pending_duration': 'إضافة مدة',
+    'pending_quantity_input': 'إضافة كمية',
+  };
+  
+  return typeMap[type] || type;
+}
 
   // Help command
   bot.command('help', async (ctx) => {
@@ -206,6 +339,7 @@ function registerCommands(bot: Bot<BotContext>) {
     `.trim();
 
     await ctx.reply(helpMessage, { parse_mode: 'Markdown' });
+    await sendAutoStatus(ctx);
   });
 
   // Sync command - manual Todoist sync
@@ -218,6 +352,7 @@ function registerCommands(bot: Bot<BotContext>) {
       try {
   await syncFailuresFromTodoist(today, ctx.db, ctx.settings);
   await ctx.reply('✅ تمت المزامنة بنجاح! تم تحديث حالة المهام.');
+    await sendAutoStatus(ctx);
 } catch (error) {
   console.error('Sync error:', error);
   const errorMsg = error instanceof Error ? error.message : 'Unknown error';
@@ -400,6 +535,7 @@ function registerCommands(bot: Bot<BotContext>) {
     planMessage += `💡 استخدم /createtasks لإنشاء مهام جديدة`;
 
     return planMessage;
+    await sendAutoStatus(ctx);
   }
 
   // Today plan command - show plan for today with hourly schedule
@@ -601,6 +737,7 @@ async function sendLongMessage(ctx: Context, message: string) {
       console.error('Skip questions error:', error);
       await ctx.reply('❌ حدث خطأ. حاول مرة أخرى.');
     }
+    await sendAutoStatus(ctx);
   });
 
   // Cancel command - ENHANCED to cancel ANY pending operation
@@ -745,6 +882,7 @@ bot.command('log_failure', async (ctx) => {
       await ctx.reply('❌ حدث خطأ: ' + (error instanceof Error ? error.message : 'Unknown'));
     }
   });
+    await sendAutoStatus(ctx);
 });
 
   // Memory command
@@ -785,6 +923,7 @@ bot.command('log_failure', async (ctx) => {
       console.error('Memory command error:', error);
       await ctx.reply('❌ حدث خطأ أثناء تحميل الذاكرة');
     }
+    await sendAutoStatus(ctx);
   });
 
  // Clear memory command
@@ -813,6 +952,7 @@ bot.command('clearmemory', async (ctx) => {
     console.error('Clearmemory command error:', error);
     await ctx.reply('❌ حدث خطأ. حاول مرة أخرى.');
   }
+    await sendAutoStatus(ctx);
 });
 
   // NEW: /today command - Quick view of today's progress
@@ -836,6 +976,7 @@ bot.command('clearmemory', async (ctx) => {
       console.error('Today command error:', error);
       await ctx.reply('❌ حدث خطأ أثناء إعداد الملخص');
     }
+    await sendAutoStatus(ctx);
   });
 
   // NEW: /report command - Get report for specific date
@@ -895,6 +1036,7 @@ bot.command('clearmemory', async (ctx) => {
       console.error('Report command error:', error);
       await ctx.reply('❌ حدث خطأ أثناء تحميل التقرير');
     }
+    await sendAutoStatus(ctx);
   });
 
   // NEW: /lastupdate command - Show system status
@@ -946,6 +1088,7 @@ bot.command('clearmemory', async (ctx) => {
       console.error('Lastupdate command error:', error);
       await ctx.reply('❌ حدث خطأ أثناء جلب حالة النظام');
     }
+    await sendAutoStatus(ctx);
   });
 
   // ============================================
@@ -994,6 +1137,7 @@ bot.command('clearmemory', async (ctx) => {
       console.error('Journal end error:', error);
       await ctx.reply('❌ حدث خطأ: ' + (error instanceof Error ? error.message : 'Unknown'));
     }
+    await sendAutoStatus(ctx);
   });
 
   // Journal resume command
@@ -1036,6 +1180,7 @@ bot.command('clearmemory', async (ctx) => {
       console.error('Journal view error:', error);
       await ctx.reply('❌ حدث خطأ: ' + (error instanceof Error ? error.message : 'Unknown'));
     }
+    await sendAutoStatus(ctx);
   });
 
   // ============================================
@@ -1265,6 +1410,7 @@ bot.command(['starttask', 'start_task'], async (ctx) => {
     console.error('Start task error:', error);
     await ctx.reply('❌ حدث خطأ: ' + (error instanceof Error ? error.message : 'Unknown'));
   }
+    await sendAutoStatus(ctx);
 });
 
   // ============================================
@@ -1684,6 +1830,7 @@ bot.command(['completetask', 'complete_task'], async (ctx) => {
       console.error('Cancel task error:', error);
       await ctx.reply('❌ حدث خطأ: ' + (error instanceof Error ? error.message : 'Unknown'));
     }
+    await sendAutoStatus(ctx);
   });
 
   // ============================================
@@ -1717,6 +1864,7 @@ bot.command(['completetask', 'complete_task'], async (ctx) => {
       console.error('Goals command error:', error);
       await ctx.reply('❌ حدث خطأ: ' + (error instanceof Error ? error.message : 'Unknown'));
     }
+    await sendAutoStatus(ctx);
   });
 
   // Generate new weekly goals (typically run on Friday)
@@ -1765,6 +1913,7 @@ bot.command(['completetask', 'complete_task'], async (ctx) => {
       console.error('Generate goals error:', error);
       await ctx.reply('❌ حدث خطأ: ' + (error instanceof Error ? error.message : 'Unknown'));
     }
+    await sendAutoStatus(ctx);
   });
 
   // Edit weekly goals
@@ -1805,6 +1954,7 @@ bot.command(['completetask', 'complete_task'], async (ctx) => {
       console.error('Edit goals error:', error);
       await ctx.reply('❌ حدث خطأ: ' + (error instanceof Error ? error.message : 'Unknown'));
     }
+    await sendAutoStatus(ctx);
   });
 
   // Edit weekly challenges
@@ -1863,6 +2013,7 @@ bot.command(['completetask', 'complete_task'], async (ctx) => {
       console.error('Edit challenges error:', error);
       await ctx.reply('❌ حدث خطأ: ' + (error instanceof Error ? error.message : 'Unknown'));
     }
+    await sendAutoStatus(ctx);
   });
 
   // Create tasks in Todoist from weekly goals
@@ -1967,6 +2118,7 @@ bot.command(['completetask', 'complete_task'], async (ctx) => {
         await ctx.db.delete('conversation_state', { chat_id: op.eq(lockKey) });
       } catch (e) { /* ignore */ }
     }
+    await sendAutoStatus(ctx);
   });
 
 /**
