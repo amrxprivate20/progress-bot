@@ -715,45 +715,45 @@ private async checkChallengeCompletion(
     }
 
     // ===============================================================================
-    // Step 2: Build parent task lookup from completed tasks using NAMES
-    // ===============================================================================
-    const tasksByName = new Map<string, Task>();
+// Step 2: Build parent task lookup from completed tasks using NAMES
+// ===============================================================================
+const tasksByName = new Map<string, Task>();
 
-    for (const task of data.tasks) {
-      const cleanName = extractCleanTaskName(task.content);
-      
-      // Only store non-subtasks (main tasks) by name
-      if (!task.origin_task) {
-        tasksByName.set(cleanName, task);
-        console.log(`  ✅ Completed main task: "${cleanName}"`);
+for (const task of data.tasks) {
+  const cleanName = extractCleanTaskName(task.content);
+  
+  // Only store non-subtasks (main tasks) by name
+  if (!task.origin_task) {
+    tasksByName.set(cleanName, task);
+    console.log(`  ✅ Completed main task: "${cleanName}"`);
+  }
+}
+
+// ✅ FIX: Add failed main tasks to the map so subtasks can find their parents
+if (data.failedTasksJson) {
+  for (const failed of data.failedTasksJson.failed_tasks) {
+    if (!failed.is_subtask) {
+      const cleanName = extractCleanTaskName(failed.content);
+      if (!tasksByName.has(cleanName)) {
+        // Create a pseudo-task entry for the failed parent
+        const pseudoParent: Task = {
+          task_id: failed.id,
+          content: failed.content,
+          completed_at: new Date(), // Dummy date
+          status: 'failed',
+          category: failed.category,
+          priority: failed.priority,
+          duration_minutes: failed.duration_minutes,
+        };
+        tasksByName.set(cleanName, pseudoParent);
+        console.log(`  ❌ Added failed main task to map: "${cleanName}"`);
       }
     }
+  }
+}
 
-    // ✅ Add failed main tasks to the map so they appear in output
-    if (data.failedTasksJson) {
-      for (const failed of data.failedTasksJson.failed_tasks) {
-        if (!failed.is_subtask) {
-          const cleanName = extractCleanTaskName(failed.content);
-          if (!tasksByName.has(cleanName)) {
-            // Create a pseudo-task entry for the failed parent
-            const pseudoParent: Task = {
-              task_id: failed.id,
-              content: failed.content,
-              completed_at: new Date(), // Dummy date
-              status: 'failed',
-              category: failed.category,
-              priority: failed.priority,
-              duration_minutes: failed.duration_minutes,
-            };
-            tasksByName.set(cleanName, pseudoParent);
-            console.log(`  ❌ Added failed main task to map: "${cleanName}"`);
-          }
-        }
-      }
-    }
-
-    // ===============================================================================
-// Step 3: Group completed subtasks by parent NAME - IMPROVED v2
+// ===============================================================================
+// Step 3: Group completed subtasks by parent NAME - FIXED v3 (NAME-FIRST)
 // ===============================================================================
 const completedSubtasksByParentName = new Map<string, Task[]>();
 const processedSubtasks = new Set<string>();
@@ -764,101 +764,70 @@ for (const task of data.tasks) {
   const cleanSubtaskName = extractCleanTaskName(task.content);
   console.log(`🔍 Processing completed subtask: "${cleanSubtaskName}"`);
   
-  // ✅ PRIORITY 1: Check for origin marker in content
-  const originMatch = task.content.match(/\(origin:\s*([^)]+)\)/i);
-  if (originMatch && originMatch[1]) {
-    const parentName = extractCleanTaskName(originMatch[1]);
-    console.log(`   📌 Origin marker found: "${parentName}"`);
+  let parentName: string | null = null;
+  
+  // ✅ PRIORITY 1: Look in failed JSON for a matching subtask with parent_content
+  if (data.failedTasksJson && !parentName) {
+    const matchingFailedSub = data.failedTasksJson.failed_tasks.find(ft => 
+      ft.is_subtask && 
+      extractCleanTaskName(ft.content) === cleanSubtaskName &&
+      ft.parent_content
+    );
     
+    if (matchingFailedSub && matchingFailedSub.parent_content) {
+      parentName = extractCleanTaskName(matchingFailedSub.parent_content);
+      console.log(`   📌 Found parent via failed JSON sibling: "${parentName}"`);
+    }
+  }
+  
+  // ✅ PRIORITY 2: Check for origin marker in content
+  if (!parentName) {
+    const originMatch = task.content.match(/\(origin:\s*([^)]+)\)/i);
+    if (originMatch && originMatch[1]) {
+      parentName = extractCleanTaskName(originMatch[1]);
+      console.log(`   📌 Origin marker found: "${parentName}"`);
+    }
+  }
+  
+  // ✅ PRIORITY 3: Try to find parent by origin_task ID in completed tasks
+  if (!parentName) {
+    const parentId = task.origin_task;
+    const parentBaseId = parentId.split('_')[0];
+    
+    const parentTask = data.tasks.find(t => {
+      if (!t.task_id || t.origin_task) return false;
+      const baseId = t.task_id.split('_')[0];
+      return baseId === parentBaseId;
+    });
+    
+    if (parentTask) {
+      parentName = extractCleanTaskName(parentTask.content);
+      console.log(`   📌 Found parent by ID in completed: "${parentName}"`);
+    }
+  }
+  
+  // ✅ PRIORITY 4: Try to find parent by origin_task ID in failed JSON
+  if (!parentName && data.failedTasksJson) {
+    const parentId = task.origin_task;
+    const failedParent = data.failedTasksJson.failed_tasks.find(ft => 
+      !ft.is_subtask && ft.id === parentId
+    );
+    
+    if (failedParent) {
+      parentName = extractCleanTaskName(failedParent.content);
+      console.log(`   📌 Found parent by ID in failed JSON: "${parentName}"`);
+    }
+  }
+  
+  // Group under parent if found
+  if (parentName) {
     if (!completedSubtasksByParentName.has(parentName)) {
       completedSubtasksByParentName.set(parentName, []);
     }
     completedSubtasksByParentName.get(parentName)!.push(task);
     processedSubtasks.add(task.task_id);
     console.log(`   ✓ Grouped under: "${parentName}"`);
-    continue;
-  }
-  
-  // ✅ PRIORITY 2: Try to find parent by origin_task ID
-  const parentId = task.origin_task;
-  const parentBaseId = parentId.split('_')[0];
-  
-  const parentTask = data.tasks.find(t => {
-    if (!t.task_id || t.origin_task) return false; // Must be main task
-    const baseId = t.task_id.split('_')[0];
-    return baseId === parentBaseId;
-  });
-  
-  if (parentTask) {
-    const parentName = extractCleanTaskName(parentTask.content);
-    console.log(`   📌 Found parent by ID: "${parentName}"`);
-    
-    if (!completedSubtasksByParentName.has(parentName)) {
-      completedSubtasksByParentName.set(parentName, []);
-    }
-    completedSubtasksByParentName.get(parentName)!.push(task);
-    processedSubtasks.add(task.task_id);
-    console.log(`   ✓ Grouped under: "${parentName}"`);
-    continue;
-  }
-  
-  // ✅ PRIORITY 3: Check if subtask matches a failed parent name
-  if (data.failedTasksJson) {
-    for (const [parentName, failedSubs] of failedSubtasksByParentName.entries()) {
-      const matchingFailedSub = failedSubs.find(fs => 
-        extractCleanTaskName(fs.content) === cleanSubtaskName
-      );
-      
-      if (matchingFailedSub) {
-        console.log(`   📌 Matched via failed subtasks: "${parentName}"`);
-        
-        if (!completedSubtasksByParentName.has(parentName)) {
-          completedSubtasksByParentName.set(parentName, []);
-        }
-        completedSubtasksByParentName.get(parentName)!.push(task);
-        processedSubtasks.add(task.task_id);
-        console.log(`   ✓ Grouped under: "${parentName}"`);
-        break;
-      }
-    }
-  }
-  
-  // ✅ NEW PRIORITY 4: Try intelligent name matching for common patterns
-  if (!processedSubtasks.has(task.task_id)) {
-    // Look for parent tasks that might contain this subtask
-    // Example: "منع السكر الأبيض" might belong to "الالتزام بالنظام الغذائي"
-    
-    // Get all potential parent names
-    const allPotentialParents = new Set<string>();
-    for (const t of data.tasks.filter(t => !t.origin_task)) {
-      allPotentialParents.add(extractCleanTaskName(t.content));
-    }
-    for (const name of failedSubtasksByParentName.keys()) {
-      allPotentialParents.add(name);
-    }
-    
-    // Check if any failed subtask with the same name has a known parent
-    if (data.failedTasksJson) {
-      const matchingFailedByName = data.failedTasksJson.failed_tasks.find(ft => 
-        ft.is_subtask && extractCleanTaskName(ft.content) === cleanSubtaskName
-      );
-      
-      if (matchingFailedByName && matchingFailedByName.parent_content) {
-        const parentName = extractCleanTaskName(matchingFailedByName.parent_content);
-        console.log(`   📌 Found parent via failed JSON sibling: "${parentName}"`);
-        
-        if (!completedSubtasksByParentName.has(parentName)) {
-          completedSubtasksByParentName.set(parentName, []);
-        }
-        completedSubtasksByParentName.get(parentName)!.push(task);
-        processedSubtasks.add(task.task_id);
-        console.log(`   ✓ Grouped under: "${parentName}"`);
-        continue;
-      }
-    }
-  }
-  
-  if (!processedSubtasks.has(task.task_id)) {
+  } else {
     console.log(`   ⚠️ Could not match subtask to parent`);
   }
 }
