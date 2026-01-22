@@ -2,8 +2,8 @@ There are few notes and fixes that need to be done, I will address them all, and
 General note: always rely on clean tasks names for matching, NEVER rely only tasks ID!
 due to usage limits send me the fixes and how to implement one by one.
    
-    - /log_failure behavior: Acts like /completetask but logs a failure; if called without parameters list all available tasks plus “add new task”; when a task is selected or written register it as a failure, and if the task is recurring postpone it in Todoist to the next due date, if not recurring then delete it from Todoist.
-    - If a task with the same name is completed more than once in the same day, then it should be replaced not duplicated!
+    - in report view, the tasks manualy logged as failures does appear but aren't counted in the failures count or take its share in the percentage, also sub-tasks standalone not being grouped in its parent!
+    - /log_failure when choosing a task, instead of postponing it after registering it as a daily failure, It completes it in todoist, make is marked as success in both database and todoist!
     - /status command fix: Make /status functional so it shows the current task status and whether there is any pending or incomplete command flow awaiting user input.
     - Debugging & AI configuration commands: Add commands to enable and disable debugging mode and to edit or switch the OpenRouter AI model dynamically.
     - a /cancel command should be included in any message in the system to cancel current pending command (22 JAN)
@@ -37,3 +37,5 @@ DONE:
    - /starttask behavior: Without parameters list all available tasks plus “add new task”; with a task name, if exactly one similar task exists do not start it immediately but show a confirmation list with that task as the first item plus “add new task”; ignore and do not store duration if it equals zero.
    - /completetask & /addquantity & /addduration flow: /completetask must immediately complete the current active task with no parameters,/addduration for manually adding duration (with explanation) before completion then resend completion message again, /addquantity for manually add quantity to the current task before completion when needed then resend completion message again, and after completion send a permanent message encouraging the user to start again using /starttask, and revise the autocomplete of parent task logic because it is not working.
    - due to mutliple modifications in the code, now the autocomplete logic for parent task if there no remaing subtask to be completed isnot working. Also the report task grouping is not good enough, as some completed subtasks are not shown and other are shown seperately, other completed subtasks are grouped with a simillar parent leaving their parent.   
+    - /log_failure behavior: Acts like /completetask but logs a failure; if called without parameters list all available tasks plus “add new task”; when a task is selected or written register it as a failure, and if the task is recurring postpone it in Todoist to the next due date, if not recurring then delete it from Todoist.
+    - If a task with the same name is completed more than once in the same day, then it should be replaced not duplicated!

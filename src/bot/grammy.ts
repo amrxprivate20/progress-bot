@@ -1966,7 +1966,9 @@ bot.command(['completetask', 'complete_task'], async (ctx) => {
   });
 
 /**
- * Process a task failure - log to DB and handle Todoist (postpone or delete)
+ * Process a task failure - log to DB and handle Todoist (DO NOT complete)
+ * FIXED: For recurring tasks, we DON'T complete them in Todoist
+ * We only log the failure locally in our database
  */
 async function processTaskFailure(
   ctx: BotContext,
@@ -1989,85 +1991,47 @@ async function processTaskFailure(
 
     console.log(`✅ Logged failure: ${taskName}`);
 
-    // If no Todoist task ID, just confirm
-    if (!todoistTaskId) {
-      await ctx.reply(
-        `✅ تم تسجيل المهمة الفاشلة:\n` +
-        `❌ ${taskName}\n\n` +
-        `ستظهر في تقرير اليوم`
-      );
-      return;
-    }
-
-    // Handle Todoist task
-    const todoistToken = await ctx.settings.get('todoist_api_token');
-    if (!todoistToken) {
-      await ctx.reply(
-        `✅ تم تسجيل الفشل محلياً:\n` +
-        `❌ ${taskName}\n\n` +
-        `(لم يتم التعامل مع Todoist - لا يوجد token)`
-      );
-      return;
-    }
-
     const isRecurring = due?.is_recurring || false;
 
     if (isRecurring) {
-      // Recurring task - postpone to next occurrence
-      console.log(`🔄 Recurring task - postponing to next due date`);
-      
-      // Todoist automatically moves recurring tasks to next date when you complete them
-      // So we just close it and it will reappear on next due date
-      const closeResponse = await fetch(
-        `https://api.todoist.com/rest/v3/tasks/${todoistTaskId}/close`,
-        {
-          method: 'POST',
-          headers: { 'Authorization': `Bearer ${todoistToken.trim()}` },
-        }
+      // ✅ FIXED: For recurring tasks, we DON'T touch Todoist
+      // The task stays in Todoist for tomorrow's attempt
+      // We only log it as failed in our local database
+      await ctx.reply(
+        `✅ تم تسجيل الفشل:\n` +
+        `❌ ${taskName}\n\n` +
+        `📅 المهمة ستظل في Todoist لمحاولة لاحقة\n` +
+        `💾 تم تسجيل الفشل في قاعدة البيانات`
       );
+    } else if (!isRecurring && todoistTaskId) {
+      // Non-recurring task - ask user what to do
+      const chatId = ctx.chat?.id.toString() || '';
+      
+      // Store pending action
+      await ctx.db.insert('conversation_state', {
+        chat_id: `failure_action_${chatId}`,
+        conversation_type: 'failure_action',
+        data: {
+          todoistTaskId,
+          taskName,
+        },
+        expires_at: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
+      });
 
-      if (closeResponse.ok) {
-        await ctx.reply(
-          `✅ تم تسجيل الفشل وتأجيل المهمة:\n` +
-          `❌ ${taskName}\n\n` +
-          `📅 ستظهر المهمة في الموعد التالي`
-        );
-      } else {
-        const error = await closeResponse.text();
-        console.error('Failed to postpone task:', error);
-        await ctx.reply(
-          `✅ تم تسجيل الفشل محلياً:\n` +
-          `❌ ${taskName}\n\n` +
-          `⚠️ فشل تأجيل المهمة في Todoist`
-        );
-      }
+      await ctx.reply(
+        `✅ تم تسجيل الفشل:\n` +
+        `❌ ${taskName}\n\n` +
+        `❓ هل تريد حذف هذه المهمة من Todoist؟\n` +
+        `(مهمة غير متكررة)\n\n` +
+        `أرسل "نعم" للحذف أو "لا" للإبقاء عليها`
+      );
     } else {
-      // Non-recurring task - delete it
-      console.log(`🗑️ Non-recurring task - deleting from Todoist`);
-      
-      const deleteResponse = await fetch(
-        `https://api.todoist.com/rest/v3/tasks/${todoistTaskId}`,
-        {
-          method: 'DELETE',
-          headers: { 'Authorization': `Bearer ${todoistToken.trim()}` },
-        }
+      // No Todoist task or already handled
+      await ctx.reply(
+        `✅ تم تسجيل الفشل:\n` +
+        `❌ ${taskName}\n\n` +
+        `ستظهر في تقرير اليوم`
       );
-
-      if (deleteResponse.ok) {
-        await ctx.reply(
-          `✅ تم تسجيل الفشل وحذف المهمة:\n` +
-          `❌ ${taskName}\n\n` +
-          `🗑️ تم حذف المهمة من Todoist`
-        );
-      } else {
-        const error = await deleteResponse.text();
-        console.error('Failed to delete task:', error);
-        await ctx.reply(
-          `✅ تم تسجيل الفشل محلياً:\n` +
-          `❌ ${taskName}\n\n` +
-          `⚠️ فشل حذف المهمة من Todoist`
-        );
-      }
     }
 
     // Sync failures to update JSON
@@ -2155,6 +2119,46 @@ if (pendingFailureNewTask.length > 0) {
     await ctx.reply('⚠️ اسم المهمة مطلوب');
     return;
   }
+
+// Handle failure action confirmation (delete non-recurring failed task)
+const failureActionKey = `failure_action_${chatId}`;
+const pendingFailureAction = await ctx.db.select('conversation_state', {
+  filter: { chat_id: op.eq(failureActionKey) },
+});
+
+if (pendingFailureAction.length > 0) {
+  const actionData = (pendingFailureAction[0] as any).data || {};
+  const todoistTaskId = actionData.todoistTaskId;
+  const taskName = actionData.taskName;
+
+  // Delete action state
+  await ctx.db.delete('conversation_state', { chat_id: op.eq(failureActionKey) });
+
+  const lowerText = text.trim().toLowerCase();
+  
+  if (lowerText === 'نعم' || lowerText === 'yes') {
+    // Delete from Todoist
+    const todoistToken = await ctx.settings.get('todoist_api_token');
+    if (todoistToken && todoistTaskId) {
+      const deleteResponse = await fetch(
+        `https://api.todoist.com/rest/v3/tasks/${todoistTaskId}`,
+        {
+          method: 'DELETE',
+          headers: { 'Authorization': `Bearer ${todoistToken.trim()}` },
+        }
+      );
+
+      if (deleteResponse.ok) {
+        await ctx.reply(`✅ تم حذف المهمة من Todoist:\n${taskName}`);
+      } else {
+        await ctx.reply(`⚠️ فشل حذف المهمة من Todoist`);
+      }
+    }
+  } else {
+    await ctx.reply(`✅ تم الإبقاء على المهمة في Todoist`);
+  }
+  return;
+}
 
   // Log as failed task (no Todoist task to postpone/delete)
   await processTaskFailure(ctx, null, taskName, null);

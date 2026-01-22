@@ -177,39 +177,55 @@ const challengeStatus = data.dailyChallenge
     };
   }
 
-  /**
-   * Calculate statistics from tasks + JSON failures
-   */
-  calculateStatistics(tasks: Task[], failedTasksJson: DailyFailures | null): ReportStatistics {
-    // =========================================================================
-    // NEW LOGIC: Only count MAIN tasks, calculate success based on subtasks
-    // =========================================================================
+ /**
+ * Calculate statistics from tasks + JSON failures
+ * FIXED: Now includes manual failures from database AND JSON failures
+ */
+calculateStatistics(tasks: Task[], failedTasksJson: DailyFailures | null): ReportStatistics {
+  // =========================================================================
+  // IMPROVED LOGIC: Count BOTH database failures AND JSON failures
+  // =========================================================================
 
-    // Step 1: Separate main tasks and subtasks from completed tasks
-    const completedMainTasks = tasks.filter(t => !t.origin_task); // No parent = main task
-    const completedSubtasks = tasks.filter(t => !!t.origin_task); // Has parent = subtask
+  // Step 1: Separate main tasks and subtasks from ALL tasks (completed + failed)
+  const allMainTasks = tasks.filter(t => !t.origin_task); // No parent = main task
+  const allSubtasks = tasks.filter(t => !!t.origin_task); // Has parent = subtask
 
-    // Step 2: Get failed main tasks and subtasks from JSON
-    const failedMainTasks = failedTasksJson?.failed_tasks.filter(t => !t.is_subtask) || [];
-    const failedSubtasks = failedTasksJson?.failed_tasks.filter(t => t.is_subtask) || [];
+  // Step 2: Get failed main tasks and subtasks from JSON
+  const jsonFailedMainTasks = failedTasksJson?.failed_tasks.filter(t => !t.is_subtask) || [];
+  const jsonFailedSubtasks = failedTasksJson?.failed_tasks.filter(t => t.is_subtask) || [];
 
-    // Step 3: Build a map of all main tasks (completed + failed)
-    const mainTaskMap = new Map<string, {
-      name: string;
-      isCompleted: boolean;
-      completedSubtasks: number;
-      failedSubtasks: number;
-      totalSubtasks: number;
-      category?: string;
-      duration?: number;
-    }>();
+  // Step 3: Build a map of all main tasks (completed + failed from DB + failed from JSON)
+  const mainTaskMap = new Map<string, {
+    name: string;
+    isCompleted: boolean;
+    completedSubtasks: number;
+    failedSubtasks: number;
+    totalSubtasks: number;
+    category?: string;
+    duration?: number;
+  }>();
 
-    // Add completed main tasks
-    for (const task of completedMainTasks) {
-      const cleanName = extractCleanTaskName(task.content);
+  // Add completed main tasks from database
+  for (const task of allMainTasks.filter(t => t.status === 'done')) {
+    const cleanName = extractCleanTaskName(task.content);
+    mainTaskMap.set(cleanName, {
+      name: cleanName,
+      isCompleted: true,
+      completedSubtasks: 0,
+      failedSubtasks: 0,
+      totalSubtasks: 0,
+      category: task.category,
+      duration: task.duration_minutes,
+    });
+  }
+
+  // ✅ NEW: Add failed main tasks from database
+  for (const task of allMainTasks.filter(t => t.status === 'failed')) {
+    const cleanName = extractCleanTaskName(task.content);
+    if (!mainTaskMap.has(cleanName)) {
       mainTaskMap.set(cleanName, {
         name: cleanName,
-        isCompleted: true,
+        isCompleted: false,
         completedSubtasks: 0,
         failedSubtasks: 0,
         totalSubtasks: 0,
@@ -217,131 +233,173 @@ const challengeStatus = data.dailyChallenge
         duration: task.duration_minutes,
       });
     }
+  }
 
-    // Add failed main tasks (if not already in map)
-    for (const task of failedMainTasks) {
-      const cleanName = extractCleanTaskName(task.content);
-      if (!mainTaskMap.has(cleanName)) {
-        mainTaskMap.set(cleanName, {
-          name: cleanName,
-          isCompleted: false,
-          completedSubtasks: 0,
-          failedSubtasks: 0,
-          totalSubtasks: 0,
-          category: task.category,
-          duration: task.duration_minutes,
-        });
-      }
+  // Add failed main tasks from JSON (if not already in map)
+  for (const task of jsonFailedMainTasks) {
+    const cleanName = extractCleanTaskName(task.content);
+    if (!mainTaskMap.has(cleanName)) {
+      mainTaskMap.set(cleanName, {
+        name: cleanName,
+        isCompleted: false,
+        completedSubtasks: 0,
+        failedSubtasks: 0,
+        totalSubtasks: 0,
+        category: task.category,
+        duration: task.duration_minutes,
+      });
+    }
+  }
+
+  // Step 4: Count subtasks for each main task
+  // Count completed subtasks - improved name-based matching
+  for (const sub of allSubtasks.filter(t => t.status === 'done')) {
+    // Try to find parent by clean name matching
+    let parentName: string | null = null;
+
+    // Method 1: Check for origin marker in content
+    const originMatch = sub.content.match(/\(origin:\s*([^)]+)\)/i);
+    if (originMatch && originMatch[1]) {
+      parentName = extractCleanTaskName(originMatch[1]);
     }
 
-    // Step 4: Count subtasks for each main task
-    // Count completed subtasks
-    for (const sub of completedSubtasks) {
-      // Find parent by origin_task ID
-      const parentTask = completedMainTasks.find(t => {
+    // Method 2: Try to find by origin_task ID
+    if (!parentName && sub.origin_task) {
+      const parentTask = allMainTasks.find(t => {
         const baseId = t.task_id?.split('_')[0];
         const originBase = sub.origin_task?.split('_')[0];
         return baseId === originBase || t.task_id === sub.origin_task;
       });
-
       if (parentTask) {
-        const parentName = extractCleanTaskName(parentTask.content);
-        const entry = mainTaskMap.get(parentName);
-        if (entry) {
-          entry.completedSubtasks++;
-          entry.totalSubtasks++;
-        }
+        parentName = extractCleanTaskName(parentTask.content);
       }
     }
 
-    // Count failed subtasks by parent name
-    for (const sub of failedSubtasks) {
-      if (sub.parent_content) {
-        const parentName = extractCleanTaskName(sub.parent_content);
-        const entry = mainTaskMap.get(parentName);
-        if (entry) {
-          entry.failedSubtasks++;
-          entry.totalSubtasks++;
-        }
+    if (parentName) {
+      const entry = mainTaskMap.get(parentName);
+      if (entry) {
+        entry.completedSubtasks++;
+        entry.totalSubtasks++;
       }
     }
-
-    // Step 5: Calculate success percentage for each main task
-    let totalSuccessPercent = 0;
-    let fullyCompleted = 0;
-    let partiallyCompleted = 0;
-    let fullyFailed = 0;
-
-    for (const [, entry] of mainTaskMap) {
-      let successPercent: number;
-
-      if (entry.totalSubtasks === 0) {
-        // No subtasks - binary: 100% if completed, 0% if not
-        successPercent = entry.isCompleted ? 100 : 0;
-      } else {
-        // Has subtasks - calculate based on subtask completion
-        successPercent = (entry.completedSubtasks / entry.totalSubtasks) * 100;
-      }
-
-      totalSuccessPercent += successPercent;
-
-      // Categorize
-      if (successPercent === 100) {
-        fullyCompleted++;
-      } else if (successPercent === 0) {
-        fullyFailed++;
-      } else {
-        partiallyCompleted++;
-      }
-    }
-
-    // Step 6: Calculate overall success rate (average of all main task percentages)
-    const totalMainTasks = mainTaskMap.size;
-    const overallSuccessRate = totalMainTasks > 0 ? totalSuccessPercent / totalMainTasks : 0;
-
-    // Step 7: Calculate duration from completed tasks only
-    const completedTasks = tasks.filter(t => t.status === 'done');
-    const totalTime = completedTasks.reduce((sum, t) => sum + (t.duration_minutes || 0), 0);
-
-    // Step 8: Calculate duration by category
-    const durationByCategory: Record<string, number> = {};
-    for (const task of completedTasks) {
-      if (task.duration_minutes && task.duration_minutes > 0) {
-        const category = task.category || 'غير مصنف'; // "Uncategorized"
-        durationByCategory[category] = (durationByCategory[category] || 0) + task.duration_minutes;
-      }
-    }
-
-    // Group quantities by unit
-    const quantities: Record<string, number> = {};
-    for (const task of completedTasks.filter(t => t.quantity)) {
-      const unit = task.quantity_unit || 'items';
-      quantities[unit] = (quantities[unit] || 0) + (task.quantity || 0);
-    }
-
-    // Category breakdown (completed tasks only)
-    const categoryBreakdown = this.groupByCategory(completedTasks);
-
-    console.log(`📊 Statistics calculation:`);
-    console.log(`   Total main tasks: ${totalMainTasks}`);
-    console.log(`   Fully completed: ${fullyCompleted}`);
-    console.log(`   Partially completed: ${partiallyCompleted}`);
-    console.log(`   Failed: ${fullyFailed}`);
-    console.log(`   Overall success rate: ${overallSuccessRate.toFixed(1)}%`);
-
-    return {
-      total_tasks: totalMainTasks,
-      completed_tasks: fullyCompleted,
-      failed_tasks: fullyFailed,
-      partial_tasks: partiallyCompleted,
-      success_rate: overallSuccessRate,
-      total_time_minutes: totalTime,
-      total_quantity: quantities,
-      category_breakdown: categoryBreakdown,
-      duration_by_category: durationByCategory,
-    };
   }
 
+  // ✅ NEW: Count failed subtasks from database
+  for (const sub of allSubtasks.filter(t => t.status === 'failed')) {
+    let parentName: string | null = null;
+
+    const originMatch = sub.content.match(/\(origin:\s*([^)]+)\)/i);
+    if (originMatch && originMatch[1]) {
+      parentName = extractCleanTaskName(originMatch[1]);
+    }
+
+    if (!parentName && sub.origin_task) {
+      const parentTask = allMainTasks.find(t => {
+        const baseId = t.task_id?.split('_')[0];
+        const originBase = sub.origin_task?.split('_')[0];
+        return baseId === originBase || t.task_id === sub.origin_task;
+      });
+      if (parentTask) {
+        parentName = extractCleanTaskName(parentTask.content);
+      }
+    }
+
+    if (parentName) {
+      const entry = mainTaskMap.get(parentName);
+      if (entry) {
+        entry.failedSubtasks++;
+        entry.totalSubtasks++;
+      }
+    }
+  }
+
+  // Count failed subtasks from JSON by parent name
+  for (const sub of jsonFailedSubtasks) {
+    if (sub.parent_content) {
+      const parentName = extractCleanTaskName(sub.parent_content);
+      const entry = mainTaskMap.get(parentName);
+      if (entry) {
+        entry.failedSubtasks++;
+        entry.totalSubtasks++;
+      }
+    }
+  }
+
+  // Step 5: Calculate success percentage for each main task
+  let totalSuccessPercent = 0;
+  let fullyCompleted = 0;
+  let partiallyCompleted = 0;
+  let fullyFailed = 0;
+
+  for (const [, entry] of mainTaskMap) {
+    let successPercent: number;
+
+    if (entry.totalSubtasks === 0) {
+      // No subtasks - binary: 100% if completed, 0% if not
+      successPercent = entry.isCompleted ? 100 : 0;
+    } else {
+      // Has subtasks - calculate based on subtask completion
+      successPercent = (entry.completedSubtasks / entry.totalSubtasks) * 100;
+    }
+
+    totalSuccessPercent += successPercent;
+
+    // Categorize
+    if (successPercent === 100) {
+      fullyCompleted++;
+    } else if (successPercent === 0) {
+      fullyFailed++;
+    } else {
+      partiallyCompleted++;
+    }
+  }
+
+  // Step 6: Calculate overall success rate
+  const totalMainTasks = mainTaskMap.size;
+  const overallSuccessRate = totalMainTasks > 0 ? totalSuccessPercent / totalMainTasks : 0;
+
+  // Step 7: Calculate duration from completed tasks only
+  const completedTasks = tasks.filter(t => t.status === 'done');
+  const totalTime = completedTasks.reduce((sum, t) => sum + (t.duration_minutes || 0), 0);
+
+  // Step 8: Calculate duration by category
+  const durationByCategory: Record<string, number> = {};
+  for (const task of completedTasks) {
+    if (task.duration_minutes && task.duration_minutes > 0) {
+      const category = task.category || 'غير مصنف';
+      durationByCategory[category] = (durationByCategory[category] || 0) + task.duration_minutes;
+    }
+  }
+
+  // Group quantities by unit
+  const quantities: Record<string, number> = {};
+  for (const task of completedTasks.filter(t => t.quantity)) {
+    const unit = task.quantity_unit || 'items';
+    quantities[unit] = (quantities[unit] || 0) + (task.quantity || 0);
+  }
+
+  // Category breakdown (completed tasks only)
+  const categoryBreakdown = this.groupByCategory(completedTasks);
+
+  console.log(`📊 Statistics calculation (IMPROVED):`);
+  console.log(`   Total main tasks: ${totalMainTasks}`);
+  console.log(`   Fully completed: ${fullyCompleted}`);
+  console.log(`   Partially completed: ${partiallyCompleted}`);
+  console.log(`   Failed: ${fullyFailed}`);
+  console.log(`   Overall success rate: ${overallSuccessRate.toFixed(1)}%`);
+
+  return {
+    total_tasks: totalMainTasks,
+    completed_tasks: fullyCompleted,
+    failed_tasks: fullyFailed,
+    partial_tasks: partiallyCompleted,
+    success_rate: overallSuccessRate,
+    total_time_minutes: totalTime,
+    total_quantity: quantities,
+    category_breakdown: categoryBreakdown,
+    duration_by_category: durationByCategory,
+  };
+}
 /**
  * Get the formatted report text (same as what user sees in preview)
  * This is used by AI to ensure consistency
@@ -695,7 +753,7 @@ private async checkChallengeCompletion(
     }
 
     // ===============================================================================
-// Step 3: Group completed subtasks by parent NAME - SIMPLIFIED
+// Step 3: Group completed subtasks by parent NAME - IMPROVED v2
 // ===============================================================================
 const completedSubtasksByParentName = new Map<string, Task[]>();
 const processedSubtasks = new Set<string>();
@@ -761,6 +819,41 @@ for (const task of data.tasks) {
         processedSubtasks.add(task.task_id);
         console.log(`   ✓ Grouped under: "${parentName}"`);
         break;
+      }
+    }
+  }
+  
+  // ✅ NEW PRIORITY 4: Try intelligent name matching for common patterns
+  if (!processedSubtasks.has(task.task_id)) {
+    // Look for parent tasks that might contain this subtask
+    // Example: "منع السكر الأبيض" might belong to "الالتزام بالنظام الغذائي"
+    
+    // Get all potential parent names
+    const allPotentialParents = new Set<string>();
+    for (const t of data.tasks.filter(t => !t.origin_task)) {
+      allPotentialParents.add(extractCleanTaskName(t.content));
+    }
+    for (const name of failedSubtasksByParentName.keys()) {
+      allPotentialParents.add(name);
+    }
+    
+    // Check if any failed subtask with the same name has a known parent
+    if (data.failedTasksJson) {
+      const matchingFailedByName = data.failedTasksJson.failed_tasks.find(ft => 
+        ft.is_subtask && extractCleanTaskName(ft.content) === cleanSubtaskName
+      );
+      
+      if (matchingFailedByName && matchingFailedByName.parent_content) {
+        const parentName = extractCleanTaskName(matchingFailedByName.parent_content);
+        console.log(`   📌 Found parent via failed JSON sibling: "${parentName}"`);
+        
+        if (!completedSubtasksByParentName.has(parentName)) {
+          completedSubtasksByParentName.set(parentName, []);
+        }
+        completedSubtasksByParentName.get(parentName)!.push(task);
+        processedSubtasks.add(task.task_id);
+        console.log(`   ✓ Grouped under: "${parentName}"`);
+        continue;
       }
     }
   }
