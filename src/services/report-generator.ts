@@ -654,13 +654,13 @@ private async checkChallengeCompletion(
 
     // Statistics (main tasks only, subtasks excluded from counts)
     text += `📈 الإحصائيات:\n`;
-    text += `- إجمالي المهام الرئيسية: ${stats.total_tasks}\n`;
-    text += `- مكتملة بالكامل: ${stats.completed_tasks}\n`;
-    if (stats.partial_tasks > 0) {
-      text += `- مكتملة جزئياً: ${stats.partial_tasks}\n`;
-    }
-    text += `- فاشلة: ${stats.failed_tasks}\n`;
-    text += `- معدل النجاح: ${stats.success_rate.toFixed(1)}%\n`;
+text += `- إجمالي المهام الرئيسية: ${stats.total_tasks}\n`;
+text += `- مكتملة بالكامل: ${stats.completed_tasks}\n`;
+if (stats.partial_tasks > 0) {
+  text += `- مكتملة جزئياً: ${stats.partial_tasks} ⚠️\n`;
+}
+text += `- فاشلة: ${stats.failed_tasks}\n`;
+text += `- معدل النجاح: ${stats.success_rate.toFixed(1)}%\n`;
 
     // Duration breakdown by category
     if (stats.total_time_minutes > 0) {
