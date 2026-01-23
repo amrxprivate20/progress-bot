@@ -2595,38 +2595,78 @@ async function processTaskFailure(
 
     const isRecurring = due?.is_recurring || false;
 
-    if (isRecurring) {
-      // For recurring tasks, don't touch Todoist - it stays for next attempt
-      await ctx.reply(
-        `✅ تم تسجيل الفشل:\n` +
-        `❌ ${taskName}\n\n` +
-        `📅 المهمة ستظل في Todoist لمحاولة لاحقة\n` +
-        `💾 تم تسجيل الفشل في قاعدة البيانات`
-      );
-    } else if (!isRecurring && todoistTaskId) {
-      // Non-recurring task - ask user what to do
-      const chatId = ctx.chat?.id.toString() || '';
+    // If we have a Todoist task, complete it (this postpones recurring, removes non-recurring)
+    // But first mark it so the webhook ignores this completion
+    if (todoistTaskId) {
+      const todoistToken = await ctx.settings.get('todoist_api_token');
+      if (todoistToken) {
+        // Store marker so webhook knows to ignore this completion
+        const markerKey = `failure_completion_${todoistTaskId}`;
+        console.log(`🔒 Creating failure completion marker: ${markerKey}`);
 
-      // Store pending action
-      await ctx.db.insert('conversation_state', {
-        chat_id: `failure_action_${chatId}`,
-        conversation_type: 'failure_action',
-        data: {
-          todoistTaskId,
-          taskName,
-        },
-        expires_at: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
-      });
+        try {
+          // Delete any existing marker first (in case of retry)
+          await ctx.db.delete('conversation_state', { chat_id: op.eq(markerKey) }).catch(() => {});
 
-      await ctx.reply(
-        `✅ تم تسجيل الفشل:\n` +
-        `❌ ${taskName}\n\n` +
-        `❓ هل تريد حذف هذه المهمة من Todoist؟\n` +
-        `(مهمة غير متكررة)\n\n` +
-        `أرسل "نعم" للحذف أو "لا" للإبقاء عليها`
-      );
+          await ctx.db.insert('conversation_state', {
+            chat_id: markerKey,
+            conversation_type: 'failure_completion',
+            data: { taskId: todoistTaskId, taskName },
+            expires_at: new Date(Date.now() + 5 * 60 * 1000).toISOString(), // 5 minutes
+          });
+
+          // Small delay to ensure marker is committed before Todoist webhook fires
+          await new Promise(resolve => setTimeout(resolve, 300));
+
+          console.log(`✅ Marker created successfully: ${markerKey}`);
+        } catch (markerError) {
+          console.error('❌ Failed to create failure completion marker:', markerError);
+          // Continue anyway - we still want to complete the task
+        }
+
+        // Complete the task in Todoist
+        const closeResponse = await fetch(
+          `https://api.todoist.com/rest/v2/tasks/${todoistTaskId}/close`,
+          {
+            method: 'POST',
+            headers: { 'Authorization': `Bearer ${todoistToken.trim()}` },
+          }
+        );
+
+        if (closeResponse.ok) {
+          if (isRecurring) {
+            await ctx.reply(
+              `✅ تم تسجيل الفشل:\n` +
+              `❌ ${taskName}\n\n` +
+              `🔄 تم تأجيل المهمة للموعد التالي في Todoist\n` +
+              `💾 تم تسجيل الفشل في قاعدة البيانات`
+            );
+          } else {
+            await ctx.reply(
+              `✅ تم تسجيل الفشل:\n` +
+              `❌ ${taskName}\n\n` +
+              `🗑️ تم إزالة المهمة من Todoist\n` +
+              `💾 تم تسجيل الفشل في قاعدة البيانات`
+            );
+          }
+        } else {
+          console.error(`Failed to close task in Todoist: ${closeResponse.status}`);
+          await ctx.reply(
+            `✅ تم تسجيل الفشل:\n` +
+            `❌ ${taskName}\n\n` +
+            `⚠️ فشل إغلاق المهمة في Todoist\n` +
+            `💾 تم تسجيل الفشل في قاعدة البيانات`
+          );
+        }
+      } else {
+        await ctx.reply(
+          `✅ تم تسجيل الفشل:\n` +
+          `❌ ${taskName}\n\n` +
+          `ستظهر في تقرير اليوم`
+        );
+      }
     } else {
-      // No Todoist task or already handled
+      // No Todoist task (manual entry)
       await ctx.reply(
         `✅ تم تسجيل الفشل:\n` +
         `❌ ${taskName}\n\n` +
@@ -2716,46 +2756,6 @@ if (pendingFailureNewTask.length > 0) {
     await ctx.reply('⚠️ اسم المهمة مطلوب');
     return;
   }
-
-// Handle failure action confirmation (delete non-recurring failed task)
-const failureActionKey = `failure_action_${chatId}`;
-const pendingFailureAction = await ctx.db.select('conversation_state', {
-  filter: { chat_id: op.eq(failureActionKey) },
-});
-
-if (pendingFailureAction.length > 0) {
-  const actionData = (pendingFailureAction[0] as any).data || {};
-  const todoistTaskId = actionData.todoistTaskId;
-  const taskName = actionData.taskName;
-
-  // Delete action state
-  await ctx.db.delete('conversation_state', { chat_id: op.eq(failureActionKey) });
-
-  const lowerText = text.trim().toLowerCase();
-  
-  if (lowerText === 'نعم' || lowerText === 'yes') {
-    // Delete from Todoist
-    const todoistToken = await ctx.settings.get('todoist_api_token');
-    if (todoistToken && todoistTaskId) {
-      const deleteResponse = await fetch(
-        `https://api.todoist.com/rest/v3/tasks/${todoistTaskId}`,
-        {
-          method: 'DELETE',
-          headers: { 'Authorization': `Bearer ${todoistToken.trim()}` },
-        }
-      );
-
-      if (deleteResponse.ok) {
-        await ctx.reply(`✅ تم حذف المهمة من Todoist:\n${taskName}`);
-      } else {
-        await ctx.reply(`⚠️ فشل حذف المهمة من Todoist`);
-      }
-    }
-  } else {
-    await ctx.reply(`✅ تم الإبقاء على المهمة في Todoist`);
-  }
-  return;
-}
 
   // Log as failed task (no Todoist task to postpone/delete)
   await processTaskFailure(ctx, null, taskName, null);

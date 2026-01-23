@@ -343,8 +343,39 @@ export async function handleTodoistWebhook(
     };
   }
 
-  // ✅ DEDUPLICATION: Prevent same task from being completed twice within 20 minutes
   const taskId = event.event_data.id;
+
+  // ✅ Check if this is a failure completion (logged via /log_failure) - should be ignored
+  // Method 1: Check for explicit marker
+  const failureCompletionKey = `failure_completion_${taskId}`;
+  console.log(`🔍 Checking for failure completion marker: ${failureCompletionKey}`);
+
+  try {
+    const failureCompletion = await db.select('conversation_state', {
+      filter: { chat_id: op.eq(failureCompletionKey) },
+      limit: 1
+    });
+
+    console.log(`📊 Marker search result: found ${failureCompletion.length} records`);
+
+    if (failureCompletion.length > 0) {
+      // This completion was triggered by manual failure logging - ignore it
+      console.log(`⏭️ FAILURE COMPLETION (marker): Task ${taskId} was completed as part of failure logging - ignoring webhook`);
+
+      // Clean up the marker
+      await db.delete('conversation_state', { chat_id: op.eq(failureCompletionKey) }).catch(() => {});
+
+      return {
+        success: true,
+        message: `Ignored failure completion (marker found): ${taskId}`,
+      };
+    }
+  } catch (e) {
+    console.error('❌ Error checking failure completion marker:', e);
+  }
+
+
+  // ✅ DEDUPLICATION: Prevent same task from being completed twice within 20 minutes
   const recentCompletionKey = `recent_completion_${taskId}`;
 
   try {
