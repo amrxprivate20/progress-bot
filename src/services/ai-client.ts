@@ -48,6 +48,7 @@ export interface UnifiedAIResponse {
   mainCommentary: string;
   challengeEvaluation: string; // "✅" or "❌"
   reward: string;
+  daySummary?: string; // ✅ NEW: Brief AI summary for future reference
   goalsAnalysis: {
     completed: string[];
     inProgress: string[];
@@ -107,30 +108,45 @@ setDebugLogger(logger: any): void {
 
     const response = await retryWithBackoff(
       async () => {
-        const res = await fetch(`${this.baseUrl}/chat/completions`, {
-          method: 'POST',
-          headers: {
-            'Authorization': `Bearer ${this.apiKey}`,
-            'Content-Type': 'application/json',
-            'HTTP-Referer': 'https://progress-bot.workers.dev',
-            'X-Title': 'Progress Bot',
-          },
-          body: JSON.stringify(request),
-        });
+        // Add 25 second timeout to avoid webhook timeout
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 25000);
 
-        if (!res.ok) {
-          const error = await res.text();
-          throw new ExternalAPIError(
-            `OpenRouter API error: ${res.status} - ${error}`,
-            'openrouter'
-          );
+        try {
+          const res = await fetch(`${this.baseUrl}/chat/completions`, {
+            method: 'POST',
+            headers: {
+              'Authorization': `Bearer ${this.apiKey}`,
+              'Content-Type': 'application/json',
+              'HTTP-Referer': 'https://progress-bot.workers.dev',
+              'X-Title': 'Progress Bot',
+            },
+            body: JSON.stringify(request),
+            signal: controller.signal,
+          });
+
+          clearTimeout(timeoutId);
+
+          if (!res.ok) {
+            const error = await res.text();
+            throw new ExternalAPIError(
+              `OpenRouter API error: ${res.status} - ${error}`,
+              'openrouter'
+            );
+          }
+
+          return res.json() as Promise<AICompletionResponse>;
+        } catch (error) {
+          clearTimeout(timeoutId);
+          if (error instanceof Error && error.name === 'AbortError') {
+            throw new ExternalAPIError('AI request timed out after 25 seconds', 'openrouter');
+          }
+          throw error;
         }
-
-        return res.json() as Promise<AICompletionResponse>;
       },
       {
-        maxAttempts: 3,
-        initialDelayMs: 1000,
+        maxAttempts: 2, // Reduced retries to avoid long waits
+        initialDelayMs: 500,
       }
     );
 
@@ -410,6 +426,9 @@ Q: [سؤالك هنا]
 ## [REWARD]
 (اقترح مكافأة مناسبة لإنجازات اليوم - شيء عملي وممتع، جملة واحدة قصيرة)
 
+## [DAY_SUMMARY]
+(ملخص موجز لليوم في 2-3 جمل للرجوع إليه لاحقاً. اذكر أهم الإنجازات والتحديات والدروس. مثال: "يوم جيد رغم التحديات الصباحية. أنجزت معظم المهام الأساسية وتعلمت أهمية التركيز على الأولويات.")
+
 ## [GOALS_ANALYSIS]
 تحليل الأهداف الأسبوعية (استخدم هذا الشكل بالضبط):
 
@@ -492,6 +511,7 @@ CONTENT: Struggles with focus when notifications are enabled. Needs quiet enviro
       mainCommentary: '',
       challengeEvaluation: '❌',
       reward: '',
+      daySummary: '', // ✅ NEW: AI-generated day summary
       goalsAnalysis: {
         completed: [],
         inProgress: [],
@@ -528,6 +548,13 @@ CONTENT: Struggles with focus when notifications are enabled. Needs quiet enviro
     const rewardMatch = response.match(/\[REWARD\]([\s\S]*?)(?:\[|$)/i);
     if (rewardMatch && rewardMatch[1]) {
       result.reward = rewardMatch[1].trim();
+    }
+
+    // ✅ Extract day summary for future reference
+    const summaryMatch = response.match(/\[DAY_SUMMARY\]([\s\S]*?)(?:\[|$)/i);
+    if (summaryMatch && summaryMatch[1]) {
+      result.daySummary = summaryMatch[1].trim();
+      console.log('📝 Day summary extracted:', result.daySummary.substring(0, 100));
     }
 
     // AFTER (CORRECT - more flexible parsing):
@@ -1190,6 +1217,9 @@ Q: [سؤالك هنا]
 ## [REWARD]
 (اقترح مكافأة مناسبة لإنجازات اليوم - شيء عملي وممتع، جملة واحدة قصيرة)
 
+## [DAY_SUMMARY]
+(ملخص موجز لليوم في 2-3 جمل للرجوع إليه لاحقاً. اذكر أهم الإنجازات والتحديات والدروس. مثال: "يوم جيد رغم التحديات الصباحية. أنجزت معظم المهام الأساسية وتعلمت أهمية التركيز على الأولويات.")
+
 ## [GOALS_ANALYSIS]
 تحليل الأهداف الأسبوعية (استخدم هذا الشكل بالضبط):
 
@@ -1271,6 +1301,7 @@ CONTENT: Struggles with focus when notifications are enabled. Needs quiet enviro
       mainCommentary: '',
       challengeEvaluation: '❌',
       reward: '',
+      daySummary: '', // ✅ NEW: AI-generated day summary
       goalsAnalysis: {
         completed: [],
         inProgress: [],
@@ -1307,6 +1338,13 @@ CONTENT: Struggles with focus when notifications are enabled. Needs quiet enviro
     const rewardMatch = response.match(/\[REWARD\]([\s\S]*?)(?:\[|$)/i);
     if (rewardMatch && rewardMatch[1]) {
       result.reward = rewardMatch[1].trim();
+    }
+
+    // ✅ Extract day summary for future reference
+    const summaryMatch = response.match(/\[DAY_SUMMARY\]([\s\S]*?)(?:\[|$)/i);
+    if (summaryMatch && summaryMatch[1]) {
+      result.daySummary = summaryMatch[1].trim();
+      console.log('📝 Day summary extracted:', result.daySummary.substring(0, 100));
     }
 
     // AFTER (CORRECT - more flexible parsing):

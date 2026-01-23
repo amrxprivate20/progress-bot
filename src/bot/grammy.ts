@@ -23,6 +23,8 @@ import { createMediaStorageService } from '../services/supabase-storage';
 import { getTodayInEgypt, getYesterdayInEgypt } from '../utils/timezone';
 import { handleConfirmCommand } from './confirm-handler';
 import { syncFailuresFromTodoist, completeParentInTodoistIfAllDone } from '../handlers/todoist';
+import type { FailedTask } from '../services/failure-manager';
+import { getDailyFailures, upsertDailyFailures } from '../services/failure-manager';
 
 /**
  * Wrapper for commands that require exclusive lock
@@ -65,6 +67,7 @@ export interface BotContext extends Context {
   db: SupabaseClient;
   settings: SettingsManager;
   reportProcessorNamespace: DurableObjectNamespace;
+  executionContext?: ExecutionContext; // For waitUntil background processing
   env: {
     SUPABASE_URL: string;
     SUPABASE_ANON_KEY: string;
@@ -81,7 +84,8 @@ export function createBot(
   db: SupabaseClient,
   settings: SettingsManager,
   reportProcessorNamespace: DurableObjectNamespace,
-  env: { SUPABASE_URL: string; SUPABASE_ANON_KEY: string; SUPABASE_SERVICE_ROLE_KEY?: string; TELEGRAM_BOT_TOKEN: string }
+  env: { SUPABASE_URL: string; SUPABASE_ANON_KEY: string; SUPABASE_SERVICE_ROLE_KEY?: string; TELEGRAM_BOT_TOKEN: string },
+  executionContext?: ExecutionContext
 ): Bot<BotContext> {
   const bot = new Bot<BotContext>(token);
 
@@ -90,6 +94,7 @@ export function createBot(
     ctx.db = db;
     ctx.settings = settings;
     ctx.reportProcessorNamespace = reportProcessorNamespace;
+    ctx.executionContext = executionContext;
     ctx.env = env;
     await next();
   });
@@ -107,16 +112,22 @@ export function createBot(
 
 async function sendAutoStatus(ctx: BotContext) {
   try {
+    // ✅ FIXED: Only show auto-status when debug mode is enabled
+    const debugMode = await ctx.settings.get('debugger_mode');
+    if (debugMode !== 'true') {
+      return; // Skip auto-status when not in debug mode
+    }
+
     const chatId = ctx.chat?.id.toString() || '';
-    
+
     // Check for remaining pending operations
     const allPending = await ctx.db.select('conversation_state', {});
-    const userPending = allPending.filter(s => 
+    const userPending = allPending.filter(s =>
       (s.chat_id as string).includes(chatId)
     );
-    
+
     if (userPending.length > 0) {
-      let msg = '📊 **حالة النظام:**\n';
+      let msg = '🐛 **[DEBUG] حالة النظام:**\n';
       msg += `عمليات معلقة: ${userPending.length}\n`;
       msg += `استخدم /status لمزيد من التفاصيل`;
       await ctx.reply(msg, { parse_mode: 'Markdown' });
@@ -135,37 +146,38 @@ function registerCommands(bot: Bot<BotContext>) {
     const welcomeMessage = `
 👋 مرحباً! أنا بوت تتبع التقدم الخاص بك.
 
-📊 **التقارير:**
-/today - عرض ملخص اليوم
-/report YYYY-MM-DD - تقرير تاريخ محدد
-/progress - ملخص + تأكيد التحليل
-/confirm - بدء التحليل الكامل
+📊 التقارير:
+/today - ملخص سريع لليوم
+/progress - ملخص + تحليل AI
+/report YYYY-MM-DD - تقرير محفوظ
 
-📔 **اليوميات:**
-/journal_start - بدء جلسة يوميات
-/journal_end - إنهاء الجلسة
-/journal_resume - استئناف الجلسة
+⏱️ تتبع المهام:
+/starttask [اسم] - بدء تتبع مهمة
+/completetask - إنهاء المهمة
+/addduration - إضافة مدة
+/addquantity - إضافة كمية
+/log_failure - تسجيل فشل
 
-🎯 **الأهداف:**
-/goals - عرض أهداف الأسبوع
-/generate_goals - توليد أهداف جديدة
-/createtasks - إنشاء مهام في Todoist
+🎯 التخطيط:
+/todayplan - خطة اليوم بالذكاء الاصطناعي
+/tomorrowplan - خطة الغد
+/goals - الأهداف والتحديات
+/createtasks - إنشاء مهام
 
-⚙️ **الإعدادات:**
-/lastupdate - حالة النظام
-/memory - عرض الذاكرة
-/clearmemory - مسح الذاكرة
+📔 اليوميات:
+/journal_start - بدء جلسة
+/journal - عرض اليوميات
 
-📝 **أخرى:**
-/log_failure - تسجيل مهمة فاشلة
-/skip_questions - تخطي الأسئلة
-/cancel - إلغاء المحادثة
-/help - المساعدة
+⚙️ الإعدادات:
+/status - حالة النظام
+/sync - مزامنة Todoist
+/memory - الذاكرة
+/debug - وضع التصحيح
 
-✨ التحليل يعمل في الخلفية بدون حدود زمنية! 🚀
+📝 /help للقائمة الكاملة
     `.trim();
 
-    await ctx.reply(welcomeMessage, { parse_mode: 'Markdown' });
+    await ctx.reply(welcomeMessage);
     await sendAutoStatus(ctx);
   });
 
@@ -173,8 +185,6 @@ function registerCommands(bot: Bot<BotContext>) {
 bot.command('status', async (ctx) => {
   try {
     const chatId = ctx.chat?.id.toString() || '';
-    
-    await ctx.reply('🔄 جاري فحص الحالة...');
 
     // Check for active task timer
     const taskKey = `active_task_${chatId}`;
@@ -184,80 +194,91 @@ bot.command('status', async (ctx) => {
 
     // Check for any pending conversations/operations
     const allPending = await ctx.db.select('conversation_state', {});
-    const userPending = allPending.filter(s => 
+    const userPending = allPending.filter(s =>
       (s.chat_id as string).includes(chatId)
     );
 
-    // Build status message
-    let statusMsg = '📊 **حالة النظام**\n\n';
-    
+    // Build status message (plain text to avoid Markdown issues)
+    let statusMsg = '📊 حالة النظام\n\n';
+
     // Active task timer
     if (activeTaskState.length > 0) {
       const taskData = (activeTaskState[0] as any).data || {};
       const taskName = taskData.taskName || 'مهمة غير معروفة';
       const startTime = taskData.startTime;
-      
+
       if (startTime) {
         const elapsed = Date.now() - startTime;
         const elapsedMinutes = Math.round(elapsed / 60000);
-        statusMsg += `⏱️ **مهمة نشطة:**\n`;
+        statusMsg += `⏱️ مهمة نشطة:\n`;
         statusMsg += `   📌 ${taskName}\n`;
         statusMsg += `   🕐 الوقت المنقضي: ${elapsedMinutes} دقيقة\n\n`;
       }
     } else {
-      statusMsg += `⏱️ **مهمة نشطة:** لا يوجد\n\n`;
+      statusMsg += `⏱️ مهمة نشطة: لا يوجد\n\n`;
     }
 
     // Pending operations
     if (userPending.length > 0) {
-      statusMsg += `📋 **عمليات معلقة:** ${userPending.length}\n`;
-      
+      statusMsg += `📋 عمليات معلقة: ${userPending.length}\n`;
+
       const operationTypes = new Map<string, number>();
-      for (const op of userPending) {
-        const type = op.conversation_type;
+      for (const pendingOp of userPending) {
+        const type = pendingOp.conversation_type;
         operationTypes.set(type, (operationTypes.get(type) || 0) + 1);
       }
-      
+
       for (const [type, count] of operationTypes) {
         const arabicType = getArabicOperationType(type);
         statusMsg += `   • ${arabicType}: ${count}\n`;
       }
-      
+
       statusMsg += `\n💡 استخدم /cancel لإلغاء العمليات المعلقة\n\n`;
     } else {
-      statusMsg += `📋 **عمليات معلقة:** لا يوجد\n\n`;
+      statusMsg += `📋 عمليات معلقة: لا يوجد\n\n`;
     }
 
-    // System info
-    const today = getTodayInEgypt();
-    const reportGen = createReportGenerator(ctx.db, ctx.settings);
-    const data = await reportGen.collectReportData(today);
-    
-    statusMsg += `📅 **إحصائيات اليوم:**\n`;
-    statusMsg += `   ✅ مهام مكتملة: ${data.tasks.length}\n`;
-    statusMsg += `   ❌ مهام فاشلة: ${data.failedTasksJson?.failed_tasks.length || 0}\n\n`;
+    // System info - wrapped in try/catch to avoid breaking status
+    try {
+      const today = getTodayInEgypt();
+      const reportGen = createReportGenerator(ctx.db, ctx.settings);
+      const data = await reportGen.collectReportData(today);
 
-    // Journal status
-    const journalMgr = createJournalManager(ctx.db);
-    const journalEntries = await journalMgr.getEntriesForDate(today);
-    const hasActiveJournal = journalEntries.some(e => e.is_session_start && !journalEntries.some(end => end.is_session_end));
-    
-    statusMsg += `📔 **اليوميات:**\n`;
-    if (hasActiveJournal) {
-      const entryCount = journalEntries.filter(e => e.message_text || e.media_url).length;
-      statusMsg += `   🟢 جلسة نشطة (${entryCount} إدخالات)\n`;
-    } else {
-      statusMsg += `   ⚪ لا توجد جلسة نشطة\n`;
+      statusMsg += `📅 إحصائيات اليوم:\n`;
+      statusMsg += `   ✅ مهام مكتملة: ${data.tasks.length}\n`;
+      statusMsg += `   ❌ مهام فاشلة: ${data.failedTasksJson?.failed_tasks?.length || 0}\n\n`;
+    } catch (reportError) {
+      console.error('Report data error in status:', reportError);
+      statusMsg += `📅 إحصائيات اليوم: غير متاح\n\n`;
+    }
+
+    // Journal status - wrapped in try/catch
+    try {
+      const today = getTodayInEgypt();
+      const journalMgr = createJournalManager(ctx.db);
+      const journalEntries = await journalMgr.getEntriesForDate(today);
+      const hasActiveJournal = journalEntries.some(e => e.is_session_start && !journalEntries.some(end => end.is_session_end));
+
+      statusMsg += `📔 اليوميات:\n`;
+      if (hasActiveJournal) {
+        const entryCount = journalEntries.filter(e => e.message_text || e.media_url).length;
+        statusMsg += `   🟢 جلسة نشطة (${entryCount} إدخالات)\n`;
+      } else {
+        statusMsg += `   ⚪ لا توجد جلسة نشطة\n`;
+      }
+    } catch (journalError) {
+      console.error('Journal error in status:', journalError);
+      statusMsg += `📔 اليوميات: غير متاح\n`;
     }
 
     statusMsg += `\n━━━━━━━━━━━━━━━━━━\n`;
     statusMsg += `✅ النظام يعمل بشكل طبيعي`;
 
-    await ctx.reply(statusMsg, { parse_mode: 'Markdown' });
+    await ctx.reply(statusMsg);
 
   } catch (error) {
     console.error('Status command error:', error);
-    await ctx.reply('❌ حدث خطأ أثناء فحص الحالة');
+    await ctx.reply('❌ حدث خطأ أثناء فحص الحالة: ' + (error instanceof Error ? error.message : 'Unknown'));
   }
 });
 
@@ -283,96 +304,97 @@ function getArabicOperationType(type: string): string {
   // Help command
   bot.command('help', async (ctx) => {
     const helpMessage = `
-📖 **دليل الاستخدام الشامل**
+📖 دليل الاستخدام الشامل
 
 ━━━━━━━━━━━━━━━━━━━━
-📊 **التقارير والملخصات:**
+📊 التقارير والملخصات:
 ━━━━━━━━━━━━━━━━━━━━
-/today - ملخص سريع لليوم
-/progress - ملخص اليوم + خيار التحليل
-/confirm - بدء التحليل الكامل بالذكاء الاصطناعي
-/report YYYY-MM-DD - تقرير تاريخ محدد
-/lastupdate - حالة النظام والإحصائيات
+/today - ملخص سريع لمهام اليوم
+/progress - ملخص اليوم مع خيار التحليل
+/confirm - بدء التحليل بالذكاء الاصطناعي
+/report YYYY-MM-DD - عرض تقرير محفوظ لتاريخ معين
+/lastupdate - إحصائيات وحالة النظام
+/status - عرض المهمة النشطة والعمليات المعلقة
 
 ━━━━━━━━━━━━━━━━━━━━
-📔 **اليوميات:**
+⏱️ تتبع المهام:
 ━━━━━━━━━━━━━━━━━━━━
-/journal_start - بدء جلسة يوميات
-/journal_end - إنهاء الجلسة
-/journal_resume - استئناف جلسة مغلقة
-/journal - عرض يوميات اليوم
-/journal YYYY-MM-DD - عرض يوميات تاريخ محدد
-📷 أثناء الجلسة: أرسل نصوص، صور، صوت، أو فيديو
+/starttask - عرض المهام المتاحة للبدء
+/starttask [اسم] - بدء تتبع مهمة محددة
+/completetask - إنهاء المهمة النشطة وحفظها
+/canceltask - إلغاء المهمة النشطة بدون حفظ
+/addduration [دقائق] - إضافة مدة يدوياً قبل الإنهاء
+/addquantity [كمية] [وحدة] - إضافة كمية قبل الإنهاء
+/log_failure - تسجيل مهمة كفاشلة وتأجيلها
 
 ━━━━━━━━━━━━━━━━━━━━
-🎯 **الأهداف والمهام:**
+🎯 التخطيط والأهداف:
 ━━━━━━━━━━━━━━━━━━━━
-/goals - أهداف الأسبوع والتحديات اليومية
-/todayplan - خطة اليوم بالساعات
-/tomorrowplan - خطة الغد بالساعات
-/generate_goals - توليد أهداف جديدة
+/todayplan - خطة اليوم بالذكاء الاصطناعي
+/tomorrowplan - خطة الغد بالذكاء الاصطناعي
+/goals - عرض أهداف الأسبوع والتحديات
+/generate_goals - توليد أهداف وتحديات جديدة
 /edit_goals - تعديل الأهداف الأسبوعية
 /edit_challenges - تعديل التحديات اليومية
-/createtasks - إنشاء مهام في Todoist
-/log_failure - تسجيل مهمة فاشلة يدوياً
+/createtasks - إنشاء مهام في Todoist من الأهداف
 /sync - مزامنة المهام من Todoist
 
 ━━━━━━━━━━━━━━━━━━━━
-🧠 **الذاكرة:**
+📔 اليوميات:
 ━━━━━━━━━━━━━━━━━━━━
-/memory - عرض الذاكرة المحفوظة
-/clearmemory - مسح الذاكرة
+/journal_start - بدء جلسة يوميات جديدة
+/journal_end - إنهاء الجلسة وحفظها
+/journal_resume - استئناف جلسة سابقة
+/journal - عرض يوميات اليوم
+/journal YYYY-MM-DD - عرض يوميات تاريخ معين
+(أثناء الجلسة: أرسل نصوص، صور، أو رسائل صوتية)
 
 ━━━━━━━━━━━━━━━━━━━━
-⚙️ **أخرى:**
+🧠 الذاكرة:
 ━━━━━━━━━━━━━━━━━━━━
-/skip_questions - تخطي الأسئلة
-/cancel - إلغاء المحادثة
+/memory - عرض الذاكرة المحفوظة (6 فئات)
+/clearmemory - مسح جميع فئات الذاكرة
+
+━━━━━━━━━━━━━━━━━━━━
+⚙️ الإعدادات والتصحيح:
+━━━━━━━━━━━━━━━━━━━━
+/debug - تفعيل/إيقاف وضع التصحيح
+/setmodel [نموذج] - تغيير نموذج AI (claude/openrouter)
+
+━━━━━━━━━━━━━━━━━━━━
+📝 أوامر عامة:
+━━━━━━━━━━━━━━━━━━━━
+/skip_questions - تخطي أسئلة التحليل
+/cancel - إلغاء أي عملية معلقة
 /start - رسالة الترحيب
 /help - هذه الرسالة
 
 ━━━━━━━━━━━━━━━━━━━━
-💡 **نصائح:**
-• المهام تُتتبع تلقائياً من Todoist
-• التحليل يعمل في الخلفية
-• أرسل وسائط أثناء جلسة اليوميات
+💡 نصائح:
+• المهام تُسجَّل تلقائياً عند إكمالها في Todoist
+• التحليل يعمل في الخلفية (لا يوجد حد زمني)
+• استخدم /starttask لتتبع الوقت الفعلي للمهام
+• التقارير المحللة تُحفظ ويمكن استرجاعها بـ /report
     `.trim();
 
-    await ctx.reply(helpMessage, { parse_mode: 'Markdown' });
+    await ctx.reply(helpMessage);
     await sendAutoStatus(ctx);
   });
 
   // Sync command - manual Todoist sync
   bot.command('sync', async (ctx) => {
-    try {
+    await withCommandLock(ctx, '/sync', async () => {
       await ctx.reply('🔄 جاري المزامنة مع Todoist...');
 
       const today = getTodayInEgypt();
-
-      try {
-  await syncFailuresFromTodoist(today, ctx.db, ctx.settings);
-  await ctx.reply('✅ تمت المزامنة بنجاح! تم تحديث حالة المهام.');
-    await sendAutoStatus(ctx);
-} catch (error) {
-  console.error('Sync error:', error);
-  const errorMsg = error instanceof Error ? error.message : 'Unknown error';
-  await ctx.reply(
-    `❌ حدث خطأ أثناء المزامنة:\n${errorMsg}\n\n` +
-    `تحقق من:\n` +
-    `• صحة Todoist API token\n` +
-    `• صحة Project ID\n` +
-    `• اتصال الإنترنت`
-  );
-}
-
+      await syncFailuresFromTodoist(today, ctx.db, ctx.settings);
       await ctx.reply('✅ تمت المزامنة بنجاح! تم تحديث حالة المهام.');
-    } catch (error) {
-      console.error('Sync command error:', error);
-      await ctx.reply('❌ حدث خطأ أثناء المزامنة: ' + (error instanceof Error ? error.message : 'Unknown'));
-    }
+    });
+    await sendAutoStatus(ctx);
   });
 
   // Helper function to generate daily plan with hourly schedule
+  // AI-powered daily plan generator
   async function generateDailyPlan(
     ctx: BotContext,
     targetDate: string,
@@ -384,187 +406,321 @@ function getArabicOperationType(type: string): string {
     };
     const targetDateObj = new Date(targetDate + 'T12:00:00Z');
     const dayName = arabicDays[targetDateObj.getDay()] || '';
-
     const titleWord = isToday ? 'اليوم' : 'الغد';
-    let planMessage = `📅 **خطة ${titleWord} (${dayName} ${targetDate})**\n`;
-    planMessage += `ـــــــــــــــــــــــ\n\n`;
 
-    // Get day's challenge
+    // Check for AI keys
+    const openRouterKey = await ctx.settings.get('openrouter_api_key');
+    const aiModel = await ctx.settings.get('ai_model') || 'anthropic/claude-sonnet-4';
+
+    if (!openRouterKey) {
+      return `📅 **خطة ${titleWord} (${dayName} ${targetDate})**\n\n` +
+        `⚠️ مفتاح OpenRouter API غير مكون.\n` +
+        `يرجى تكوين المفتاح لاستخدام التخطيط الذكي.`;
+    }
+
+    // Gather all context data
+    // 1. Day's challenge
     const challenges = await ctx.db.select('daily_challenges', {
       filter: { challenge_date: op.eq(targetDate) },
       limit: 1,
     });
+    const dailyChallenge = challenges[0]?.challenge_text || '';
 
-    if (challenges.length > 0 && challenges[0]) {
-      planMessage += `⚡ **التحدي:**\n`;
-      planMessage += `"${challenges[0].challenge_text}"\n\n`;
+    // 2. Weekly goals
+    const weeklyGoals = await ctx.db.select('weekly_goals', {
+      limit: 1,
+    });
+    const goalsText = weeklyGoals[0]?.goals_text || '';
+
+    // 3. Circumstances from recent report
+    const circumstancesDate = isToday ? getYesterdayInEgypt() : getTodayInEgypt();
+    const reports = await ctx.db.select('daily_reports', {
+      filter: { report_date: op.eq(circumstancesDate) },
+      limit: 1,
+    });
+    let circumstances = '';
+    if (reports.length > 0 && reports[0]?.user_comments) {
+      try {
+        const comments = JSON.parse(reports[0].user_comments);
+        const answers = Object.values(comments);
+        if (answers.length > 0) {
+          circumstances = answers[answers.length - 1] as string || '';
+        }
+      } catch (e) { /* skip */ }
     }
 
-    // Get circumstances from yesterday's report (for tomorrow plan)
-    if (!isToday) {
-      const todayStr = getTodayInEgypt();
-      const todayReports = await ctx.db.select('daily_reports', {
-        filter: { report_date: op.eq(todayStr) },
-        limit: 1,
-      });
+    // 4. Memory (patterns, strategies)
+    const memoryItems = await ctx.db.select('memory', {});
+    const memoryContext = memoryItems
+      .filter((m: any) => m.content && m.content.length > 0)
+      .map((m: any) => `${m.category}: ${m.content}`)
+      .join('\n');
 
-      if (todayReports.length > 0 && todayReports[0]?.user_comments) {
-        try {
-          const comments = JSON.parse(todayReports[0].user_comments);
-          const answers = Object.values(comments);
-          if (answers.length > 0) {
-            const lastAnswer = answers[answers.length - 1] as string;
-            if (lastAnswer && lastAnswer.length > 0) {
-              planMessage += `📝 **الظروف:**\n`;
-              planMessage += `"${lastAnswer}"\n\n`;
-            }
-          }
-        } catch (e) { /* skip */ }
-      }
-    }
-
-    // Get scheduled Todoist tasks - ALL tasks with the target due date
+    // 5. Todoist tasks
     const todoistToken = await ctx.settings.get('todoist_api_token');
-
-    console.log('Plan command - targetDate:', targetDate);
+    let tasksData: Array<{
+      content: string;
+      priority: number;
+      due?: { date: string; datetime?: string };
+    }> = [];
 
     if (todoistToken) {
       try {
         const response = await fetch('https://api.todoist.com/rest/v3/tasks', {
           headers: { 'Authorization': `Bearer ${todoistToken.trim()}` },
         });
-
         if (response.ok) {
-          const allTasks = await response.json() as Array<{
-            content: string;
-            project_id: string;
-            due?: { date: string; datetime?: string };
-            priority: number;
-          }>;
-
-          console.log('Plan command - total tasks from Todoist:', allTasks.length);
-
-          // Filter: ALL tasks with the target due date (any project)
-          // Handle both date formats: "YYYY-MM-DD" and "YYYY-MM-DDTHH:MM:SS"
-          const dayTasks = allTasks.filter(t => {
-            const taskDate = t.due?.date?.split('T')[0]; // Get just the date part
+          const allTasks = await response.json() as typeof tasksData;
+          tasksData = allTasks.filter(t => {
+            const taskDate = t.due?.date?.split('T')[0];
             return taskDate === targetDate;
           });
-
-          console.log('Plan command - filtered tasks for date:', dayTasks.length);
-
-          if (dayTasks.length > 0) {
-            planMessage += `📋 **الجدول (${dayTasks.length} مهام):**\n\n`;
-
-            // Group tasks by time periods
-            const morning: typeof dayTasks = [];     // 5am - 9am
-            const workHours: typeof dayTasks = [];   // 9am - 5pm
-            const evening: typeof dayTasks = [];     // 5pm - 10pm
-            const flexible: typeof dayTasks = [];    // no specific time
-
-            for (const task of dayTasks) {
-              if (task.due?.datetime) {
-                const hour = new Date(task.due.datetime).getHours();
-                if (hour >= 5 && hour < 9) {
-                  morning.push(task);
-                } else if (hour >= 9 && hour < 17) {
-                  workHours.push(task);
-                } else if (hour >= 17 && hour < 22) {
-                  evening.push(task);
-                } else {
-                  flexible.push(task);
-                }
-              } else {
-                flexible.push(task);
-              }
-            }
-
-            // Sort each group by priority
-            const sortByPriority = (a: typeof dayTasks[0], b: typeof dayTasks[0]) =>
-              (b.priority || 1) - (a.priority || 1);
-
-            morning.sort(sortByPriority);
-            workHours.sort(sortByPriority);
-            evening.sort(sortByPriority);
-            flexible.sort(sortByPriority);
-
-            const formatTask = (task: typeof dayTasks[0]) => {
-              const priorityIcon = task.priority === 4 ? '🔴' :
-                                  task.priority === 3 ? '🟠' :
-                                  task.priority === 2 ? '🟡' : '⚪';
-              return `  ${priorityIcon} ${task.content}`;
-            };
-
-            if (morning.length > 0) {
-              planMessage += `🌅 **5am - 9am (الصباح الباكر):**\n`;
-              morning.forEach(t => planMessage += formatTask(t) + '\n');
-              planMessage += '\n';
-            }
-
-            if (workHours.length > 0) {
-              planMessage += `💼 **9am - 5pm (ساعات العمل):**\n`;
-              workHours.forEach(t => planMessage += formatTask(t) + '\n');
-              planMessage += '\n';
-            }
-
-            if (evening.length > 0) {
-              planMessage += `🌆 **5pm - 10pm (المساء):**\n`;
-              evening.forEach(t => planMessage += formatTask(t) + '\n');
-              planMessage += '\n';
-            }
-
-            if (flexible.length > 0) {
-              planMessage += `📌 **مرنة (بدون وقت محدد):**\n`;
-              flexible.forEach(t => planMessage += formatTask(t) + '\n');
-              planMessage += '\n';
-            }
-          } else {
-            planMessage += `📋 **المهام:**\n`;
-            planMessage += `لا توجد مهام مجدولة لهذا التاريخ\n\n`;
-          }
         }
-      } catch (todoistError) {
-        console.error('Todoist error in plan:', todoistError);
-        planMessage += `⚠️ خطأ في جلب المهام من Todoist\n\n`;
+      } catch (e) {
+        console.error('Todoist fetch error:', e);
       }
-    } else {
-      planMessage += `⚠️ لم يتم تكوين Todoist API token\n\n`;
     }
 
-    planMessage += `ـــــــــــــــــــــــ\n`;
-    planMessage += `💡 استخدم /createtasks لإنشاء مهام جديدة`;
+    if (tasksData.length === 0) {
+      return `📅 **خطة ${titleWord} (${dayName} ${targetDate})**\n\n` +
+        `📋 لا توجد مهام مجدولة لهذا التاريخ.\n\n` +
+        `💡 استخدم /createtasks لإنشاء مهام جديدة.`;
+    }
 
-    return planMessage;
-    await sendAutoStatus(ctx);
+    // Format tasks for AI
+    const tasksForAI = tasksData.map(t => {
+      const priorityLabel = t.priority === 4 ? 'عاجل' :
+                           t.priority === 3 ? 'مهم' :
+                           t.priority === 2 ? 'عادي' : 'منخفض';
+      const timeInfo = t.due?.datetime ?
+        ` (موعد: ${new Date(t.due.datetime).toLocaleTimeString('ar-EG', { hour: '2-digit', minute: '2-digit' })})` : '';
+      return `- ${t.content} [أولوية: ${priorityLabel}]${timeInfo}`;
+    }).join('\n');
+
+    // Build AI prompt
+    const prompt = `
+أنت مساعد ذكي متخصص في التخطيط اليومي. قم بإنشاء خطة يومية ذكية ومنظمة.
+
+## المعلومات المتاحة:
+
+**التاريخ:** ${dayName} ${targetDate} (${titleWord})
+
+**المهام المجدولة (${tasksData.length}):**
+${tasksForAI}
+
+${dailyChallenge ? `**تحدي اليوم:** ${dailyChallenge}` : ''}
+
+${goalsText ? `**أهداف الأسبوع:**\n${goalsText}` : ''}
+
+${circumstances ? `**ظروف اليوم:** ${circumstances}` : ''}
+
+${memoryContext ? `**معلومات عن المستخدم:**\n${memoryContext}` : ''}
+
+## المطلوب:
+
+اكتب خطة يومية ذكية تتضمن:
+
+1. **⏰ توصيات الاستيقاظ والنوم** - بناءً على المهام والظروف
+2. **📋 الجدول المقترح** - رتب المهام بذكاء على مدار اليوم مع:
+   - الوقت المقترح لكل مهمة
+   - المدة المتوقعة (إذا يمكن تقديرها)
+   - تجميع المهام المتشابهة
+3. **🎯 الالتزامات** - المهام السلبية (عدم فعل شيء) في قسم منفصل
+4. **📌 إذا سمح الوقت** - المهام الأقل أولوية
+5. **💡 نصائح** - 2-3 نصائح مخصصة للنجاح في هذا اليوم
+
+اكتب باللهجة المصرية بشكل ودود ومحفز. لا تكتب مقدمات طويلة، ابدأ مباشرة بالخطة.
+استخدم الإيموجي بشكل معتدل. اجعل الخطة عملية وقابلة للتنفيذ.
+`;
+
+    // Call AI
+    const aiClient = createAIClient(openRouterKey, aiModel);
+
+    try {
+      const aiResponse = await aiClient.complete([
+        { role: 'system', content: 'أنت مساعد تخطيط يومي ذكي. تتحدث بالعامية المصرية بشكل طبيعي ومحفز.' },
+        { role: 'user', content: prompt }
+      ], 0.7, 2000);
+
+      // Build final message
+      let planMessage = `📅 **خطة ${titleWord} (${dayName} ${targetDate})**\n`;
+      planMessage += `🤖 _تم إنشاؤها بالذكاء الاصطناعي_\n`;
+      planMessage += `ـــــــــــــــــــــــ\n\n`;
+      planMessage += aiResponse;
+      planMessage += `\n\nـــــــــــــــــــــــ\n`;
+      planMessage += `💡 استخدم /starttask لبدء تتبع مهمة`;
+
+      return planMessage;
+
+    } catch (aiError) {
+      console.error('AI planning error:', aiError);
+      return `📅 **خطة ${titleWord} (${dayName} ${targetDate})**\n\n` +
+        `⚠️ حدث خطأ أثناء إنشاء الخطة الذكية.\n` +
+        `${aiError instanceof Error ? aiError.message : 'خطأ غير معروف'}\n\n` +
+        `**المهام المجدولة:**\n${tasksForAI}`;
+    }
   }
 
-  // Today plan command - show plan for today with hourly schedule
+  // Today plan command - AI-powered plan for today
+  // Uses waitUntil for background processing to avoid webhook timeout
   bot.command(['todayplan', 'today_plan'], async (ctx) => {
+    const updateId = ctx.update.update_id;
+    const idempotencyKey = `plan_update_${updateId}`;
+    const chatId = ctx.chat?.id.toString() || '';
+    const botToken = ctx.env.TELEGRAM_BOT_TOKEN;
+
     try {
-      await ctx.reply('🔄 جاري إعداد خطة اليوم...');
-      const today = getTodayInEgypt();
-      const planMessage = await generateDailyPlan(ctx, today, true);
-      await ctx.reply(planMessage, { parse_mode: 'Markdown' });
+      // Check if this update was already processed (Telegram retry)
+      const existing = await ctx.db.select('conversation_state', {
+        filter: { chat_id: op.eq(idempotencyKey) },
+      });
+
+      if (existing.length > 0) {
+        console.log(`⏭️ Skipping duplicate update ${updateId}`);
+        return;
+      }
+
+      // Mark this update as being processed
+      await ctx.db.insert('conversation_state', {
+        chat_id: idempotencyKey,
+        conversation_type: 'plan_idempotency',
+        data: { startedAt: Date.now() },
+        expires_at: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
+      });
+
+      await ctx.reply('🤖 جاري إعداد خطة اليوم بالذكاء الاصطناعي...\n⏳ قد يستغرق هذا بضع ثوان...');
+
+      // Run AI generation in background using waitUntil
+      const backgroundTask = (async () => {
+        try {
+          const today = getTodayInEgypt();
+          console.log('📅 [Background] Generating plan for today:', today);
+          const planMessage = await generateDailyPlan(ctx, today, true);
+          console.log('✅ [Background] Plan generated, length:', planMessage.length);
+
+          // Send result via Telegram API directly
+          await sendTelegramMessageDirect(botToken, chatId, planMessage);
+        } catch (error) {
+          console.error('❌ [Background] Today plan error:', error);
+          await sendTelegramMessageDirect(botToken, chatId,
+            '❌ حدث خطأ: ' + (error instanceof Error ? error.message : 'Unknown'));
+        } finally {
+          await ctx.db.delete('conversation_state', { chat_id: op.eq(idempotencyKey) }).catch(() => {});
+        }
+      })();
+
+      // Use waitUntil if available, otherwise just fire and forget
+      if (ctx.executionContext?.waitUntil) {
+        ctx.executionContext.waitUntil(backgroundTask);
+      } else {
+        // Fallback: just await (may timeout)
+        await backgroundTask;
+      }
     } catch (error) {
       console.error('Today plan error:', error);
       await ctx.reply('❌ حدث خطأ: ' + (error instanceof Error ? error.message : 'Unknown'));
+      await ctx.db.delete('conversation_state', { chat_id: op.eq(idempotencyKey) }).catch(() => {});
     }
   });
 
-  // Tomorrow plan command - show plan for tomorrow with hourly schedule
+  // Tomorrow plan command - AI-powered plan for tomorrow
+  // Uses waitUntil for background processing to avoid webhook timeout
   bot.command(['tomorrowplan', 'tomorrow_plan'], async (ctx) => {
+    const updateId = ctx.update.update_id;
+    const idempotencyKey = `plan_update_${updateId}`;
+    const chatId = ctx.chat?.id.toString() || '';
+    const botToken = ctx.env.TELEGRAM_BOT_TOKEN;
+
     try {
-      await ctx.reply('🔄 جاري إعداد خطة الغد...');
-      const today = new Date(getTodayInEgypt());
-      today.setDate(today.getDate() + 1);
-      const tomorrow = today.toISOString().split('T')[0] || '';
-      const planMessage = await generateDailyPlan(ctx, tomorrow, false);
-      await ctx.reply(planMessage, { parse_mode: 'Markdown' });
+      // Check if this update was already processed (Telegram retry)
+      const existing = await ctx.db.select('conversation_state', {
+        filter: { chat_id: op.eq(idempotencyKey) },
+      });
+
+      if (existing.length > 0) {
+        console.log(`⏭️ Skipping duplicate update ${updateId}`);
+        return;
+      }
+
+      // Mark this update as being processed
+      await ctx.db.insert('conversation_state', {
+        chat_id: idempotencyKey,
+        conversation_type: 'plan_idempotency',
+        data: { startedAt: Date.now() },
+        expires_at: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
+      });
+
+      await ctx.reply('🤖 جاري إعداد خطة الغد بالذكاء الاصطناعي...\n⏳ قد يستغرق هذا بضع ثوان...');
+
+      // Run AI generation in background using waitUntil
+      const backgroundTask = (async () => {
+        try {
+          const todayDate = new Date(getTodayInEgypt());
+          todayDate.setDate(todayDate.getDate() + 1);
+          const tomorrow = todayDate.toISOString().split('T')[0] || '';
+          console.log('📅 [Background] Generating plan for tomorrow:', tomorrow);
+          const planMessage = await generateDailyPlan(ctx, tomorrow, false);
+          console.log('✅ [Background] Plan generated, length:', planMessage.length);
+
+          // Send result via Telegram API directly
+          await sendTelegramMessageDirect(botToken, chatId, planMessage);
+        } catch (error) {
+          console.error('❌ [Background] Tomorrow plan error:', error);
+          await sendTelegramMessageDirect(botToken, chatId,
+            '❌ حدث خطأ: ' + (error instanceof Error ? error.message : 'Unknown'));
+        } finally {
+          await ctx.db.delete('conversation_state', { chat_id: op.eq(idempotencyKey) }).catch(() => {});
+        }
+      })();
+
+      // Use waitUntil if available, otherwise just fire and forget
+      if (ctx.executionContext?.waitUntil) {
+        ctx.executionContext.waitUntil(backgroundTask);
+      } else {
+        // Fallback: just await (may timeout)
+        await backgroundTask;
+      }
     } catch (error) {
       console.error('Tomorrow plan error:', error);
       await ctx.reply('❌ حدث خطأ: ' + (error instanceof Error ? error.message : 'Unknown'));
+      await ctx.db.delete('conversation_state', { chat_id: op.eq(idempotencyKey) }).catch(() => {});
     }
   });
+
+  // Helper function to send Telegram messages directly (for background tasks)
+  async function sendTelegramMessageDirect(botToken: string, chatId: string, text: string): Promise<void> {
+    // Split long messages
+    const MAX_LENGTH = 4000;
+    const chunks: string[] = [];
+
+    if (text.length <= MAX_LENGTH) {
+      chunks.push(text);
+    } else {
+      let remaining = text;
+      while (remaining.length > 0) {
+        if (remaining.length <= MAX_LENGTH) {
+          chunks.push(remaining);
+          break;
+        }
+        let splitAt = MAX_LENGTH;
+        const lastNewline = remaining.lastIndexOf('\n', MAX_LENGTH);
+        if (lastNewline > MAX_LENGTH * 0.5) {
+          splitAt = lastNewline + 1;
+        }
+        chunks.push(remaining.substring(0, splitAt));
+        remaining = remaining.substring(splitAt);
+      }
+    }
+
+    for (let i = 0; i < chunks.length; i++) {
+      const chunk = chunks.length > 1 ? `[${i + 1}/${chunks.length}]\n${chunks[i]}` : chunks[i];
+      await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ chat_id: chatId, text: chunk }),
+      });
+    }
+  }
 
   /**
  * Handle /progress command
@@ -686,12 +842,84 @@ async function sendLongMessage(ctx: Context, message: string) {
   });
 });
 
-  // NEW: Skip questions command
+  // NEW: Skip questions command (handles both pre-analysis and post-analysis Q&A)
   bot.command(['skip_questions', 'skipquestions'], async (ctx) => {
     try {
       const chatId = ctx.chat?.id.toString() || '';
       const conversationMgr = createConversationManager(ctx.db);
 
+      // ✅ Check for post-analysis Q&A first
+      const postQAKey = `post_qa_${chatId}`;
+      const pendingPostQA = await ctx.db.select('conversation_state', {
+        filter: { chat_id: op.eq(postQAKey) },
+      });
+
+      if (pendingPostQA.length > 0) {
+        // Skip post-analysis questions and save report immediately
+        const qaData = (pendingPostQA[0] as any).data || {};
+        const answers = qaData.answers as Record<string, string> || {};
+
+        await ctx.db.delete('conversation_state', { chat_id: op.eq(postQAKey) });
+
+        // Get pending report data
+        const pendingReportKey = `pending_report_save_${chatId}`;
+        const pendingReport = await ctx.db.select('conversation_state', {
+          filter: { chat_id: op.eq(pendingReportKey) },
+        });
+
+        if (pendingReport.length > 0) {
+          const reportState = (pendingReport[0] as any).data || {};
+          await ctx.db.delete('conversation_state', { chat_id: op.eq(pendingReportKey) });
+
+          // Combine pre-analysis and partial post-analysis answers
+          const allAnswers = {
+            ...reportState.preAnalysisAnswers,
+            ...Object.fromEntries(
+              Object.entries(answers).map(([q, a]) => [`[متابعة] ${q}`, a])
+            ),
+          };
+
+          await ctx.reply('✅ تم تخطي الأسئلة. جاري حفظ التقرير...');
+
+          await ctx.db.upsert('daily_reports', {
+            report_date: reportState.reportDate,
+            report_markdown: reportState.formattedReport,
+            success_rate: reportState.stats.success_rate,
+            total_tasks: reportState.stats.total_tasks,
+            completed_tasks: reportState.stats.completed_tasks,
+            failed_tasks: reportState.stats.failed_tasks,
+            achievement_time_minutes: reportState.stats.total_time_minutes,
+            challenge_evaluation: reportState.aiResponse.challengeEvaluation,
+            ai_commentary: reportState.aiResponse.mainCommentary,
+            suggested_reward: reportState.aiResponse.reward,
+            weekly_goals_analysis: JSON.stringify(reportState.aiResponse.goalsAnalysis),
+            user_comments: Object.keys(allAnswers).length > 0 ? JSON.stringify(allAnswers) : null,
+            obsidian_file_id: reportState.aiSummary,
+          }, 'report_date');
+
+          await ctx.reply('✅ تم حفظ التقرير بنجاح!');
+
+          // Update memory
+          if (reportState.aiResponse.memoryUpdates && Object.keys(reportState.aiResponse.memoryUpdates).length > 0) {
+            try {
+              const openRouterKey = await ctx.settings.get('openrouter_api_key');
+              const aiModel = await ctx.settings.get('ai_model') || 'anthropic/claude-sonnet-4';
+              const aiClient = createAIClient(openRouterKey?.trim() || '', aiModel);
+              const memoryMgr = createMemoryManager(ctx.db, aiClient);
+
+              for (const [category, content] of Object.entries(reportState.aiResponse.memoryUpdates)) {
+                try {
+                  await memoryMgr.updateSingleCategory(category, content as string);
+                } catch (e) { /* ignore */ }
+              }
+            } catch (e) { /* ignore */ }
+          }
+        }
+        await sendAutoStatus(ctx);
+        return;
+      }
+
+      // ✅ Check for pre-analysis Q&A
       const conversation = await conversationMgr.getConversation(chatId);
 
       if (!conversation || conversation.conversation_type !== 'qa_report') {
@@ -740,41 +968,47 @@ async function sendLongMessage(ctx: Context, message: string) {
     await sendAutoStatus(ctx);
   });
 
-  // Cancel command - ENHANCED to cancel ANY pending operation
+  // Cancel command - ENHANCED to cancel ANY pending operation including locks
 bot.command('cancel', async (ctx) => {
   try {
     const chatId = ctx.chat?.id.toString() || '';
-    
-    // Check for all types of pending operations
+
+    // Check for all types of pending operations (including command locks)
     const pendingOps = await ctx.db.select('conversation_state', {
       filter: { chat_id: op.like(`%${chatId}%`) }, // Match any key containing chatId
     });
-    
+
     if (pendingOps.length === 0) {
       await ctx.reply('✅ لا توجد عمليات نشطة للإلغاء');
       return;
     }
-    
+
     // List what we're canceling
     const operationTypes = new Set<string>();
-    for (const op of pendingOps) {
-      operationTypes.add(op.conversation_type);
+    for (const pendingOp of pendingOps) {
+      const type = pendingOp.conversation_type;
+      if (type === 'command_lock') {
+        const cmdName = (pendingOp as any).data?.commandName || 'أمر';
+        operationTypes.add(`قفل (${cmdName})`);
+      } else {
+        operationTypes.add(type);
+      }
     }
-    
+
     // Delete all pending operations for this user
-    for (const op of pendingOps) {
-      await ctx.db.delete('conversation_state', { 
-        id: op.eq(op.id as string) 
+    for (const pendingOp of pendingOps) {
+      await ctx.db.delete('conversation_state', {
+        id: op.eq(pendingOp.id as string)
       });
     }
-    
+
     const typesStr = Array.from(operationTypes).join(', ');
     await ctx.reply(
       `✅ تم إلغاء العمليات التالية:\n` +
       `${typesStr}\n\n` +
       `يمكنك البدء من جديد الآن.`
     );
-    
+
   } catch (error) {
     console.error('Cancel command error:', error);
     await ctx.reply('✅ تم الإلغاء');
@@ -955,6 +1189,85 @@ bot.command('clearmemory', async (ctx) => {
     await sendAutoStatus(ctx);
 });
 
+  // ============================================
+  // Debug & Configuration Commands
+  // ============================================
+
+  // Toggle debug mode
+  bot.command('debug', async (ctx) => {
+    try {
+      const currentMode = await ctx.settings.get('debugger_mode');
+      const isEnabled = currentMode === 'true';
+
+      // Toggle the mode
+      const newMode = isEnabled ? 'false' : 'true';
+      await ctx.settings.set('debugger_mode', newMode);
+
+      if (newMode === 'true') {
+        await ctx.reply(
+          '🐛 **وضع التصحيح مفعّل**\n\n' +
+          '• سيتم إرسال تفاصيل طلبات AI إلى قناة التصحيح\n' +
+          '• سيتم عرض حالة النظام بعد كل أمر\n' +
+          '• لإيقاف: /debug',
+          { parse_mode: 'Markdown' }
+        );
+      } else {
+        await ctx.reply(
+          '✅ **تم إيقاف وضع التصحيح**\n\n' +
+          'لن يتم إرسال تفاصيل إضافية.\n' +
+          'لتفعيل: /debug',
+          { parse_mode: 'Markdown' }
+        );
+      }
+    } catch (error) {
+      console.error('Debug command error:', error);
+      await ctx.reply('❌ حدث خطأ أثناء تغيير وضع التصحيح');
+    }
+  });
+
+  // Set AI model
+  bot.command('setmodel', async (ctx) => {
+    try {
+      const args = ctx.message?.text?.split(' ').slice(1).join(' ') || '';
+      const currentModel = await ctx.settings.get('ai_model') || 'anthropic/claude-sonnet-4';
+
+      if (!args.trim()) {
+        // Show available models and current setting
+        await ctx.reply(
+          `🤖 **إعداد نموذج الذكاء الاصطناعي**\n\n` +
+          `📌 النموذج الحالي: \`${currentModel}\`\n\n` +
+          `**النماذج المتاحة:**\n` +
+          `• \`anthropic/claude-sonnet-4\` (موصى به)\n` +
+          `• \`anthropic/claude-3.5-sonnet\`\n` +
+          `• \`anthropic/claude-3-haiku\` (أسرع)\n` +
+          `• \`openai/gpt-4o\`\n` +
+          `• \`openai/gpt-4o-mini\`\n` +
+          `• \`google/gemini-pro-1.5\`\n\n` +
+          `**الاستخدام:**\n` +
+          `/setmodel <model_name>\n\n` +
+          `**مثال:**\n` +
+          `/setmodel anthropic/claude-sonnet-4`,
+          { parse_mode: 'Markdown' }
+        );
+        return;
+      }
+
+      // Set the new model
+      const newModel = args.trim();
+      await ctx.settings.set('ai_model', newModel);
+
+      await ctx.reply(
+        `✅ **تم تغيير النموذج**\n\n` +
+        `📌 النموذج الجديد: \`${newModel}\`\n\n` +
+        `سيتم استخدام هذا النموذج في جميع طلبات AI القادمة.`,
+        { parse_mode: 'Markdown' }
+      );
+    } catch (error) {
+      console.error('Setmodel command error:', error);
+      await ctx.reply('❌ حدث خطأ أثناء تغيير النموذج');
+    }
+  });
+
   // NEW: /today command - Quick view of today's progress
   bot.command('today', async (ctx) => {
     try {
@@ -979,7 +1292,7 @@ bot.command('clearmemory', async (ctx) => {
     await sendAutoStatus(ctx);
   });
 
-  // NEW: /report command - Get report for specific date
+  // NEW: /report command - Get report for specific date (fetches saved report if exists)
   bot.command('report', async (ctx) => {
     try {
       const args = ctx.message?.text?.split(' ').slice(1) || [];
@@ -1004,33 +1317,125 @@ bot.command('clearmemory', async (ctx) => {
 
       await ctx.reply(`🔄 جاري تحميل تقرير ${dateStr}...`);
 
-      const reportGen = createReportGenerator(ctx.db, ctx.settings);
-      const preview = await reportGen.generatePreview(dateStr);
-
-      // Save target date for /confirm to use
-      const pendingReportKey = `pending_report_${chatId}`;
-      // Delete any existing pending report date first
-      try {
-        await ctx.db.delete('conversation_state', { chat_id: op.eq(pendingReportKey) });
-      } catch (e) { /* ignore */ }
-      // Save new pending report date
-      await ctx.db.insert('conversation_state', {
-        chat_id: pendingReportKey,
-        conversation_type: 'pending_report_date',
-        data: { targetDate: dateStr },
-        expires_at: new Date(Date.now() + 30 * 60 * 1000).toISOString(), // 30 minutes
+      // ✅ FIRST: Check if a saved report exists in database
+      const savedReports = await ctx.db.select<{
+        report_date: string;
+        report_markdown: string;
+        success_rate: number;
+        total_tasks: number;
+        completed_tasks: number;
+        failed_tasks: number;
+        achievement_time_minutes: number;
+        challenge_evaluation: string;
+        ai_commentary: string;
+        suggested_reward: string;
+        weekly_goals_analysis: string;
+        user_comments: string;
+      }>('daily_reports', {
+        filter: { report_date: op.eq(dateStr) },
+        limit: 1
       });
 
-      await sendLongMessage(ctx, preview.formatted_text);
+      if (savedReports.length > 0 && savedReports[0]) {
+        const saved = savedReports[0];
 
-      // Prompt for confirm with the specific date
-      await ctx.reply(
-        '─────────────────────\n' +
-        `📝 هذا ملخص تاريخ ${dateStr}\n\n` +
-        '🤖 لتحليل مفصل بالذكاء الاصطناعي، استخدم:\n' +
-        '/confirm\n\n' +
-        '💡 التحليل يشمل: تعليق شخصي، تحديث الذاكرة، تقييم التحدي، واقتراح مكافأة'
-      );
+        // ✅ Display saved report with AI analysis
+        let reportMessage = `📊 تقرير ${dateStr} (محفوظ)\n`;
+        reportMessage += '═══════════════════════\n\n';
+
+        // Stats
+        reportMessage += `📈 معدل النجاح: ${saved.success_rate}%\n`;
+        reportMessage += `✅ مهام منجزة: ${saved.completed_tasks}/${saved.total_tasks}\n`;
+        reportMessage += `❌ مهام فاشلة: ${saved.failed_tasks}\n`;
+        if (saved.achievement_time_minutes > 0) {
+          const hours = Math.floor(saved.achievement_time_minutes / 60);
+          const mins = saved.achievement_time_minutes % 60;
+          reportMessage += `⏱️ وقت الإنجاز: ${hours > 0 ? hours + ' ساعة ' : ''}${mins} دقيقة\n`;
+        }
+        reportMessage += '\n';
+
+        // Challenge evaluation
+        if (saved.challenge_evaluation) {
+          reportMessage += `🎯 التحدي اليومي: ${saved.challenge_evaluation}\n\n`;
+        }
+
+        // Full report markdown (tasks breakdown)
+        if (saved.report_markdown && saved.report_markdown !== saved.ai_commentary) {
+          reportMessage += '📋 تفاصيل المهام:\n';
+          reportMessage += '─────────────────────\n';
+          reportMessage += saved.report_markdown + '\n\n';
+        }
+
+        // AI Commentary
+        if (saved.ai_commentary) {
+          reportMessage += '🤖 تعليق الذكاء الاصطناعي:\n';
+          reportMessage += '─────────────────────\n';
+          reportMessage += saved.ai_commentary + '\n\n';
+        }
+
+        // Weekly goals analysis
+        if (saved.weekly_goals_analysis) {
+          try {
+            const goalsAnalysis = JSON.parse(saved.weekly_goals_analysis);
+            if (goalsAnalysis.completed?.length || goalsAnalysis.inProgress?.length || goalsAnalysis.neglected?.length) {
+              reportMessage += '🎯 تحليل الأهداف الأسبوعية:\n';
+              reportMessage += '─────────────────────\n';
+              if (goalsAnalysis.completed?.length) {
+                reportMessage += `✅ منجزة: ${goalsAnalysis.completed.join('، ')}\n`;
+              }
+              if (goalsAnalysis.inProgress?.length) {
+                reportMessage += `🔄 قيد التنفيذ: ${goalsAnalysis.inProgress.join('، ')}\n`;
+              }
+              if (goalsAnalysis.neglected?.length) {
+                reportMessage += `⚠️ مهملة: ${goalsAnalysis.neglected.join('، ')}\n`;
+              }
+              reportMessage += '\n';
+            }
+          } catch (e) { /* ignore parse errors */ }
+        }
+
+        // Suggested reward
+        if (saved.suggested_reward) {
+          reportMessage += `🎁 المكافأة المقترحة: ${saved.suggested_reward}\n\n`;
+        }
+
+        // User comments/journal
+        if (saved.user_comments) {
+          reportMessage += '📝 ملاحظات وتعليقات:\n';
+          reportMessage += '─────────────────────\n';
+          reportMessage += saved.user_comments + '\n';
+        }
+
+        await sendLongMessage(ctx, reportMessage);
+        await ctx.reply('✅ هذا تقرير محفوظ مسبقاً مع التحليل الكامل.');
+
+      } else {
+        // ✅ No saved report - generate preview and offer to analyze
+        const reportGen = createReportGenerator(ctx.db, ctx.settings);
+        const preview = await reportGen.generatePreview(dateStr);
+
+        // Save target date for /confirm to use
+        const pendingReportKey = `pending_report_${chatId}`;
+        try {
+          await ctx.db.delete('conversation_state', { chat_id: op.eq(pendingReportKey) });
+        } catch (e) { /* ignore */ }
+        await ctx.db.insert('conversation_state', {
+          chat_id: pendingReportKey,
+          conversation_type: 'pending_report_date',
+          data: { targetDate: dateStr },
+          expires_at: new Date(Date.now() + 30 * 60 * 1000).toISOString(),
+        });
+
+        await sendLongMessage(ctx, preview.formatted_text);
+
+        await ctx.reply(
+          '─────────────────────\n' +
+          `📝 هذا ملخص تاريخ ${dateStr} (غير محلل بعد)\n\n` +
+          '🤖 لتحليل مفصل بالذكاء الاصطناعي وحفظ التقرير، استخدم:\n' +
+          '/confirm\n\n' +
+          '💡 التحليل يشمل: تعليق شخصي، تحديث الذاكرة، تقييم التحدي، واقتراح مكافأة'
+        );
+      }
 
     } catch (error) {
       console.error('Report command error:', error);
@@ -1580,22 +1985,23 @@ bot.command(['addquantity', 'add_quantity'], async (ctx) => {
 // 3. Complete Task Command (IMMEDIATE COMPLETION)
 // ============================================
 bot.command(['completetask', 'complete_task'], async (ctx) => {
-  try {
-    const chatId = ctx.chat?.id.toString() || '';
-    const taskKey = `active_task_${chatId}`;
+  await withCommandLock(ctx, '/completetask', async () => {
+    try {
+      const chatId = ctx.chat?.id.toString() || '';
+      const taskKey = `active_task_${chatId}`;
 
-    // Get active task
-    const existingTask = await ctx.db.select('conversation_state', {
-      filter: { chat_id: op.eq(taskKey) },
-    });
+      // Get active task
+      const existingTask = await ctx.db.select('conversation_state', {
+        filter: { chat_id: op.eq(taskKey) },
+      });
 
-    if (existingTask.length === 0) {
-      await ctx.reply('❌ لا توجد مهمة نشطة.\nاستخدم /starttask لبدء مهمة جديدة');
-      return;
-    }
+      if (existingTask.length === 0) {
+        await ctx.reply('❌ لا توجد مهمة نشطة.\nاستخدم /starttask لبدء مهمة جديدة');
+        return;
+      }
 
-    const taskData = (existingTask[0] as any).data || {};
-    const startTime = taskData.startTime;
+      const taskData = (existingTask[0] as any).data || {};
+      const startTime = taskData.startTime;
     const taskName = taskData.taskName;
     const todoistTaskId = taskData.todoistTaskId;
     const startDate = taskData.startDate || getTodayInEgypt();
@@ -1647,18 +2053,27 @@ bot.command(['completetask', 'complete_task'], async (ctx) => {
     }
 
     // Build task name with metadata
-    // Format duration
-    let durationStr: string;
-    if (durationMinutes < 60) {
-      durationStr = `${durationMinutes}م`;
-    } else {
-      const hours = Math.floor(durationMinutes / 60);
-      const mins = durationMinutes % 60;
-      durationStr = mins > 0 ? `${hours}س${mins}م` : `${hours}س`;
+    // Format duration - skip if zero, use clear Arabic format
+    let durationStr: string = '';
+    if (durationMinutes > 0) {
+      if (durationMinutes < 60) {
+        durationStr = `${durationMinutes} دقيقة`;
+      } else {
+        const hours = Math.floor(durationMinutes / 60);
+        const mins = durationMinutes % 60;
+        if (mins > 0) {
+          durationStr = `${hours} ساعة ${mins} دقيقة`;
+        } else {
+          durationStr = hours === 1 ? 'ساعة' : `${hours} ساعات`;
+        }
+      }
     }
 
-    // Build final task name
-    let updatedTaskName = `${cleanName} [${durationStr}]`;
+    // Build final task name - only add duration if > 0
+    let updatedTaskName = cleanName;
+    if (durationStr) {
+      updatedTaskName += ` [${durationStr}]`;
+    }
     if (manualQuantity && manualQuantityUnit) {
       updatedTaskName += ` [${manualQuantity} ${manualQuantityUnit}]`;
     }
@@ -1798,10 +2213,11 @@ bot.command(['completetask', 'complete_task'], async (ctx) => {
       );
     }
 
-  } catch (error) {
-    console.error('Complete task error:', error);
-    await ctx.reply('❌ حدث خطأ: ' + (error instanceof Error ? error.message : 'Unknown'));
-  }
+    } catch (error) {
+      console.error('Complete task error:', error);
+      await ctx.reply('❌ حدث خطأ: ' + (error instanceof Error ? error.message : 'Unknown'));
+    }
+  });
 });
 
   // Cancel the active task
@@ -1869,8 +2285,8 @@ bot.command(['completetask', 'complete_task'], async (ctx) => {
 
   // Generate new weekly goals (typically run on Friday)
   bot.command(['generate_goals', 'generategoals'], async (ctx) => {
-    await ctx.reply('🔄 جاري توليد أهداف الأسبوع القادم...');
-    try {
+    await withCommandLock(ctx, '/generate_goals', async () => {
+      await ctx.reply('🔄 جاري توليد أهداف الأسبوع القادم...');
 
       const openRouterKey = await ctx.settings.get('openrouter_api_key');
       const aiModel = await ctx.settings.get('ai_model') || 'anthropic/claude-sonnet-4';
@@ -1909,10 +2325,7 @@ bot.command(['completetask', 'complete_task'], async (ctx) => {
       } else {
         await ctx.reply(`❌ ${result.error || 'حدث خطأ أثناء توليد الأهداف'}`);
       }
-    } catch (error) {
-      console.error('Generate goals error:', error);
-      await ctx.reply('❌ حدث خطأ: ' + (error instanceof Error ? error.message : 'Unknown'));
-    }
+    });
     await sendAutoStatus(ctx);
   });
 
@@ -2134,25 +2547,56 @@ async function processTaskFailure(
 ): Promise<void> {
   try {
     const today = getTodayInEgypt();
-    
-    // Log failure to database
-    await ctx.db.insert('tasks', {
-      task_id: todoistTaskId || `manual_fail_${Date.now()}`,
-      content: taskName,
-      completed_at: new Date(`${today}T23:59:59+02:00`).toISOString(),
-      status: 'failed',
-      duration_minutes: 0,
-      created_at: new Date().toISOString(),
-    });
+    const { extractCleanTaskName } = await import('../utils/task-parser');
 
-    console.log(`✅ Logged failure: ${taskName}`);
+    // ✅ FIXED: Append to daily_failures JSON instead of tasks table
+    // Get existing failures for today
+    let dailyFailures = await getDailyFailures(ctx.db, today);
+
+    if (!dailyFailures) {
+      // Create new daily failures document
+      dailyFailures = {
+        date: today,
+        last_sync: new Date().toISOString(),
+        failed_tasks: [],
+      };
+    }
+
+    // Create the failed task entry
+    const failedTask: FailedTask = {
+      id: todoistTaskId || `manual_fail_${Date.now()}`,
+      content: taskName,
+      parent_id: null,
+      parent_content: null,
+      priority: 1,
+      is_subtask: false,
+      description: 'Manual failure logged via /log_failure',
+    };
+
+    // Check if task already exists in failures (by clean name)
+    const cleanName = extractCleanTaskName(taskName);
+    const existingIndex = dailyFailures.failed_tasks.findIndex(f =>
+      extractCleanTaskName(f.content) === cleanName
+    );
+
+    if (existingIndex >= 0) {
+      // Replace existing
+      dailyFailures.failed_tasks[existingIndex] = failedTask;
+      console.log(`🔄 Updated existing failure: ${taskName}`);
+    } else {
+      // Add new
+      dailyFailures.failed_tasks.push(failedTask);
+      console.log(`✅ Added new failure to JSON: ${taskName}`);
+    }
+
+    // Update timestamp and save
+    dailyFailures.last_sync = new Date().toISOString();
+    await upsertDailyFailures(ctx.db, dailyFailures);
 
     const isRecurring = due?.is_recurring || false;
 
     if (isRecurring) {
-      // ✅ FIXED: For recurring tasks, we DON'T touch Todoist
-      // The task stays in Todoist for tomorrow's attempt
-      // We only log it as failed in our local database
+      // For recurring tasks, don't touch Todoist - it stays for next attempt
       await ctx.reply(
         `✅ تم تسجيل الفشل:\n` +
         `❌ ${taskName}\n\n` +
@@ -2162,7 +2606,7 @@ async function processTaskFailure(
     } else if (!isRecurring && todoistTaskId) {
       // Non-recurring task - ask user what to do
       const chatId = ctx.chat?.id.toString() || '';
-      
+
       // Store pending action
       await ctx.db.insert('conversation_state', {
         chat_id: `failure_action_${chatId}`,
@@ -2189,9 +2633,6 @@ async function processTaskFailure(
         `ستظهر في تقرير اليوم`
       );
     }
-
-    // Sync failures to update JSON
-    await syncFailuresFromTodoist(today, ctx.db, ctx.settings);
 
   } catch (error) {
     console.error('Error processing task failure:', error);
@@ -2328,6 +2769,105 @@ if (pendingFailureAction.length > 0) {
 
       const conversationMgr = createConversationManager(ctx.db);
       const journalMgr = createJournalManager(ctx.db);
+
+      // ✅ Check for post-analysis Q&A (after AI analysis, before report save)
+      const postQAKey = `post_qa_${chatId}`;
+      const pendingPostQA = await ctx.db.select('conversation_state', {
+        filter: { chat_id: op.eq(postQAKey) },
+      });
+
+      if (pendingPostQA.length > 0) {
+        const qaData = (pendingPostQA[0] as any).data || {};
+        const questions = qaData.questions as string[] || [];
+        const answers = qaData.answers as Record<string, string> || {};
+        let currentIndex = qaData.currentIndex as number || 0;
+
+        // Save current answer
+        const currentQuestion = questions[currentIndex];
+        if (currentQuestion) {
+          answers[currentQuestion] = text.trim();
+        }
+        currentIndex++;
+
+        if (currentIndex < questions.length) {
+          // More questions - update state and send next question
+          await ctx.db.update(
+            'conversation_state',
+            { chat_id: op.eq(postQAKey) },
+            { data: { questions, answers, currentIndex } }
+          );
+
+          await ctx.reply(
+            `[${currentIndex + 1}/${questions.length}] ❓ ${questions[currentIndex]}`
+          );
+        } else {
+          // All questions answered - finalize report save
+          await ctx.db.delete('conversation_state', { chat_id: op.eq(postQAKey) });
+
+          // Get pending report data
+          const pendingReportKey = `pending_report_save_${chatId}`;
+          const pendingReport = await ctx.db.select('conversation_state', {
+            filter: { chat_id: op.eq(pendingReportKey) },
+          });
+
+          if (pendingReport.length > 0) {
+            const reportState = (pendingReport[0] as any).data || {};
+            await ctx.db.delete('conversation_state', { chat_id: op.eq(pendingReportKey) });
+
+            // Combine pre-analysis and post-analysis answers
+            const allAnswers = {
+              ...reportState.preAnalysisAnswers,
+              ...Object.fromEntries(
+                Object.entries(answers).map(([q, a]) => [`[متابعة] ${q}`, a])
+              ),
+            };
+
+            // Save report with all Q&A
+            await ctx.reply('💾 جاري حفظ التقرير...');
+
+            await ctx.db.upsert('daily_reports', {
+              report_date: reportState.reportDate,
+              report_markdown: reportState.formattedReport,
+              success_rate: reportState.stats.success_rate,
+              total_tasks: reportState.stats.total_tasks,
+              completed_tasks: reportState.stats.completed_tasks,
+              failed_tasks: reportState.stats.failed_tasks,
+              achievement_time_minutes: reportState.stats.total_time_minutes,
+              challenge_evaluation: reportState.aiResponse.challengeEvaluation,
+              ai_commentary: reportState.aiResponse.mainCommentary,
+              suggested_reward: reportState.aiResponse.reward,
+              weekly_goals_analysis: JSON.stringify(reportState.aiResponse.goalsAnalysis),
+              user_comments: JSON.stringify(allAnswers),
+              obsidian_file_id: reportState.aiSummary,
+            }, 'report_date');
+
+            await ctx.reply('✅ تم حفظ التقرير بنجاح مع جميع الإجابات!');
+
+            // Update memory (with delays)
+            if (reportState.aiResponse.memoryUpdates && Object.keys(reportState.aiResponse.memoryUpdates).length > 0) {
+              try {
+                const openRouterKey = await ctx.settings.get('openrouter_api_key');
+                const aiModel = await ctx.settings.get('ai_model') || 'anthropic/claude-sonnet-4';
+                const aiClient = createAIClient(openRouterKey?.trim() || '', aiModel);
+                const memoryMgr = createMemoryManager(ctx.db, aiClient);
+
+                for (const [category, content] of Object.entries(reportState.aiResponse.memoryUpdates)) {
+                  try {
+                    await memoryMgr.updateSingleCategory(category, content as string);
+                  } catch (e) {
+                    console.error(`Memory update failed for ${category}:`, e);
+                  }
+                }
+              } catch (e) {
+                console.error('Memory update error:', e);
+              }
+            }
+          } else {
+            await ctx.reply('⚠️ لم يتم العثور على بيانات التقرير المعلق');
+          }
+        }
+        return;
+      }
 
       // Check for pending edit_goals
       const editGoalsKey = `edit_goals_${chatId}`;

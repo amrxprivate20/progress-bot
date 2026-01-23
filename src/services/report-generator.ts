@@ -425,7 +425,7 @@ async getFormattedReportForAI(date?: string): Promise<string> {
 }
 
   /**
-   * Generate summary of past week
+   * Generate summary of past week - uses AI-generated summaries when available
    */
   generatePastWeekSummary(reports: DailyReport[]): string {
     if (reports.length === 0) {
@@ -434,10 +434,43 @@ async getFormattedReportForAI(date?: string): Promise<string> {
 
     let summary = '';
     for (const report of reports) {
-      summary += `📅 ${report.report_date}: `;
-      summary += `معدل النجاح ${report.success_rate}%، `;
-      summary += `${report.completed_tasks} مهام منجزة، `;
-      summary += `${report.failed_tasks} مهام فاشلة\n`;
+      summary += `📅 **${report.report_date}**\n`;
+      summary += `   • معدل النجاح: ${report.success_rate}%، منجزة: ${report.completed_tasks}، فاشلة: ${report.failed_tasks}\n`;
+
+      // Add challenge result
+      if (report.challenge_evaluation) {
+        summary += `   • التحدي: ${report.challenge_evaluation}\n`;
+      }
+
+      // ✅ PRIORITY: Use AI-generated day summary if available (stored in obsidian_file_id)
+      if (report.obsidian_file_id && report.obsidian_file_id.length > 10) {
+        summary += `   • ${report.obsidian_file_id}\n`;
+      } else if (report.ai_commentary) {
+        // Fallback: Extract first meaningful sentence from AI commentary
+        const firstSentence = report.ai_commentary.split(/[.!؟]/)[0]?.trim();
+        if (firstSentence && firstSentence.length > 20) {
+          const excerpt = firstSentence.length > 120 ? firstSentence.substring(0, 120) + '...' : firstSentence;
+          summary += `   • ${excerpt}\n`;
+        }
+      }
+
+      // Add goals highlights (condensed)
+      if (report.weekly_goals_analysis) {
+        try {
+          const goals = typeof report.weekly_goals_analysis === 'string'
+            ? JSON.parse(report.weekly_goals_analysis)
+            : report.weekly_goals_analysis;
+
+          const parts: string[] = [];
+          if (goals.completed?.length > 0) parts.push(`✅${goals.completed.length}`);
+          if (goals.neglected?.length > 0) parts.push(`⚠️${goals.neglected.length}`);
+          if (parts.length > 0) {
+            summary += `   • أهداف: ${parts.join(' ')}\n`;
+          }
+        } catch (e) { /* ignore */ }
+      }
+
+      summary += '\n';
     }
 
     return summary;
@@ -662,23 +695,22 @@ if (stats.partial_tasks > 0) {
 text += `- فاشلة: ${stats.failed_tasks}\n`;
 text += `- معدل النجاح: ${stats.success_rate.toFixed(1)}%\n`;
 
-    // Duration breakdown by category
+    // Duration breakdown by category (only show if there's tracked time)
     if (stats.total_time_minutes > 0) {
       text += `\n⏱ توزيع الوقت:\n`;
       text += `- الإجمالي: ${formatArabicTime(stats.total_time_minutes)}\n`;
 
       // Sort categories by duration (descending)
       const sortedCategories = Object.entries(stats.duration_by_category)
-        .sort(([, a], [, b]) => b - a);
+        .sort(([, a], [, b]) => b - a)
+        .filter(([, minutes]) => minutes > 0); // Only show categories with time
 
       for (const [category, minutes] of sortedCategories) {
         const percentage = ((minutes / stats.total_time_minutes) * 100).toFixed(0);
         text += `- ${category}: ${formatArabicTime(minutes)} (${percentage}%)\n`;
       }
-    } else {
-      text += `- وقت الإنجاز: ${formatArabicTime(stats.total_time_minutes)}\n`;
+      text += '\n';
     }
-    text += '\n';
 
     // ✅ Build hierarchical structure using NAME-BASED grouping
     text += `🎯 مهام اليوم:\n`;

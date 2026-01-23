@@ -115,6 +115,31 @@ export class MemoryManager {
   }
 
   /**
+   * Update a single memory category (for use with delays between categories)
+   */
+  async updateSingleCategory(category: string, newContent: string): Promise<void> {
+    if (!MEMORY_CATEGORIES.includes(category as any)) {
+      console.warn(`Invalid memory category: ${category}`);
+      return;
+    }
+
+    const currentContent = await this.getCategory(category);
+
+    // Check for duplication
+    if (this.isDuplicate(currentContent, newContent)) {
+      console.log(`Skipping duplicate content in ${category}`);
+      return;
+    }
+
+    // Append new content
+    const updatedContent = this.appendContent(currentContent, newContent);
+
+    // Upsert to database
+    await this.upsertCategory(category, updatedContent);
+    console.log(`Updated single memory category: ${category}`);
+  }
+
+  /**
    * Clear all memory
    */
   async clearAll(): Promise<void> {

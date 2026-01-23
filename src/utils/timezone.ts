@@ -140,8 +140,13 @@ export function formatArabicDate(date: Date): string {
 
 /**
  * Format time duration in Arabic with proper plural rules
+ * Returns empty string for zero duration (caller should handle/skip)
  */
 export function formatArabicTime(minutes: number): string {
+  if (minutes <= 0) {
+    return ''; // Return empty for zero - caller should skip display
+  }
+
   const hours = Math.floor(minutes / 60);
   const mins = minutes % 60;
 
@@ -153,10 +158,6 @@ export function formatArabicTime(minutes: number): string {
 
   if (mins > 0) {
     parts.push(formatArabicNumber(mins, 'دقيقة', 'دقيقتان', 'دقائق', 'دقيقة'));
-  }
-
-  if (parts.length === 0) {
-    return 'صفر دقيقة';
   }
 
   return parts.join(' و ');

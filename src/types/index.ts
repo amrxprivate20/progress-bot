@@ -215,6 +215,7 @@ export interface UnifiedAIResponse {
   main_commentary: string;
   challenge_evaluation: string; // ✅ or ❌
   reward: string;
+  day_summary?: string; // ✅ NEW: Brief AI summary for future reference
   goals_analysis: {
     completed: string[];
     in_progress: string[];

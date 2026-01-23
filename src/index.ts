@@ -78,13 +78,13 @@ export default {
         console.log('📨 Telegram webhook received');
         const botToken = env.TELEGRAM_BOT_TOKEN;
 
-        // Pass Durable Object namespace and env to bot
+        // Pass Durable Object namespace, env, and ExecutionContext to bot
         const bot = createBot(botToken, db, settings, env.REPORT_PROCESSOR, {
           SUPABASE_URL: env.SUPABASE_URL,
           SUPABASE_ANON_KEY: env.SUPABASE_ANON_KEY,
           SUPABASE_SERVICE_ROLE_KEY: env.SUPABASE_SERVICE_ROLE_KEY,
           TELEGRAM_BOT_TOKEN: env.TELEGRAM_BOT_TOKEN,
-        });
+        }, ctx); // Pass ExecutionContext for waitUntil
         const handler = createTelegramWebhookHandler(bot);
 
         try {

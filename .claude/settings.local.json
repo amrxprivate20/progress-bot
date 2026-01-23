@@ -10,7 +10,8 @@
       "Bash(find:*)",
       "Bash(curl:*)",
       "Bash(npm run deploy:*)",
-      "Bash(npm run typecheck:*)"
+      "Bash(npm run typecheck:*)",
+      "Bash(npm run:*)"
     ]
   }
 }

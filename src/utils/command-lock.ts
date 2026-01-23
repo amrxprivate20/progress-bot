@@ -1,7 +1,7 @@
 // src/utils/command-lock.ts
 import { SupabaseClient, op } from '../database/client';
 
-const COMMAND_LOCK_TIMEOUT = 5 * 60 * 1000; // 5 minutes
+const COMMAND_LOCK_TIMEOUT = 2 * 60 * 1000; // 2 minutes (reduced from 5)
 
 /**
  * Acquire a command lock for a user

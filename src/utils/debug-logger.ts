@@ -132,14 +132,22 @@ export class DebugLogger {
     if (!this.botToken || !this.chatId) return;
 
     try {
-      // Split long messages
+      // Split long messages into chunks
       const chunks = this.splitMessage(text);
+      const totalChunks = chunks.length;
 
-      for (const chunk of chunks) {
+      for (let i = 0; i < chunks.length; i++) {
+        let chunk = chunks[i] || '';
+
+        // Add chunk indicator if multiple chunks
+        if (totalChunks > 1) {
+          chunk = `📄 [${i + 1}/${totalChunks}]\n\n${chunk}`;
+        }
+
+        // Try with Markdown first, fallback to plain text if it fails
         const body: any = {
           chat_id: this.chatId,
           text: chunk,
-          parse_mode: 'Markdown',
         };
 
         // Add thread ID if available
@@ -147,6 +155,7 @@ export class DebugLogger {
           body.message_thread_id = this.debugThreadId;
         }
 
+        // First try without parse_mode (plain text - most reliable)
         const response = await fetch(
           `https://api.telegram.org/bot${this.botToken}/sendMessage`,
           {
@@ -158,12 +167,14 @@ export class DebugLogger {
 
         if (!response.ok) {
           const error = await response.text();
-          console.error('Failed to send debug message to Telegram:', error);
+          console.error(`Failed to send debug chunk ${i + 1}/${totalChunks}:`, error);
+        } else {
+          console.log(`✅ Debug chunk ${i + 1}/${totalChunks} sent (${chunk.length} chars)`);
         }
 
-        // Small delay between chunks
-        if (chunks.length > 1) {
-          await new Promise(resolve => setTimeout(resolve, 100));
+        // Delay between chunks to avoid rate limiting
+        if (totalChunks > 1 && i < chunks.length - 1) {
+          await new Promise(resolve => setTimeout(resolve, 300));
         }
       }
     } catch (error) {
@@ -172,30 +183,43 @@ export class DebugLogger {
   }
 
   /**
-   * Split message into chunks for Telegram
+   * Split message into chunks for Telegram (max 4096 chars)
+   * Handles long lines and tries to split at natural boundaries
    */
   private splitMessage(text: string): string[] {
-    const MAX_LENGTH = 4096;
-    
+    const MAX_LENGTH = 4000; // Leave some margin for chunk indicators
+
     if (text.length <= MAX_LENGTH) {
       return [text];
     }
 
     const chunks: string[] = [];
-    let currentChunk = '';
-    const lines = text.split('\n');
+    let remaining = text;
 
-    for (const line of lines) {
-      if (currentChunk.length + line.length + 1 > MAX_LENGTH) {
-        chunks.push(currentChunk);
-        currentChunk = line + '\n';
-      } else {
-        currentChunk += line + '\n';
+    while (remaining.length > 0) {
+      if (remaining.length <= MAX_LENGTH) {
+        chunks.push(remaining);
+        break;
       }
-    }
 
-    if (currentChunk) {
-      chunks.push(currentChunk);
+      // Find a good split point
+      let splitAt = MAX_LENGTH;
+
+      // Try to split at a newline
+      const lastNewline = remaining.lastIndexOf('\n', MAX_LENGTH);
+      if (lastNewline > MAX_LENGTH * 0.5) {
+        splitAt = lastNewline + 1;
+      } else {
+        // Try to split at a space
+        const lastSpace = remaining.lastIndexOf(' ', MAX_LENGTH);
+        if (lastSpace > MAX_LENGTH * 0.5) {
+          splitAt = lastSpace + 1;
+        }
+        // Otherwise just split at MAX_LENGTH
+      }
+
+      chunks.push(remaining.substring(0, splitAt));
+      remaining = remaining.substring(splitAt);
     }
 
     return chunks;

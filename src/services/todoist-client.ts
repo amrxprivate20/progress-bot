@@ -469,13 +469,6 @@ TASK: [المهمة التالية]
 // Factory Functions
 // ============================================
 
-export function createTodoistClient(
-  apiToken: string,
-  projectId: string
-): TodoistClient {
-  return new TodoistClient(apiToken, projectId);
-}
-
 export function createTaskGeneratorService(
   db: SupabaseClient,
   settings: SettingsManager,

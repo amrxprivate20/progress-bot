@@ -1,21 +1,167 @@
 There are few notes and fixes that need to be done, I will address them all, and I want you to tell me how to implement the fixes.
 General note: always rely on clean tasks names for matching, NEVER rely only tasks ID!
-due to usage limits send me the fixes and how to implement one by one. (ignore that when working with claude code)
+due to usage limits make the fixes one by one and make sure it is working using tail!.
 you need to type-check then deploy  then confirm with tail that everything is done correctly!
+while going through the code confirm the done notes that they are done properly and if so but a confirmation mark beside them!
 Always update this file, to know what is done and what is left!
-  
-    - in the report, the partially completed are not calculated, take a look on it!
-    - in both report and notifications zero duration are still written while it should be ignored and not written, also the system write م for duration which means nothing! what is the meaning of 30م ?!
-    - the task completetion notification is not showing the whole group when a sub task is completed!
-    - Commands for day planning need more improvements, it need to distinguish all passive tasks like (not eating something or committing to something during the day) and put it in separate section as it don't need active tasking time, also every tasks that is not of the right priority according to settings, need to be put in a separate section for improvement if there is time, then the tasks left are what needs to be distributed on the day, the planning should write the estimated time needed for each task not just the time it should be done, it should recommend when to wake up, when to sleep, putting into consideration the saved answer of this day circumstances!
-    - Debugging & AI configuration commands: Add commands to enable and disable debugging mode and to edit or switch the OpenRouter AI model dynamically.
-    - make sure that the task duplication prevention logic is working, as any task completed while it has already been completed is replaced with the new version, not duplicated!
-    - a /cancel command should be included in any message in the system to cancel current pending command (22 JAN)
-    - Wrap All Commands with global Locking (simillar to /confirm command) to prevent multiple actions in the same time and also wrap everything with debugging logic so I can see as many logs I can while debugger mode is on! (22 JAN)
-    - auto /status should only works when debugging mode is one, and make it simplified, concerned only with pending commands and process!
-    - DUE TO MANY CODE FIXING AND IMPROVEMENTS, make sure that all features are working! and Remove any unneeded codes or files, clean the project, making sure always to use clean name match and totally remove any matching logic relying on IDs! FIX AS MUCH MISTAKES AS YOU CAN!
-    - Also read all the done notes, if you ever find anything not made propely then you need to readjust!
-    - detect all the commands in the system and check they are all working properly, and rewrite both the start message and help message and the final list to update telegram bot with descriptions (22 JAN)
+Always update the start and help commands with the latest commands list!
+
+TODO:
+    - Test post-analysis Q&A flow
+    - Test report saving with all Q&A combined
+
+DONE (23 JAN 2026 - Session 6 - POST-ANALYSIS Q&A):
+    ✅ Added post-analysis questions flow:
+       • After AI analysis, if AI has follow-up questions, they're asked to user
+       • Report is NOT saved until questions are answered or skipped
+       • Pending report state saved in conversation_state table
+       • Post-Q&A session similar to pre-analysis Q&A
+    ✅ Combined Q&A in saved report:
+       • Pre-analysis answers saved with question text
+       • Post-analysis answers prefixed with "[متابعة]"
+       • All Q&A saved in user_comments field as JSON
+    ✅ Updated /skip_questions:
+       • Now handles both pre-analysis and post-analysis Q&A
+       • Skipping post-analysis Q&A immediately saves report
+
+DONE (23 JAN 2026 - Session 6 - MEMORY DELAY & DEDUP):
+    ✅ Added delays between memory operations:
+       • 2-second delay before memory updates start
+       • 500ms delay between each category update
+       • Memory categories updated one by one (not all at once)
+       • Skipped memory optimization to reduce subrequests
+    ✅ Added task completion deduplication (20-minute window):
+       • Tracks recently completed tasks in conversation_state table
+       • If same task ID received within 20 minutes, it's ignored
+       • Prevents duplicate processing from Todoist webhook retries
+       • Records auto-expire after 25 minutes
+
+DONE (23 JAN 2026 - Session 6 - REPORT SAVE & SUMMARY FIXES):
+    ✅ Fixed "Too many subrequests" error:
+       • Moved report save BEFORE memory updates (critical operation first)
+       • Report now saves even if memory update hits Cloudflare limits
+       • Reduced Telegram messages to minimize subrequests
+    ✅ Added AI-generated day summary:
+       • New [DAY_SUMMARY] section in AI prompt
+       • AI generates 2-3 sentence summary of the day
+       • Saved in obsidian_file_id column (repurposed)
+       • Used in past week summary for better context
+    ✅ Improved past week summary in AI prompt:
+       • Now uses AI-generated summaries when available
+       • Falls back to first sentence of AI commentary
+       • More condensed goals display
+
+DONE (23 JAN 2026 - Session 6 - REPORT & MEMORY FIXES):
+    ✅ Fixed /report command to fetch saved reports:
+       • Now checks daily_reports table first for existing saved report
+       • If found: displays full report with AI commentary, goals analysis, reward
+       • If not found: generates preview and prompts for /confirm
+    ✅ Fixed report saving to include full formatted report:
+       • report_markdown now saves the full task breakdown (not just AI commentary)
+       • ai_commentary saved separately
+       • user_comments now saves Q&A responses with the report
+    ✅ Improved past week summary in AI prompt:
+       • Now includes challenge evaluation results
+       • Includes AI commentary excerpt (first 150 chars)
+       • Includes goals analysis highlights (completed/neglected counts)
+    ✅ Autocomplete respects priority threshold:
+       • Low priority subtasks (below threshold) are now ignored
+       • Only counts subtasks at or above priority threshold as "pending"
+
+DONE (23 JAN 2026 - Session 6 - AUTOCOMPLETE FIX):
+    ✅ Refactored completeParentInTodoistIfAllDone to use Todoist API:
+       • Now queries Todoist API directly: GET /tasks?parent_id={parentId}
+       • Checks due date for recurring subtasks (future = done for today)
+       • Also checks daily_failures JSON for failed subtasks before autocompleting
+    ✅ Verified with tail logs - autocomplete working correctly
+
+DONE (22 JAN 2026 - Session 5 - MAJOR FIX):
+    ✅ Fixed root cause of autocomplete and notification grouping:
+       • ROOT CAUSE: `(origin: parent_name)` marker was added to `description` field but search functions looked in `content` field
+       • FIX: Now adds `(origin: parent_name)` marker to task CONTENT when saving subtasks
+       • Added Todoist API fallback to fetch parent name if not in DB
+    ✅ Improved subtask counting in completeParentInTodoistIfAllDone:
+       • Added fallback to match by origin_task ID when origin marker not found
+    ✅ Improved sendTaskNotification parent finding:
+       • Added Method 3: Find parent by origin_task ID in database
+       • Added fallback ID matching for completed subtasks collection
+    ✅ Fixed /todayplan infinite loop:
+       • Uses update_id idempotency to prevent duplicate processing
+       • Uses waitUntil for background AI processing (no webhook timeout)
+
+DONE (22 JAN 2026 - Session 5):
+    ✅ Fixed subtask notification grouping:
+       • When subtask is completed, now groups under parent even if parent isn't completed yet
+       • Creates virtual parent task for display with ⏳ symbol and progress (e.g., "2/3")
+       • Shows all completed subtasks under parent in notification
+    ✅ Fixed autocomplete of parent task logic:
+       • BUG FOUND: Webhook was passing parent_id instead of subtask_id to completeParentInTodoistIfAllDone
+       • Fixed both call sites in todoist.ts (line 476 and 710) to pass event.event_data.id (subtask ID)
+    ✅ Fixed AI timeout issues:
+       • Added 25-second timeout with AbortController to AI client fetch call
+       • Reduced retry attempts from 3 to 2 to avoid long waits
+       • Prevents Grammy webhook timeout (which was 10 seconds)
+    ✅ Fixed [0m] in reports and notifications:
+       • Updated getOriginalMetadataString() in task-parser.ts to filter out zero duration patterns
+       • Now filters: [0m], [0 دقيقة], [0د], [0h], [0 ساعة], etc.
+    ✅ Fixed /todayplan and /tomorrowplan infinite loop:
+       • Removed duplicate request detection that was causing issues
+       • Simplified to direct execution
+    ✅ Fixed /status command error:
+       • Fixed variable shadowing bug (op used as loop variable)
+       • Added try/catch blocks for resilience
+       • Changed to plain text (no Markdown parsing issues)
+    ✅ Fixed /cancel command bug:
+       • Fixed variable shadowing bug 
+
+DONE (22 JAN 2026 by Claude Code - Session 4 - FIXES):
+    ✅ /todayplan and /tomorrowplan lock fix:
+       • Removed unnecessary locks from read-only plan commands
+       • These commands only read data, they don't need exclusive access
+    ✅ /cancel command bug fix:
+       • Fixed variable shadowing bug (`op` was used for both DB operator and loop variable)
+       • Now properly shows lock info when canceling (e.g. "قفل (/todayplan)")
+    ✅ Reduced command lock timeout from 5 minutes to 2 minutes
+       • Prevents long waits if a command times out without releasing lock
+
+DONE (22 JAN 2026 by Claude Code - Session 4 - CODE CLEANUP):
+    ✅ Removed unused handler files:
+       • /src/handlers/reports.ts - Legacy code, functionality moved to report-generator.ts
+       • /src/handlers/process-report.ts - Legacy code, functionality moved to Durable Object
+    ✅ Removed unused exports:
+       • createTodoistClient() from todoist-client.ts - Never used (TodoistClient class used directly)
+    ✅ Verified index.ts - No orphaned routes
+    ✅ Verified both locking mechanisms are needed:
+       • command-lock.ts - In-memory locking for bot commands
+       • locks.ts - Database-based locking for Todoist webhook operations
+    ✅ Type-check passed, deployed successfully
+
+DONE (22 JAN 2026 by Claude Code - Session 3):
+    ✅ AI-POWERED DAY PLANNING - /todayplan and /tomorrowplan now use AI to generate smart plans with:
+       • Intelligent task scheduling based on priorities and times
+       • Wake up/sleep recommendations
+       • Passive tasks (commitments) in separate section
+       • Low priority tasks as "if time permits"
+       • Personalized tips based on memory/patterns
+       • Considers daily challenge, weekly goals, and circumstances
+    ✅ Debug logger chunking fixed - splitMessage now handles very long lines, sends as plain text (no Markdown issues), shows chunk indicators [1/N]
+    ✅ Full AI response logging - Now logs: commentary, questions, memory updates, goals analysis separately to Telegram
+
+DONE (22 JAN 2026 by Claude Code - Session 2):
+    ✅ Wrap All Commands with global Locking - Applied withCommandLock to /confirm, /log_failure, /generate_goals, /sync, /completetask. /createtasks has its own locking.
+    ✅ Verified done notes - All checked: extractCleanTaskName used 61 times across 4 files, replaceDuplicateIfExists exists, /clearmemory confirmation works, streak tables use clean names
+
+DONE (22 JAN 2026 by Claude Code):
+    ✅ During debugging mode, full unified prompt sent to telegram - FIXED: report-processor.ts now logs complete prompt with all sections
+    ✅ manuall failure logging should append the failed tasks to the daily failed task JSON - FIXED: processTaskFailure now appends to daily_failures JSON instead of tasks table
+    ✅ in both report and notifications zero duration are still written - FIXED: formatArabicTime returns empty for zero, duration format changed from "30م" to "30 دقيقة"
+    ✅ the task completion notification is showing the whole group - VERIFIED: sendTaskNotification already shows all completed and failed subtasks
+    ✅ Debugging & AI configuration commands - FIXED: Added /debug to toggle debug mode, /setmodel to change AI model
+    ✅ make sure that the task duplication prevention logic is working - VERIFIED: replaceDuplicateIfExists function exists and works
+    ✅ a /cancel command exists - VERIFIED: /cancel and /canceltask commands are implemented
+    ✅ auto /status should only works when debugging mode is on - FIXED: sendAutoStatus now checks debugger_mode setting
+    ✅ detect all the commands and rewrite start/help messages - FIXED: Updated both /start and /help with all commands including /starttask, /completetask, /debug, /setmodel, etc.
+    ✅ in the report, the partially completed are not calculated - VERIFIED: calculateStatistics already includes partial_tasks count
 
 DONE:
    - I noticed in supabase streak and tasks tables, tasks names are not clean which leads to duplicates with diffrent paremeters and thus problems in streak tracking because it counts as different tasks

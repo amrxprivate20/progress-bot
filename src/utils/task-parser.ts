@@ -223,18 +223,45 @@ export function extractCleanTaskName(content: string): string {
 /**
  * Get display-friendly metadata string from raw task content
  * This preserves the user's original format from brackets ONLY
- * 
+ * Filters out zero duration patterns like [0m], [0 دقيقة], [0د], etc.
+ *
  * Example:
  * Input: "الاستيقاظ قبل شروق الشمس [30د، 4 مرات]"
  * Output: "[30د، 4 مرات]"
- * 
+ *
  * Input: "قراءة المسبعات مساءا [15 دقيقة، 5 مرات]"
  * Output: "[15 دقيقة، 5 مرات]"
- * 
+ *
  * Input: "Task [2h, 5 pages]"
  * Output: "[2h, 5 pages]"
+ *
+ * Input: "Task [0m]"
+ * Output: "" (filtered out)
  */
 export function getOriginalMetadataString(content: string): string {
   const match = content.match(/\[([^\]]+)\]/);
-  return match ? `[${match[1]}]` : '';
+  if (!match || !match[1]) return '';
+
+  const metadataContent = match[1];
+
+  // Filter out zero duration patterns
+  // [0m], [0 دقيقة], [0د], [0 minute], [0 minutes], etc.
+  const zeroDurationPatterns = [
+    /^0\s*m$/i,                    // [0m]
+    /^0\s*min(ute)?s?$/i,          // [0min], [0minute], [0minutes]
+    /^0\s*د$/,                     // [0د]
+    /^0\s*دقيقة?$/,                // [0 دقيقة]
+    /^0\s*h$/i,                    // [0h]
+    /^0\s*hour?s?$/i,              // [0hour], [0hours]
+    /^0\s*س$/,                     // [0س]
+    /^0\s*ساعة?$/,                 // [0 ساعة]
+  ];
+
+  for (const pattern of zeroDurationPatterns) {
+    if (pattern.test(metadataContent.trim())) {
+      return ''; // Filter out zero durations
+    }
+  }
+
+  return `[${metadataContent}]`;
 }

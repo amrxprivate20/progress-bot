@@ -32,7 +32,7 @@ export interface ReportJobData {
 }
 
 export interface JobStatus {
-  status: 'pending' | 'processing' | 'completed' | 'failed';
+  status: 'pending' | 'processing' | 'completed' | 'failed' | 'waiting_for_answers';
   progress: string;
   result?: any;
   error?: string;
@@ -246,8 +246,70 @@ if (debugLogger.isEnabled()) {
   for (const [category, content] of Object.entries(reportData.memory)) {
     fullPrompt += `### ${category}\n${content || 'لا توجد معلومات'}\n\n`;
   }
-  
-  fullPrompt += `\n[... rest of prompt template with QUESTIONS, COMMENTARY, etc. sections ...]\n`;
+
+  // Add the full prompt template (same as buildUnifiedPrompt)
+  fullPrompt += `
+---
+
+# المطلوب منك:
+
+قدم تحليلاً شاملاً ومحفزاً بناءً على كل المعلومات أعلاه. اتبع هذا الهيكل بدقة:
+
+## [QUESTIONS]
+(اطرح 1-3 أسئلة توضيحية قصيرة ومباشرة إذا كنت تحتاج معلومات إضافية لفهم السياق بشكل أفضل. كل سؤال في سطر منفصل يبدأ بـ "Q:")
+Q: [سؤالك هنا]
+
+## [COMMENTARY]
+(تعليق شامل ومحفز باللهجة المصرية، يشمل:
+- تحليل الأداء اليوم
+- ملاحظات على الأنماط والتحسينات
+- تشجيع وتحفيز شخصي
+- نصائح عملية للتطوير
+- ربط الإنجازات بالأهداف طويلة المدى
+
+اكتب بطريقة طبيعية ودافئة، كأنك صديق مقرب يعرفك جيداً.)
+
+## [CHALLENGE_EVAL]
+(تقييم التحدي اليومي:
+✅ إذا تم إنجازه
+❌ إذا لم يتم إنجازه
+فقط رمز واحد بدون تفسير)
+
+## [REWARD]
+(اقترح مكافأة مناسبة لإنجازات اليوم - شيء عملي وممتع، جملة واحدة قصيرة)
+
+## [GOALS_ANALYSIS]
+تحليل الأهداف الأسبوعية (استخدم هذا الشكل بالضبط):
+
+### منجزة ✅
+- [اذكر الأهداف المنجزة أو اكتب "لا يوجد"]
+
+### قيد التنفيذ 🔄
+- [اذكر الأهداف قيد التنفيذ أو اكتب "لا يوجد"]
+
+### مهملة ⚠️
+- [اذكر الأهداف المهملة أو اكتب "لا يوجد"]
+
+## [MEMORY_UPDATES]
+⚠️ **CRITICAL FORMAT RULES:**
+1. Each memory update MUST start with "CATEGORY:" on its own line
+2. Followed by "CONTENT:" on the next line
+3. Leave a blank line between different category updates
+4. Category names MUST match EXACTLY (copy-paste from list above)
+
+**Available Categories:**
+- Personal Insights & Patterns
+- Successful Strategies & What Works
+- Triggers & Challenges
+- Important Milestones & Breakthroughs
+- Recurring Themes & Lessons
+- Personal Information & Facts
+
+## [MEMORY_OPTIMIZATION]
+(إذا كانت الذاكرة بحاجة لتحسين وإعادة تنظيم، اكتب "OPTIMIZE_NEEDED"، وإلا اكتب "NOT_NEEDED")
+
+---
+`;
   
   // Log the complete prompt
   await debugLogger.log(
@@ -276,67 +338,139 @@ const aiResponse = await aiClient.generateDailyReport({
   journalContent: reportData.journal,
   formattedReport,
 });
-    // ✅ TEMPORARY DEBUG: Log raw AI response
-    console.log('🤖 RAW AI RESPONSE - MEMORY_UPDATES section:');
-    const debugMatch = aiResponse.mainCommentary.match(/\[MEMORY_UPDATES\]([\s\S]*?)(?:\[|$)/i);
-        if (debugMatch) {
-      console.log(debugMatch[1]);
-        } else {
-      console.log('No MEMORY_UPDATES section found');
-}
-
       const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
       console.log(`✅ [Job ${jobId}] AI analysis complete in ${elapsed}s`);
-      
-      await debugLogger.log(
-        `✅ **AI Analysis Complete**\n\n` +
-        `Duration: ${elapsed}s\n` +
-        `Questions: ${aiResponse.questions.length}\n` +
-        `Memory updates: ${Object.keys(aiResponse.memoryUpdates).length}`
-      );
+
+      // ✅ Log the FULL AI response to Telegram
+      if (debugLogger.isEnabled()) {
+        // Log summary
+        await debugLogger.log(
+          `✅ **AI Analysis Complete**\n\n` +
+          `Duration: ${elapsed}s\n` +
+          `Questions: ${aiResponse.questions.length}\n` +
+          `Memory updates: ${Object.keys(aiResponse.memoryUpdates).length}\n` +
+          `Challenge eval: ${aiResponse.challengeEvaluation}\n` +
+          `Reward: ${aiResponse.reward || 'None'}`
+        );
+
+        // Log full commentary
+        await debugLogger.log(
+          `📝 **AI COMMENTARY (Full)**\n\n` +
+          aiResponse.mainCommentary,
+          '📝'
+        );
+
+        // Log questions if any
+        if (aiResponse.questions.length > 0) {
+          await debugLogger.log(
+            `❓ **AI QUESTIONS**\n\n` +
+            aiResponse.questions.map((q, i) => `${i + 1}. ${q}`).join('\n'),
+            '❓'
+          );
+        }
+
+        // Log memory updates
+        if (Object.keys(aiResponse.memoryUpdates).length > 0) {
+          let memoryLog = `🧠 **MEMORY UPDATES**\n\n`;
+          for (const [category, content] of Object.entries(aiResponse.memoryUpdates)) {
+            memoryLog += `**${category}:**\n${content}\n\n`;
+          }
+          await debugLogger.log(memoryLog, '🧠');
+        }
+
+        // Log goals analysis
+        if (aiResponse.goalsAnalysis) {
+          await debugLogger.log(
+            `🎯 **GOALS ANALYSIS**\n\n` +
+            `Completed: ${aiResponse.goalsAnalysis.completed.join(', ') || 'None'}\n` +
+            `In Progress: ${aiResponse.goalsAnalysis.inProgress.join(', ') || 'None'}\n` +
+            `Neglected: ${aiResponse.goalsAnalysis.neglected.join(', ') || 'None'}`,
+            '🎯'
+          );
+        }
+      }
 
       // Send results to user
       await this.sendReportResults(chatId, botToken, reportData, aiResponse);
 
-      // Update memory with detailed logging
-if (aiResponse.memoryUpdates && Object.keys(aiResponse.memoryUpdates).length > 0) {
-  console.log(`🧠 [Job ${jobId}] Updating memory with ${Object.keys(aiResponse.memoryUpdates).length} categories...`);
-  console.log(`🧠 [Job ${jobId}] Memory updates object:`, JSON.stringify(aiResponse.memoryUpdates));
-  
-  try {
-    // Log what we're updating
-    for (const [category, content] of Object.entries(aiResponse.memoryUpdates)) {
-      console.log(`  📝 Category: "${category}"`);
-      console.log(`  📝 Content preview: ${content.substring(0, 100)}...`);
-    }
-    
-    await memoryMgr.updateMemory(aiResponse.memoryUpdates);
-    console.log(`✅ [Job ${jobId}] Memory updated successfully`);
-    
-    // Send notification to user
-    await this.sendTelegramMessage(chatId, botToken, '🧠 تم تحديث الذاكرة بنجاح');
-  } catch (memError) {
-    console.error(`❌ [Job ${jobId}] Memory update failed:`, memError);
-    console.error(`❌ [Job ${jobId}] Memory error stack:`, (memError as Error).stack);
-    await this.sendTelegramMessage(chatId, botToken, '⚠️ فشل تحديث الذاكرة: ' + (memError as Error).message);
-  }
-} else {
-  console.log(`ℹ️ [Job ${jobId}] No memory updates in AI response`);
-}
+      // ✅ CHECK FOR POST-ANALYSIS QUESTIONS
+      const postAnalysisQuestions = aiResponse.questions || [];
+      const stats = reportGen.calculateStatistics(reportData.tasks, reportData.failedTasksJson);
+      const aiSummary = aiResponse.daySummary || this.generateBriefSummary(aiResponse, stats);
 
-      // Check memory optimization
-      if (aiResponse.memoryOptimization === 'OPTIMIZE_NEEDED') {
-        console.log(`🔄 [Job ${jobId}] Optimizing memory...`);
-        await memoryMgr.checkOptimizationTriggers();
+      if (postAnalysisQuestions.length > 0) {
+        console.log(`❓ [Job ${jobId}] AI has ${postAnalysisQuestions.length} follow-up questions`);
+
+        // Save pending report state for after Q&A
+        const pendingReportKey = `pending_report_save_${chatId}`;
+        try {
+          await db.delete('conversation_state', { chat_id: op.eq(pendingReportKey) }).catch(() => {});
+        } catch (e) { /* ignore */ }
+
+        await db.insert('conversation_state', {
+          chat_id: pendingReportKey,
+          conversation_type: 'pending_report_save',
+          data: {
+            reportDate: reportData.date,
+            formattedReport,
+            stats,
+            aiSummary,
+            aiResponse: {
+              mainCommentary: aiResponse.mainCommentary,
+              challengeEvaluation: aiResponse.challengeEvaluation,
+              reward: aiResponse.reward,
+              goalsAnalysis: aiResponse.goalsAnalysis,
+              memoryUpdates: aiResponse.memoryUpdates,
+              memoryOptimization: aiResponse.memoryOptimization,
+            },
+            preAnalysisAnswers: userAnswers || {},
+          },
+          expires_at: new Date(Date.now() + 60 * 60 * 1000).toISOString(), // 1 hour
+        });
+
+        // Start post-analysis Q&A session
+        const postQAKey = `post_qa_${chatId}`;
+        try {
+          await db.delete('conversation_state', { chat_id: op.eq(postQAKey) }).catch(() => {});
+        } catch (e) { /* ignore */ }
+
+        await db.insert('conversation_state', {
+          chat_id: postQAKey,
+          conversation_type: 'post_analysis_qa',
+          data: {
+            questions: postAnalysisQuestions,
+            answers: {},
+            currentIndex: 0,
+          },
+          expires_at: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+        });
+
+        // Send first question
+        await this.sendTelegramMessage(
+          chatId,
+          botToken,
+          `❓ لدي ${postAnalysisQuestions.length} أسئلة متابعة لفهم أفضل:\n\n` +
+          `[1/${postAnalysisQuestions.length}] ${postAnalysisQuestions[0]}\n\n` +
+          `💡 أجب على السؤال أو استخدم /skip_questions لتخطي وحفظ التقرير`
+        );
+
+        // Mark as waiting for post-analysis answers
+        this.status = {
+          status: 'waiting_for_answers',
+          progress: 'في انتظار إجابات المتابعة',
+          startedAt: this.status.startedAt,
+        };
+
+        console.log(`⏳ [Job ${jobId}] Waiting for post-analysis answers...`);
+        return; // Don't save yet - wait for answers
       }
 
-      // Save report to database
+      // ✅ No questions - Save report immediately
       console.log(`💾 [Job ${jobId}] Saving report to database...`);
-      const stats = reportGen.calculateStatistics(reportData.tasks, reportData.failedTasksJson);
 
       await db.upsert('daily_reports', {
         report_date: reportData.date,
-        report_markdown: aiResponse.mainCommentary,
+        report_markdown: formattedReport,
         success_rate: stats.success_rate,
         total_tasks: stats.total_tasks,
         completed_tasks: stats.completed_tasks,
@@ -346,11 +480,46 @@ if (aiResponse.memoryUpdates && Object.keys(aiResponse.memoryUpdates).length > 0
         ai_commentary: aiResponse.mainCommentary,
         suggested_reward: aiResponse.reward,
         weekly_goals_analysis: JSON.stringify(aiResponse.goalsAnalysis),
+        user_comments: userAnswers && Object.keys(userAnswers).length > 0
+          ? JSON.stringify(userAnswers)
+          : null,
+        obsidian_file_id: aiSummary,
       }, 'report_date');
 
       console.log(`✅ [Job ${jobId}] Report saved successfully`);
+      await this.sendTelegramMessage(chatId, botToken, '✅ تم حفظ التقرير بنجاح!');
 
-      // Save to Google Drive (if configured)
+      // ✅ Wait before memory operations to avoid subrequest limits
+      console.log(`⏳ [Job ${jobId}] Waiting 2s before memory operations...`);
+      await this.delay(2000);
+
+      // Update memory (can fail without losing report)
+      if (aiResponse.memoryUpdates && Object.keys(aiResponse.memoryUpdates).length > 0) {
+        console.log(`🧠 [Job ${jobId}] Updating memory with ${Object.keys(aiResponse.memoryUpdates).length} categories...`);
+
+        try {
+          // Update memory categories one by one with small delays
+          for (const [category, content] of Object.entries(aiResponse.memoryUpdates)) {
+            try {
+              await memoryMgr.updateSingleCategory(category, content);
+              console.log(`  ✅ Updated: ${category}`);
+              await this.delay(500); // Small delay between categories
+            } catch (catError) {
+              console.error(`  ❌ Failed: ${category}:`, catError);
+            }
+          }
+          console.log(`✅ [Job ${jobId}] Memory updates completed`);
+        } catch (memError) {
+          console.error(`❌ [Job ${jobId}] Memory update failed (report already saved):`, memError);
+        }
+      }
+
+      // Skip memory optimization to reduce subrequests
+      if (aiResponse.memoryOptimization === 'OPTIMIZE_NEEDED') {
+        console.log(`ℹ️ [Job ${jobId}] Memory optimization needed - will run on next report`);
+      }
+
+      // Save to Google Drive (if configured) - wrapped in try to avoid subrequest limits
       try {
         const driveService = createDriveService(db, settings);
         const driveResult = await driveService.saveReport({
@@ -364,18 +533,10 @@ if (aiResponse.memoryUpdates && Object.keys(aiResponse.memoryUpdates).length > 0
 
         if (driveResult.success) {
           console.log(`☁️ [Job ${jobId}] Report saved to Google Drive`);
-          // Also update _LastUpdate.md
-          await driveService.updateLastUpdateFile();
-        } else if (driveResult.error !== 'Google Drive not configured') {
-          console.warn(`⚠️ [Job ${jobId}] Google Drive save failed:`, driveResult.error);
         }
       } catch (driveError) {
-        console.warn(`⚠️ [Job ${jobId}] Google Drive error (non-fatal):`, driveError);
-        // Don't fail the whole job if Google Drive fails
+        console.warn(`⚠️ [Job ${jobId}] Google Drive skipped (subrequest limit)`);
       }
-
-      // Final success message
-      await this.sendTelegramMessage(chatId, botToken, '✅ تم حفظ التقرير بنجاح!');
 
       // Mark as completed
       this.status = {
@@ -412,6 +573,51 @@ if (aiResponse.memoryUpdates && Object.keys(aiResponse.memoryUpdates).length > 0
         '❌ حدث خطأ أثناء معالجة التقرير:\n' + (error as Error).message
       );
     }
+  }
+
+  /**
+   * Generate a brief summary from AI response for future reference
+   */
+  private generateBriefSummary(
+    aiResponse: { mainCommentary: string; challengeEvaluation: string; goalsAnalysis: any },
+    stats: { success_rate: number; completed_tasks: number; failed_tasks: number }
+  ): string {
+    // Extract key points from AI commentary (first 2 sentences or 200 chars)
+    let commentaryExcerpt = '';
+    if (aiResponse.mainCommentary) {
+      // Split by sentence endings and take first 2
+      const sentences = aiResponse.mainCommentary.split(/[.!؟。]/);
+      commentaryExcerpt = sentences.slice(0, 2).join('. ').trim();
+      if (commentaryExcerpt.length > 200) {
+        commentaryExcerpt = commentaryExcerpt.substring(0, 200) + '...';
+      }
+    }
+
+    // Build summary
+    const parts: string[] = [];
+    parts.push(`نسبة النجاح ${stats.success_rate}%`);
+    parts.push(`${stats.completed_tasks} منجزة، ${stats.failed_tasks} فاشلة`);
+
+    if (aiResponse.challengeEvaluation) {
+      parts.push(`التحدي: ${aiResponse.challengeEvaluation}`);
+    }
+
+    if (aiResponse.goalsAnalysis?.completed?.length > 0) {
+      parts.push(`${aiResponse.goalsAnalysis.completed.length} أهداف أسبوعية منجزة`);
+    }
+
+    if (commentaryExcerpt) {
+      parts.push(`الملخص: ${commentaryExcerpt}`);
+    }
+
+    return parts.join(' | ');
+  }
+
+  /**
+   * Delay helper to avoid Cloudflare subrequest limits
+   */
+  private delay(ms: number): Promise<void> {
+    return new Promise(resolve => setTimeout(resolve, ms));
   }
 
   /**
