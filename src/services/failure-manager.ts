@@ -137,22 +137,21 @@ export async function upsertDailyFailures(
     if (existing && existing.length > 0) {
       // Update existing
       await db.update(
-        'daily_failures',
-        { failure_date: op.eq(dailyFailures.date) },
-        {
-          failures_json: failuresJson,
-          last_synced_at: new Date().toISOString(),
-        }
-      );
+  'daily_failures',
+  { failure_date: op.eq(dailyFailures.date) },
+  {
+    failures_json: failuresJson,
+    last_sync: new Date().toISOString(),
+  }
+);
       console.log(`✅ Updated failures for ${dailyFailures.date}`);
     } else {
       // Insert new
-      await db.insert('daily_failures', {
-        failure_date: dailyFailures.date,
-        failures_json: failuresJson,
-        last_synced_at: new Date().toISOString(),
-        created_at: new Date().toISOString(),
-      });
+await db.insert('daily_failures', {
+  failure_date: dailyFailures.date,
+  failures_json: failuresJson,
+  last_sync: new Date().toISOString(),
+});
       console.log(`✅ Created failures for ${dailyFailures.date}`);
     }
   } catch (error) {

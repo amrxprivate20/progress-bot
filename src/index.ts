@@ -75,11 +75,38 @@ export default {
       // TELEGRAM WEBHOOK
       // ============================================
       if (path === '/telegram/webhook' && request.method === 'POST') {
-        console.log('📨 Telegram webhook received');
-        const botToken = env.TELEGRAM_BOT_TOKEN;
-
-        // Pass Durable Object namespace, env, and ExecutionContext to bot
-        const bot = createBot(botToken, db, settings, env.REPORT_PROCESSOR, {
+  console.log('📨 Telegram webhook received');
+  
+  // ✅ ADD THIS: Idempotency check to prevent duplicate processing
+  try {
+    const update = await request.clone().json() as { update_id: number };
+    const updateId = update.update_id;
+    const idempotencyKey = `webhook_${updateId}`;
+    
+    // Check if we already processed this update
+    const existing = await db.select('conversation_state', {
+      filter: { chat_id: op.eq(idempotencyKey) }
+    });
+    
+    if (existing.length > 0) {
+      console.log(`⏭️ Skipping duplicate webhook update ${updateId}`);
+      return new Response('OK', { status: 200 });
+    }
+    
+    // Mark as processing (expires in 5 minutes)
+    await db.insert('conversation_state', {
+      chat_id: idempotencyKey,
+      conversation_type: 'webhook_processing',
+      data: { processing: true },
+      expires_at: new Date(Date.now() + 5 * 60 * 1000).toISOString()
+    });
+  } catch (idempotencyError) {
+    console.error('Idempotency check failed:', idempotencyError);
+    // Continue anyway - don't block legitimate requests
+  }
+  
+  const botToken = env.TELEGRAM_BOT_TOKEN;
+  const bot = createBot(botToken, db, settings, env.REPORT_PROCESSOR, {
           SUPABASE_URL: env.SUPABASE_URL,
           SUPABASE_ANON_KEY: env.SUPABASE_ANON_KEY,
           SUPABASE_SERVICE_ROLE_KEY: env.SUPABASE_SERVICE_ROLE_KEY,
