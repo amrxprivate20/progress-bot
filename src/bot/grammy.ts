@@ -26,6 +26,12 @@ import { syncFailuresFromTodoist, completeParentInTodoistIfAllDone } from '../ha
 import type { FailedTask } from '../services/failure-manager';
 import { getDailyFailures, upsertDailyFailures } from '../services/failure-manager';
 
+// Phase 1 Coach Features
+import { createStuckHandler } from '../interventions/stuck-handler';
+import { createBattleMode } from '../gamification/battle-mode';
+import { createRoastMode } from '../coach/roast-mode';
+import { createAutoCoach } from '../coach/auto-coach';
+
 /**
  * Wrapper for commands that require exclusive lock
  */
@@ -163,6 +169,11 @@ function registerCommands(bot: Bot<BotContext>) {
 /tomorrowplan - خطة الغد
 /goals - الأهداف والتحديات
 /createtasks - إنشاء مهام
+
+🔥 الكوتش:
+/stuck - تدخل فوري عند التأجيل
+/battle_mode - معركة اليوم
+/roast_me - إحراق شخصي 😏
 
 📔 اليوميات:
 /journal_start - بدء جلسة
@@ -340,6 +351,24 @@ function getArabicOperationType(type: string): string {
 /sync - مزامنة المهام من Todoist
 
 ━━━━━━━━━━━━━━━━━━━━
+🔥 الكوتش:
+━━━━━━━━━━━━━━━━━━━━
+/stuck - 🚨 تدخل فوري عند التأجيل
+/stuck_continue - كمّل سبرنت آخر
+/stuck_done - خلصت بعد السبرنت
+/stuck_defer - أجّل مع سبب
+
+/battle_mode - ⚔️ بدء معركة اليوم
+/battle_status - حالة المعركة
+
+/roast_me - 😏 إحراق شخصي
+/weekly_roast - إحراق أسبوعي
+
+/coach_check - تنبيه يدوي من الكوتش
+/coach_settings - إعدادات الكوتش التلقائي
+/coach_summary - ملخص التعلم اليومي
+
+━━━━━━━━━━━━━━━━━━━━
 📔 اليوميات:
 ━━━━━━━━━━━━━━━━━━━━
 /journal_start - بدء جلسة يوميات جديدة
@@ -347,23 +376,18 @@ function getArabicOperationType(type: string): string {
 /journal_resume - استئناف جلسة سابقة
 /journal - عرض يوميات اليوم
 /journal YYYY-MM-DD - عرض يوميات تاريخ معين
-(أثناء الجلسة: أرسل نصوص، صور، أو رسائل صوتية)
 
 ━━━━━━━━━━━━━━━━━━━━
 🧠 الذاكرة:
 ━━━━━━━━━━━━━━━━━━━━
-/memory - عرض الذاكرة المحفوظة (6 فئات)
+/memory - عرض الذاكرة المحفوظة
 /clearmemory - مسح جميع فئات الذاكرة
 
 ━━━━━━━━━━━━━━━━━━━━
 ⚙️ الإعدادات والتصحيح:
 ━━━━━━━━━━━━━━━━━━━━
 /debug - تفعيل/إيقاف وضع التصحيح
-/setmodel [نموذج] - تغيير نموذج AI (claude/openrouter)
-
-━━━━━━━━━━━━━━━━━━━━
-📝 أوامر عامة:
-━━━━━━━━━━━━━━━━━━━━
+/setmodel [نموذج] - تغيير نموذج AI
 /skip_questions - تخطي أسئلة التحليل
 /cancel - إلغاء أي عملية معلقة
 /start - رسالة الترحيب
@@ -372,9 +396,9 @@ function getArabicOperationType(type: string): string {
 ━━━━━━━━━━━━━━━━━━━━
 💡 نصائح:
 • المهام تُسجَّل تلقائياً عند إكمالها في Todoist
-• التحليل يعمل في الخلفية (لا يوجد حد زمني)
-• استخدم /starttask لتتبع الوقت الفعلي للمهام
-• التقارير المحللة تُحفظ ويمكن استرجاعها بـ /report
+• استخدم /stuck عند الشعور بالتأجيل
+• /battle_mode يحوّل يومك لمعركة ممتعة
+• الكوتش يراقب تلقائياً ويتدخل عند الحاجة
     `.trim();
 
     await ctx.reply(helpMessage);
@@ -1019,8 +1043,9 @@ bot.command('cancel', async (ctx) => {
 bot.command('log_failure', async (ctx) => {
   await withCommandLock(ctx, '/log_failure', async () => {
     try {
+      const args = ctx.message?.text?.split(' ').slice(1).join(' ') || '';
       const chatId = ctx.chat?.id.toString() || '';
-      
+
       await ctx.reply('🔄 جاري تحميل المهام...');
 
       // Get Todoist credentials
@@ -1040,7 +1065,7 @@ bot.command('log_failure', async (ctx) => {
       const response = await fetch(
         `https://api.todoist.com/rest/v3/tasks?project_id=${todoistProjectId.trim()}`,
         {
-          headers: { 
+          headers: {
             'Authorization': `Bearer ${todoistToken.trim()}`,
           },
         }
@@ -1063,47 +1088,121 @@ bot.command('log_failure', async (ctx) => {
       const availableToday = allTasks.filter(t => {
         if (t.is_completed) return false;
         if (!t.due?.date) return true; // Tasks without due date
-        
+
         const dueDateStr = t.due.date.split('T')[0];
         if (!dueDateStr) return false;
-        
+
         const taskDueDate = new Date(dueDateStr + 'T00:00:00Z');
         return taskDueDate <= todayDate;
       });
 
-      if (availableToday.length === 0) {
-        await ctx.reply(
-          '📋 لا توجد مهام متاحة اليوم في Todoist.\n\n' +
-          '📝 يمكنك كتابة اسم مهمة جديدة:\n' +
-          '/log_failure [اسم المهمة]'
-        );
-        return;
-      }
-
-      // Show list with "Add new task" option
-      let message = '📋 **المهام المتاحة:**\n\n';
-      
-      availableToday.forEach((t, i) => {
-        message += `${i + 1}. ${t.content}\n`;
-      });
-      
-      message += `\n0. ➕ إضافة مهمة جديدة\n\n`;
-      message += `🔢 أرسل رقم المهمة أو اسم المهمة الجديدة:`;
-
-      // Store available tasks for selection
+      // Store key for selection
       const selectKey = `failure_select_${chatId}`;
-      
+
       // Delete any existing selection state
       try {
         await ctx.db.delete('conversation_state', { chat_id: op.eq(selectKey) });
       } catch (e) { /* ignore */ }
-      
-      // Create new selection state
+
+      // NO PARAMETERS - Show full list
+      if (!args.trim()) {
+        if (availableToday.length === 0) {
+          await ctx.reply(
+            '📋 لا توجد مهام متاحة اليوم في Todoist.\n\n' +
+            '📝 يمكنك كتابة اسم مهمة جديدة:\n' +
+            '/log_failure [اسم المهمة]'
+          );
+          return;
+        }
+
+        // Show list with "Add new task" option
+        let message = '📋 **المهام المتاحة:**\n\n';
+
+        availableToday.forEach((t, i) => {
+          message += `${i + 1}. ${t.content}\n`;
+        });
+
+        message += `\n0. ➕ إضافة مهمة جديدة\n\n`;
+        message += `🔢 أرسل رقم المهمة أو اسم المهمة الجديدة:`;
+
+        // Create new selection state
+        await ctx.db.insert('conversation_state', {
+          chat_id: selectKey,
+          conversation_type: 'failure_selection',
+          data: {
+            availableTasks: availableToday,
+            allowNewTask: true,
+          },
+          expires_at: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
+        });
+
+        await ctx.reply(message, { parse_mode: 'Markdown' });
+        return;
+      }
+
+      // WITH PARAMETERS - Search for matching tasks
+      const searchTerm = args.trim().toLowerCase();
+      const matchedTasks = availableToday.filter(t =>
+        t.content.toLowerCase().includes(searchTerm) ||
+        searchTerm.includes(t.content.toLowerCase())
+      );
+
+      if (matchedTasks.length === 0) {
+        // No matches - store for new task entry
+        const newTaskKey = `failure_new_task_${chatId}`;
+        await ctx.db.insert('conversation_state', {
+          chat_id: newTaskKey,
+          conversation_type: 'failure_new_task_input',
+          data: { suggestedName: args.trim() },
+          expires_at: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
+        });
+
+        await ctx.reply(
+          `🔍 لم أجد مهمة تطابق "${args.trim()}"\n\n` +
+          `❓ هل تريد تسجيل فشل لمهمة جديدة بهذا الاسم؟\n` +
+          `أرسل "نعم" للتأكيد أو /cancel للإلغاء`
+        );
+        return;
+      }
+
+      if (matchedTasks.length === 1) {
+        // Exactly one match - show confirmation
+        const task = matchedTasks[0]!;
+        let message = '📋 **هل تريد تسجيل فشل لهذه المهمة؟**\n\n';
+        message += `1. ${task.content}\n`;
+        message += `0. ➕ إضافة مهمة جديدة: "${args.trim()}"\n\n`;
+        message += `🔢 أرسل 1 لتسجيل الفشل أو 0 لإنشاء مهمة جديدة:`;
+
+        await ctx.db.insert('conversation_state', {
+          chat_id: selectKey,
+          conversation_type: 'failure_selection',
+          data: {
+            availableTasks: [task],
+            newTaskName: args.trim(),
+            allowNewTask: true,
+          },
+          expires_at: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
+        });
+
+        await ctx.reply(message, { parse_mode: 'Markdown' });
+        return;
+      }
+
+      // Multiple matches - show list
+      let message = '📋 **تم العثور على عدة مهام مطابقة:**\n\n';
+      matchedTasks.forEach((t, i) => {
+        message += `${i + 1}. ${t.content}\n`;
+      });
+
+      message += `\n0. ➕ إضافة مهمة جديدة: "${args.trim()}"\n\n`;
+      message += `🔢 أرسل رقم المهمة المطلوبة أو 0 لإنشاء مهمة جديدة:`;
+
       await ctx.db.insert('conversation_state', {
         chat_id: selectKey,
         conversation_type: 'failure_selection',
         data: {
-          availableTasks: availableToday,
+          availableTasks: matchedTasks,
+          newTaskName: args.trim(),
           allowNewTask: true,
         },
         expires_at: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
@@ -2680,11 +2779,531 @@ async function processTaskFailure(
   }
 }
 
+// ============================================
+// PHASE 1: COACH FEATURES
+// ============================================
+
+// In-memory rate limiter to prevent loops (resets on deploy)
+const coachCommandCooldowns = new Map<string, number>();
+const COACH_COOLDOWN_MS = 10000; // 10 second cooldown per command per chat
+
+// Helper: Check idempotency and rate limit for coach commands
+async function checkCoachIdempotency(ctx: BotContext, commandName: string): Promise<boolean> {
+  const chatId = ctx.chat?.id.toString() || '';
+  const updateId = ctx.update.update_id;
+
+  // Rate limit check (in-memory, fast)
+  const cooldownKey = `${chatId}_${commandName}`;
+  const lastRun = coachCommandCooldowns.get(cooldownKey) || 0;
+  const now = Date.now();
+
+  if (now - lastRun < COACH_COOLDOWN_MS) {
+    console.log(`🚫 Rate limited: ${commandName} for chat ${chatId}`);
+    return false;
+  }
+  coachCommandCooldowns.set(cooldownKey, now);
+
+  // DB idempotency check
+  const idempotencyKey = `coach_${commandName}_${updateId}`;
+
+  try {
+    const existing = await ctx.db.select('conversation_state', {
+      filter: { chat_id: op.eq(idempotencyKey) },
+    });
+
+    if (existing.length > 0) {
+      console.log(`⏭️ Skipping duplicate ${commandName} (update ${updateId})`);
+      return false;
+    }
+
+    // Mark as processing
+    await ctx.db.insert('conversation_state', {
+      chat_id: idempotencyKey,
+      conversation_type: `coach_${commandName}`,
+      data: { processing: true },
+      expires_at: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
+    });
+
+    return true;
+  } catch (err) {
+    console.log(`⚠️ Idempotency check error for ${commandName}:`, err);
+    return false; // On error, BLOCK to be safe
+  }
+}
+
+// /stuck - Real-time intervention for procrastination
+bot.command('stuck', async (ctx) => {
+  try {
+    // Idempotency check
+    if (!(await checkCoachIdempotency(ctx, 'stuck'))) return;
+
+    const chatId = ctx.chat?.id.toString() || '';
+    const botToken = ctx.env.TELEGRAM_BOT_TOKEN;
+
+    // Check if feature is enabled
+    const enabled = await ctx.settings.get('interventions.stuck_button');
+    if (enabled === 'false') {
+      await ctx.reply('⚠️ ميزة زر التدخل معطلة.\n\nللتفعيل: قم بتغيير إعداد interventions.stuck_button إلى true');
+      return;
+    }
+
+    // Get AI client
+    const apiKey = await ctx.settings.get('openrouter_api_key');
+    if (!apiKey) {
+      await ctx.reply('❌ لم يتم تكوين مفتاح AI. تحقق من الإعدادات.');
+      return;
+    }
+
+    await ctx.reply('🚨 جاري تحليل الموقف...');
+
+    // Run in background
+    const backgroundTask = (async () => {
+      try {
+        const aiClient = createAIClient(apiKey);
+        const stuckHandler = createStuckHandler(ctx.db, ctx.settings, (msgs, temp, max) => aiClient.complete(msgs, temp, max));
+        const response = await stuckHandler.startIntervention(chatId);
+        await sendTelegramMessageDirect(botToken, chatId, response);
+      } catch (error) {
+        console.error('Stuck background error:', error);
+        await sendTelegramMessageDirect(botToken, chatId, '❌ حدث خطأ في التحليل');
+      }
+    })();
+
+    if (ctx.executionContext?.waitUntil) {
+      ctx.executionContext.waitUntil(backgroundTask);
+    } else {
+      await backgroundTask;
+    }
+
+  } catch (error) {
+    console.error('Stuck command error:', error);
+    await ctx.reply('❌ حدث خطأ: ' + (error instanceof Error ? error.message : 'Unknown'));
+  }
+});
+
+// /stuck_continue - Continue with another sprint
+bot.command('stuck_continue', async (ctx) => {
+  try {
+    if (!(await checkCoachIdempotency(ctx, 'stuck_continue'))) return;
+
+    const chatId = ctx.chat?.id.toString() || '';
+    const apiKey = await ctx.settings.get('openrouter_api_key');
+    if (!apiKey) return;
+
+    const aiClient = createAIClient(apiKey);
+    const stuckHandler = createStuckHandler(ctx.db, ctx.settings, (msgs, temp, max) => aiClient.complete(msgs, temp, max));
+
+    const response = await stuckHandler.handleContinue(chatId);
+    await ctx.reply(response, { parse_mode: 'Markdown' });
+
+    // Note: Sprint timer removed - user must manually call /stuck_done or /stuck_defer
+
+  } catch (error) {
+    console.error('Stuck continue error:', error);
+    await ctx.reply('❌ حدث خطأ');
+  }
+});
+
+// /stuck_done - Mark as done after sprint
+bot.command('stuck_done', async (ctx) => {
+  try {
+    if (!(await checkCoachIdempotency(ctx, 'stuck_done'))) return;
+
+    const chatId = ctx.chat?.id.toString() || '';
+    const apiKey = await ctx.settings.get('openrouter_api_key');
+    if (!apiKey) return;
+
+    const aiClient = createAIClient(apiKey);
+    const stuckHandler = createStuckHandler(ctx.db, ctx.settings, (msgs, temp, max) => aiClient.complete(msgs, temp, max));
+
+    const response = await stuckHandler.handleDone(chatId);
+    await ctx.reply(response, { parse_mode: 'Markdown' });
+
+  } catch (error) {
+    console.error('Stuck done error:', error);
+    await ctx.reply('❌ حدث خطأ');
+  }
+});
+
+// /stuck_defer - Defer with reason
+bot.command('stuck_defer', async (ctx) => {
+  try {
+    if (!(await checkCoachIdempotency(ctx, 'stuck_defer'))) return;
+
+    const chatId = ctx.chat?.id.toString() || '';
+    const reason = ctx.message?.text?.replace('/stuck_defer', '').trim() || undefined;
+    const apiKey = await ctx.settings.get('openrouter_api_key');
+    if (!apiKey) return;
+
+    const aiClient = createAIClient(apiKey);
+    const stuckHandler = createStuckHandler(ctx.db, ctx.settings, (msgs, temp, max) => aiClient.complete(msgs, temp, max));
+
+    const response = await stuckHandler.handleDefer(chatId, reason);
+    await ctx.reply(response, { parse_mode: 'Markdown' });
+
+  } catch (error) {
+    console.error('Stuck defer error:', error);
+    await ctx.reply('❌ حدث خطأ');
+  }
+});
+
+// /battle_mode - Start or check today's battle
+bot.command('battle_mode', async (ctx) => {
+  try {
+    if (!(await checkCoachIdempotency(ctx, 'battle_mode'))) return;
+
+    const chatId = ctx.chat?.id.toString() || '';
+    const botToken = ctx.env.TELEGRAM_BOT_TOKEN;
+
+    // Check if feature is enabled
+    const enabled = await ctx.settings.get('gamification.battle_mode');
+    if (enabled === 'false') {
+      await ctx.reply('⚠️ وضع المعركة معطل.\n\nللتفعيل: قم بتغيير إعداد gamification.battle_mode إلى true');
+      return;
+    }
+
+    const apiKey = await ctx.settings.get('openrouter_api_key');
+    if (!apiKey) {
+      await ctx.reply('❌ لم يتم تكوين مفتاح AI.');
+      return;
+    }
+
+    await ctx.reply('⚔️ جاري تحضير المعركة...');
+
+    // Run in background
+    const backgroundTask = (async () => {
+      try {
+        const aiClient = createAIClient(apiKey);
+        const battleMode = createBattleMode(ctx.db, ctx.settings, (msgs, temp, max) => aiClient.complete(msgs, temp, max));
+        const { message } = await battleMode.startBattle(chatId);
+        await sendTelegramMessageDirect(botToken, chatId, message);
+      } catch (error) {
+        console.error('Battle mode background error:', error);
+        await sendTelegramMessageDirect(botToken, chatId, '❌ حدث خطأ في تحضير المعركة');
+      }
+    })();
+
+    if (ctx.executionContext?.waitUntil) {
+      ctx.executionContext.waitUntil(backgroundTask);
+    } else {
+      await backgroundTask;
+    }
+
+  } catch (error) {
+    console.error('Battle mode error:', error);
+    await ctx.reply('❌ حدث خطأ: ' + (error instanceof Error ? error.message : 'Unknown'));
+  }
+});
+
+// /battle_status - Check current battle status
+bot.command('battle_status', async (ctx) => {
+  try {
+    if (!(await checkCoachIdempotency(ctx, 'battle_status'))) return;
+
+    const chatId = ctx.chat?.id.toString() || '';
+    const apiKey = await ctx.settings.get('openrouter_api_key');
+    if (!apiKey) return;
+
+    const aiClient = createAIClient(apiKey);
+    const battleMode = createBattleMode(ctx.db, ctx.settings, (msgs, temp, max) => aiClient.complete(msgs, temp, max));
+
+    const status = await battleMode.getStatus(chatId);
+    await ctx.reply(status, { parse_mode: 'Markdown' });
+
+  } catch (error) {
+    console.error('Battle status error:', error);
+    await ctx.reply('❌ حدث خطأ');
+  }
+});
+
+// /roast_me - Get a personalized roast
+bot.command('roast_me', async (ctx) => {
+  try {
+    if (!(await checkCoachIdempotency(ctx, 'roast_me'))) return;
+
+    const chatId = ctx.chat?.id.toString() || '';
+    const botToken = ctx.env.TELEGRAM_BOT_TOKEN;
+
+    // Check if feature is enabled
+    const enabled = await ctx.settings.get('coach.roast_mode');
+    if (enabled === 'false') {
+      await ctx.reply('⚠️ وضع الإحراق معطل.\n\nللتفعيل: قم بتغيير إعداد coach.roast_mode إلى true');
+      return;
+    }
+
+    const apiKey = await ctx.settings.get('openrouter_api_key');
+    if (!apiKey) {
+      await ctx.reply('❌ لم يتم تكوين مفتاح AI.');
+      return;
+    }
+
+    await ctx.reply('🔥 جاري تحليل أنماط التسويف...');
+
+    // Run in background
+    const backgroundTask = (async () => {
+      try {
+        const aiClient = createAIClient(apiKey);
+        const roastMode = createRoastMode(ctx.db, ctx.settings, (msgs, temp, max) => aiClient.complete(msgs, temp, max));
+        const result = await roastMode.generateRoast(chatId);
+        await sendTelegramMessageDirect(botToken, chatId, `${result.roast}${result.encouragement}`);
+      } catch (error) {
+        console.error('Roast background error:', error);
+        await sendTelegramMessageDirect(botToken, chatId, '❌ حدث خطأ في التحليل');
+      }
+    })();
+
+    if (ctx.executionContext?.waitUntil) {
+      ctx.executionContext.waitUntil(backgroundTask);
+    } else {
+      await backgroundTask;
+    }
+
+  } catch (error) {
+    console.error('Roast mode error:', error);
+    await ctx.reply('❌ حدث خطأ: ' + (error instanceof Error ? error.message : 'Unknown'));
+  }
+});
+
+// /weekly_roast - Get a weekly pattern roast
+bot.command('weekly_roast', async (ctx) => {
+  try {
+    if (!(await checkCoachIdempotency(ctx, 'weekly_roast'))) return;
+
+    const chatId = ctx.chat?.id.toString() || '';
+    const botToken = ctx.env.TELEGRAM_BOT_TOKEN;
+    const enabled = await ctx.settings.get('coach.roast_mode');
+    if (enabled === 'false') {
+      await ctx.reply('⚠️ وضع الإحراق معطل.');
+      return;
+    }
+
+    const apiKey = await ctx.settings.get('openrouter_api_key');
+    if (!apiKey) return;
+
+    await ctx.reply('🔥 جاري تحليل أنماط الأسبوع...');
+
+    // Run in background
+    const backgroundTask = (async () => {
+      try {
+        const aiClient = createAIClient(apiKey);
+        const roastMode = createRoastMode(ctx.db, ctx.settings, (msgs, temp, max) => aiClient.complete(msgs, temp, max));
+        const result = await roastMode.weeklyRoast(chatId);
+        await sendTelegramMessageDirect(botToken, chatId, `${result.roast}${result.encouragement}`);
+      } catch (error) {
+        console.error('Weekly roast background error:', error);
+        await sendTelegramMessageDirect(botToken, chatId, '❌ حدث خطأ في التحليل');
+      }
+    })();
+
+    if (ctx.executionContext?.waitUntil) {
+      ctx.executionContext.waitUntil(backgroundTask);
+    } else {
+      await backgroundTask;
+    }
+
+  } catch (error) {
+    console.error('Weekly roast error:', error);
+    await ctx.reply('❌ حدث خطأ');
+  }
+});
+
+// /coach_check - Manually trigger auto-coach check
+bot.command('coach_check', async (ctx) => {
+  try {
+    if (!(await checkCoachIdempotency(ctx, 'coach_check'))) return;
+
+    const chatId = ctx.chat?.id.toString() || '';
+    const botToken = ctx.env.TELEGRAM_BOT_TOKEN;
+    const apiKey = await ctx.settings.get('openrouter_api_key');
+    if (!apiKey) {
+      await ctx.reply('❌ لم يتم تكوين مفتاح AI.');
+      return;
+    }
+
+    await ctx.reply('🔍 جاري فحص الحالة...');
+
+    // Run in background
+    const backgroundTask = (async () => {
+      try {
+        const aiClient = createAIClient(apiKey);
+        const autoCoach = createAutoCoach(ctx.db, ctx.settings, (msgs, temp, max) => aiClient.complete(msgs, temp, max));
+        const probeResult = await autoCoach.shouldProbe(chatId);
+
+        if (probeResult.shouldProbe && probeResult.reason !== 'none') {
+          const message = await autoCoach.generateProbe(chatId, probeResult.reason);
+          await sendTelegramMessageDirect(botToken, chatId, message);
+        } else {
+          await sendTelegramMessageDirect(botToken, chatId, '✅ لا حاجة للتدخل الآن. كل شيء تمام!');
+        }
+      } catch (error) {
+        console.error('Coach check background error:', error);
+        await sendTelegramMessageDirect(botToken, chatId, '❌ حدث خطأ');
+      }
+    })();
+
+    if (ctx.executionContext?.waitUntil) {
+      ctx.executionContext.waitUntil(backgroundTask);
+    } else {
+      await backgroundTask;
+    }
+
+  } catch (error) {
+    console.error('Coach check error:', error);
+    await ctx.reply('❌ حدث خطأ');
+  }
+});
+
+// /coach_settings - Show current auto-coach settings (no AI needed, so simpler)
+bot.command('coach_settings', async (ctx) => {
+  try {
+    if (!(await checkCoachIdempotency(ctx, 'coach_settings'))) return;
+
+    const autoCoach = createAutoCoach(ctx.db, ctx.settings, async () => '');
+    const config = await autoCoach.getConfig();
+
+    const modeEmoji: Record<string, string> = {
+      'off': '⏹️',
+      'scheduled': '📅',
+      'inactivity': '⏰',
+      'hybrid': '🔄',
+    };
+
+    const settingsMsg = `⚙️ *إعدادات الكوتش التلقائي*
+
+${modeEmoji[config.mode] || '❓'} الوضع: *${config.mode}*
+
+⏰ عتبة الخمول: *${config.inactivityThresholdHours}* ساعة
+😴 فترة النوم: *${config.sleepStart}* - *${config.sleepEnd}*
+📅 أوقات الفحص: *${config.scheduledCheckins.join(', ')}*
+
+━━━━━━━━━━━━━━━━
+💡 للتعديل، استخدم API الإعدادات:
+- coach.auto_mode
+- coach.inactivity_threshold_hours
+- coach.sleep_start / coach.sleep_end
+- coach.scheduled_checkins`;
+
+    await ctx.reply(settingsMsg, { parse_mode: 'Markdown' });
+
+  } catch (error) {
+    console.error('Coach settings error:', error);
+    await ctx.reply('❌ حدث خطأ');
+  }
+});
+
+// /coach_summary - End of day coaching summary
+bot.command('coach_summary', async (ctx) => {
+  try {
+    if (!(await checkCoachIdempotency(ctx, 'coach_summary'))) return;
+
+    const chatId = ctx.chat?.id.toString() || '';
+    const botToken = ctx.env.TELEGRAM_BOT_TOKEN;
+    const apiKey = await ctx.settings.get('openrouter_api_key');
+    if (!apiKey) return;
+
+    await ctx.reply('📊 جاري تحليل تفاعلات اليوم...');
+
+    // Run in background
+    const backgroundTask = (async () => {
+      try {
+        const aiClient = createAIClient(apiKey);
+        const autoCoach = createAutoCoach(ctx.db, ctx.settings, (msgs, temp, max) => aiClient.complete(msgs, temp, max));
+        const summary = await autoCoach.endOfDaySummary(chatId);
+        await sendTelegramMessageDirect(botToken, chatId, `📈 ملخص الكوتشنج اليومي\n\n${summary}`);
+      } catch (error) {
+        console.error('Coach summary background error:', error);
+        await sendTelegramMessageDirect(botToken, chatId, '❌ حدث خطأ في التحليل');
+      }
+    })();
+
+    if (ctx.executionContext?.waitUntil) {
+      ctx.executionContext.waitUntil(backgroundTask);
+    } else {
+      await backgroundTask;
+    }
+
+  } catch (error) {
+    console.error('Coach summary error:', error);
+    await ctx.reply('❌ حدث خطأ');
+  }
+});
+
+// ============================================
+// END PHASE 1 COACH FEATURES
+// ============================================
+
   // Handle text messages (for Q&A flow, log_failure, task quantity, and journal)
   bot.on('message:text', async (ctx) => {
     try {
+      // Ignore messages from bots (including self)
+      if (ctx.message?.from?.is_bot) {
+        return;
+      }
+
       const chatId = ctx.chat?.id.toString() || '';
       const text = ctx.message?.text || '';
+
+      // Skip if this is a command
+      if (text.startsWith('/')) {
+        return;
+      }
+
+      // Handle stuck intervention responses
+      const stuckKey = `stuck_${chatId}`;
+      const stuckSession = await ctx.db.select('conversation_state', {
+        filter: { chat_id: op.eq(stuckKey) },
+        limit: 1,
+      });
+
+      if (stuckSession.length > 0) {
+        const sessionData = (stuckSession[0] as any).data || {};
+
+        // Only process if awaiting response
+        if (sessionData.phase === 'awaiting_response') {
+          // Idempotency check for message processing
+          const updateId = ctx.update.update_id;
+          const msgIdempotencyKey = `stuck_msg_${updateId}`;
+          const existingMsg = await ctx.db.select('conversation_state', {
+            filter: { chat_id: op.eq(msgIdempotencyKey) },
+          });
+          if (existingMsg.length > 0) {
+            console.log(`⏭️ Skipping duplicate stuck message (update ${updateId})`);
+            return;
+          }
+          await ctx.db.insert('conversation_state', {
+            chat_id: msgIdempotencyKey,
+            conversation_type: 'stuck_msg_marker',
+            data: { processing: true },
+            expires_at: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
+          });
+
+          const apiKey = await ctx.settings.get('openrouter_api_key');
+          const botToken = ctx.env.TELEGRAM_BOT_TOKEN;
+          if (apiKey) {
+            await ctx.reply('⏳ جاري التحليل...');
+
+            // Run in background
+            const backgroundTask = (async () => {
+              try {
+                const aiClient = createAIClient(apiKey);
+                const stuckHandler = createStuckHandler(ctx.db, ctx.settings, (msgs, temp, max) => aiClient.complete(msgs, temp, max));
+                const result = await stuckHandler.processResponse(chatId, text);
+                await sendTelegramMessageDirect(botToken, chatId, result.message);
+              } catch (error) {
+                console.error('Stuck response background error:', error);
+                await sendTelegramMessageDirect(botToken, chatId, '❌ حدث خطأ في التحليل');
+              }
+            })();
+
+            if (ctx.executionContext?.waitUntil) {
+              ctx.executionContext.waitUntil(backgroundTask);
+            } else {
+              await backgroundTask;
+            }
+            return;
+          }
+        }
+      }
 
 // Handle failure selection
 const failureSelectKey = `failure_select_${chatId}`;
@@ -2708,6 +3327,13 @@ if (pendingFailureSelect.length > 0) {
 
   // Check if user wants to add new task (0)
   if (selection === 0) {
+    const newTaskName = selectionData.newTaskName;
+    if (newTaskName) {
+      // User selected "add new task" from matched list - use the search term
+      await processTaskFailure(ctx, null, newTaskName, null);
+      return;
+    }
+
     await ctx.reply(
       '📝 **إضافة مهمة فاشلة جديدة**\n\n' +
       'أرسل اسم المهمة التي فشلت في إنجازها:\n' +
@@ -2741,15 +3367,28 @@ if (pendingFailureSelect.length > 0) {
   return;
 }
 
-// Handle new failure task name input
+// Handle new failure task name input (or confirmation)
 const failureNewTaskKey = `failure_new_task_${chatId}`;
 const pendingFailureNewTask = await ctx.db.select('conversation_state', {
   filter: { chat_id: op.eq(failureNewTaskKey) },
 });
 
 if (pendingFailureNewTask.length > 0) {
+  const failureData = (pendingFailureNewTask[0] as any).data || {};
+  const suggestedName = failureData.suggestedName;
+
   await ctx.db.delete('conversation_state', { chat_id: op.eq(failureNewTaskKey) });
 
+  const lowerText = text.trim().toLowerCase();
+
+  // Check if this is a confirmation for suggested name
+  if (suggestedName && (lowerText === 'نعم' || lowerText === 'yes')) {
+    // User confirmed the suggested name
+    await processTaskFailure(ctx, null, suggestedName, null);
+    return;
+  }
+
+  // Otherwise use the text as the task name
   const taskName = text.trim();
 
   if (!taskName || taskName.length === 0) {

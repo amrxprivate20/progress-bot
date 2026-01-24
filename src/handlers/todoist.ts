@@ -30,6 +30,11 @@ import {
   formatArabicTime
 } from '../utils/timezone';
 
+// Phase 1 Coach Features
+import { createDopamineEngine, type CompletedTask } from '../gamification/dopamine-engine';
+import { createBattleMode } from '../gamification/battle-mode';
+import { createAIClient } from '../services/ai-client';
+
 // ============================================
 // Todoist API Types
 // ============================================
@@ -273,8 +278,22 @@ export async function completeParentInTodoistIfAllDone(
         return;
       }
 
-      // ✅ All subtasks completed, no failures - autocomplete parent!
-      console.log(`✅ All subtasks completed! Autocompleting parent ${parentTodoistId}...`);
+      // ✅ All subtasks completed, no failures - check if parent already done before autocompleting!
+      console.log(`✅ All subtasks completed! Checking parent ${parentTodoistId}...`);
+
+      // Check if parent is already completed in database
+      const parentInDb = todayTasks.find(t => {
+        const baseId = t.task_id?.split('_')[0];
+        return baseId === parentTodoistId || t.task_id === parentTodoistId;
+      });
+
+      if (parentInDb?.status === 'done') {
+        console.log(`⏭️ Parent ${parentTodoistId} already completed in database - skipping Todoist completion`);
+        return;
+      }
+
+      // Parent not done in DB, complete in Todoist
+      console.log(`🎯 Autocompleting parent ${parentTodoistId} in Todoist...`);
 
       const completeResponse = await fetch(
         `https://api.todoist.com/rest/v2/tasks/${parentTodoistId}/close`,
@@ -288,11 +307,6 @@ export async function completeParentInTodoistIfAllDone(
         console.log(`🎉 Parent ${parentTodoistId} autocompleted in Todoist!`);
 
         // Update status in DB if parent exists there
-        const parentInDb = todayTasks.find(t => {
-          const baseId = t.task_id?.split('_')[0];
-          return baseId === parentTodoistId || t.task_id === parentTodoistId;
-        });
-
         if (parentInDb?.id) {
           await db.update(
             'tasks',
@@ -376,7 +390,10 @@ export async function handleTodoistWebhook(
 
 
   // ✅ DEDUPLICATION: Prevent same task from being completed twice within 20 minutes
+  // But only if the task was actually recorded in the database
   const recentCompletionKey = `recent_completion_${taskId}`;
+  const egyptDateForDedup = getEgyptDateString(new Date());
+  const { start: dedupStart, end: dedupEnd } = getEgyptDayBoundaries(egyptDateForDedup);
 
   try {
     const recentCompletion = await db.select<{ data: any; created_at: string }>('conversation_state', {
@@ -389,18 +406,39 @@ export async function handleTodoistWebhook(
       const minutesSinceCompletion = (Date.now() - completedTime.getTime()) / 1000 / 60;
 
       if (minutesSinceCompletion < 20) {
-        console.log(`⏭️ DUPLICATE: Task ${taskId} was completed ${minutesSinceCompletion.toFixed(1)} minutes ago - ignoring`);
-        return {
-          success: true,
-          message: `Ignored duplicate completion (within 20 minutes): ${taskId}`,
-        };
+        // Before blocking, verify the task was actually recorded in the database
+        const cleanName = extractCleanTaskName(event.event_data.content);
+
+        const allTasks = await db.select<Task>('tasks', {});
+        const todayTasks = allTasks.filter(t => {
+          const taskDate = new Date(t.completed_at);
+          return taskDate >= dedupStart && taskDate <= dedupEnd;
+        });
+
+        const wasActuallyRecorded = todayTasks.some(t => {
+          const existingCleanName = extractCleanTaskName(t.content);
+          return existingCleanName === cleanName;
+        });
+
+        if (wasActuallyRecorded) {
+          console.log(`⏭️ DUPLICATE: Task ${taskId} was completed ${minutesSinceCompletion.toFixed(1)} minutes ago AND recorded - ignoring`);
+          return {
+            success: true,
+            message: `Ignored duplicate completion (within 20 minutes): ${taskId}`,
+          };
+        } else {
+          console.log(`⚠️ RETRY: Task ${taskId} has marker from ${minutesSinceCompletion.toFixed(1)} minutes ago but NOT recorded - processing`);
+          // Continue processing - the previous attempt failed
+        }
       }
     }
   } catch (e) {
-    // Ignore errors in dedup check
+    console.error('❌ Error in dedup check:', e);
+    // Continue processing on error
   }
 
   // Mark this task as recently completed (will be cleaned up naturally by expires_at)
+  // NOTE: This marker is created before processing, so we check if task was recorded above
   try {
     await db.delete('conversation_state', { chat_id: op.eq(recentCompletionKey) }).catch(() => {});
     await db.insert('conversation_state', {
@@ -1526,4 +1564,153 @@ async function sendTelegramMessage(
     console.error('💥 Failed to send Telegram message:', error);
     throw error;
   }
+}
+
+// ============================================
+// PHASE 1: COACH FEATURES - ON TASK COMPLETE
+// ============================================
+
+/**
+ * Trigger Phase 1 coach features when a task is completed
+ * - Dopamine Hit Engine: Generate celebration message
+ * - Battle Mode: Deal damage to today's boss
+ */
+export async function triggerOnTaskComplete(
+  task: Task,
+  chatId: string,
+  botToken: string,
+  db: SupabaseClient,
+  settings: SettingsManager
+): Promise<void> {
+  try {
+    // Get AI client for coach features
+    const apiKey = await settings.get('OPENROUTER_API_KEY');
+    if (!apiKey) {
+      console.log('⚠️ No AI key configured, skipping coach features');
+      return;
+    }
+
+    const aiClient = createAIClient(apiKey);
+    const aiComplete = (msgs: any[], temp?: number, max?: number) => aiClient.complete(msgs, temp, max);
+
+    // Get streak info for the task
+    const cleanTaskName = extractCleanTaskName(task.content);
+    const streakKey = task.origin_task ? `${cleanTaskName} [subtask]` : cleanTaskName;
+    const streaks = await db.select('streaks', {
+      filter: { task_name: op.eq(streakKey) }
+    });
+    const streakCount = streaks?.[0]?.current_streak || 0;
+
+    // Build completed task info
+    const completedTask: CompletedTask = {
+      id: task.task_id,
+      content: task.content,
+      category: task.category,
+      duration: task.duration_minutes,
+      isRecurring: task.is_origin || false,
+      streakCount: streakCount as number,
+    };
+
+    // 1. DOPAMINE HIT ENGINE
+    const dopamineEnabled = await settings.get('gamification.dopamine_hits');
+    if (dopamineEnabled !== 'false') {
+      try {
+        const dopamineEngine = createDopamineEngine(db, settings, aiComplete);
+        const hit = await dopamineEngine.generateHit(chatId, completedTask);
+
+        // Send dopamine hit message
+        await sendTelegramMessage(botToken, chatId, hit.message);
+        console.log(`🎯 Dopamine hit sent (${hit.rewardType})`);
+      } catch (error) {
+        console.error('❌ Dopamine engine error:', error);
+      }
+    }
+
+    // 2. BATTLE MODE - Deal damage
+    const battleEnabled = await settings.get('gamification.battle_mode');
+    if (battleEnabled !== 'false') {
+      try {
+        const battleMode = createBattleMode(db, settings, aiComplete);
+
+        // Calculate difficulty based on task properties
+        const difficulty = calculateTaskDifficulty(task);
+        const action = await battleMode.dealDamage(chatId, cleanTaskName, difficulty);
+
+        if (action) {
+          // Send battle narrative
+          await sendTelegramMessage(botToken, chatId, action.narrative);
+          if (action.bossResponse) {
+            await sendTelegramMessage(botToken, chatId, action.bossResponse);
+          }
+          console.log(`⚔️ Battle damage dealt: ${action.amount}`);
+        }
+      } catch (error) {
+        console.error('❌ Battle mode error:', error);
+      }
+    }
+
+  } catch (error) {
+    console.error('❌ Error in triggerOnTaskComplete:', error);
+  }
+}
+
+/**
+ * Trigger boss healing when a task is failed/deferred
+ */
+export async function triggerOnTaskFailed(
+  taskName: string,
+  chatId: string,
+  botToken: string,
+  db: SupabaseClient,
+  settings: SettingsManager,
+  severity: number = 1
+): Promise<void> {
+  try {
+    const battleEnabled = await settings.get('gamification.battle_mode');
+    if (battleEnabled === 'false') return;
+
+    const apiKey = await settings.get('OPENROUTER_API_KEY');
+    if (!apiKey) return;
+
+    const aiClient = createAIClient(apiKey);
+    const battleMode = createBattleMode(db, settings, (msgs, temp, max) => aiClient.complete(msgs, temp, max));
+
+    const action = await battleMode.bossHeals(chatId, taskName, severity);
+
+    if (action) {
+      await sendTelegramMessage(botToken, chatId, action.narrative);
+      console.log(`😈 Boss healed: ${action.amount}`);
+    }
+
+  } catch (error) {
+    console.error('❌ Error in triggerOnTaskFailed:', error);
+  }
+}
+
+/**
+ * Calculate task difficulty for battle damage
+ * Higher difficulty = more damage
+ */
+function calculateTaskDifficulty(task: Task): number {
+  let difficulty = 1;
+
+  // Priority boost (P1 = highest priority = most damage)
+  // Todoist: priority 4 = P1 (highest), priority 1 = P4 (lowest)
+  if (task.priority) {
+    const priorityBoost = (5 - task.priority) * 0.25; // P1 = +1.0, P2 = +0.75, etc.
+    difficulty += priorityBoost;
+  }
+
+  // Duration boost
+  if (task.duration_minutes) {
+    if (task.duration_minutes >= 60) difficulty += 0.5;
+    else if (task.duration_minutes >= 30) difficulty += 0.25;
+  }
+
+  // Quantity boost
+  if (task.quantity && task.quantity > 1) {
+    difficulty += Math.min(0.5, task.quantity * 0.1);
+  }
+
+  return Math.min(3, difficulty); // Cap at 3x
 }

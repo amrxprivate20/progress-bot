@@ -7,8 +7,7 @@ Always update this file, to know what is done and what is left!
 Always update the start and help commands with the latest commands list!
 
 TODO:
-    - Test post-analysis Q&A flow
-    - Test report saving with all Q&A combined
+
 
 DONE (23 JAN 2026 - Session 6 - POST-ANALYSIS Q&A):
     ✅ Added post-analysis questions flow:

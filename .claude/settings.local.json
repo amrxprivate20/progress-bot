@@ -12,7 +12,10 @@
       "Bash(npm run deploy:*)",
       "Bash(npm run typecheck:*)",
       "Bash(npm run:*)",
-      "Bash(echo:*)"
+      "Bash(echo:*)",
+      "Bash(tree:*)",
+      "Bash(xargs cat:*)",
+      "Bash(grep:*)"
     ]
   }
 }
