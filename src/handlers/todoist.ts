@@ -9,7 +9,7 @@
 // ============================================
 
 import type { SupabaseClient } from '../database/client';
-import { SETTINGS_KEYS, SettingsManager } from '../database/settings';
+import { SETTINGS_KEYS, SettingsManager, getAIModelByTier } from '../database/settings';
 import type { TodoistWebhookEvent, Task, Streak } from '../types';
 import { op } from '../database/client';
 import { logError } from '../utils/errors';
@@ -149,12 +149,14 @@ async function syncParentTaskFromTodoist(
 /**
  * Complete parent task in Todoist if all subtasks are done
  * ✅ FIXED: Uses clean name matching for reliability
+ * ✅ FIXED: Now accepts optional parentId parameter to avoid DB lookup timing issues
  */
 export async function completeParentInTodoistIfAllDone(
   db: SupabaseClient,
   settings: SettingsManager,
   subtaskId: string,
-  egyptDate: string
+  egyptDate: string,
+  parentIdHint?: string | null  // ✅ Optional parent ID hint from webhook
 ): Promise<void> {
   try {
     console.log(`🔍 Checking parent autocomplete after subtask ${subtaskId}...`);
@@ -174,17 +176,21 @@ export async function completeParentInTodoistIfAllDone(
       return taskDate >= start && taskDate <= end;
     });
 
-    // Find the completed subtask in our DB
-    const subtask = todayTasks.find(t =>
-      t.task_id === subtaskId || t.task_id?.startsWith(subtaskId + '_')
-    );
+    // Get the parent's Todoist ID - prefer hint, fallback to DB lookup
+    let parentTodoistId: string | null = parentIdHint?.split('_')[0] || null;
 
-    // Get the parent's Todoist ID - either from DB subtask or from parameter
-    let parentTodoistId: string | null = null;
+    if (parentTodoistId) {
+      console.log(`📌 Parent Todoist ID from hint: ${parentTodoistId}`);
+    } else {
+      // Fallback: Find the completed subtask in our DB
+      const subtask = todayTasks.find(t =>
+        t.task_id === subtaskId || t.task_id?.startsWith(subtaskId + '_')
+      );
 
-    if (subtask?.origin_task) {
-      parentTodoistId = subtask.origin_task.split('_')[0] || null;
-      console.log(`📌 Parent Todoist ID from subtask: ${parentTodoistId}`);
+      if (subtask?.origin_task) {
+        parentTodoistId = subtask.origin_task.split('_')[0] || null;
+        console.log(`📌 Parent Todoist ID from subtask DB: ${parentTodoistId}`);
+      }
     }
 
     if (!parentTodoistId) {
@@ -206,7 +212,7 @@ export async function completeParentInTodoistIfAllDone(
     try {
       // Get all subtasks of this parent from Todoist
       const subtasksResponse = await fetch(
-        `https://api.todoist.com/rest/v2/tasks?parent_id=${parentTodoistId}`,
+        `https://api.todoist.com/rest/v3/tasks?parent_id=${parentTodoistId}`,
         { headers: { 'Authorization': `Bearer ${todoistToken.trim()}` } }
       );
 
@@ -296,7 +302,7 @@ export async function completeParentInTodoistIfAllDone(
       console.log(`🎯 Autocompleting parent ${parentTodoistId} in Todoist...`);
 
       const completeResponse = await fetch(
-        `https://api.todoist.com/rest/v2/tasks/${parentTodoistId}/close`,
+        `https://api.todoist.com/rest/v3/tasks/${parentTodoistId}/close`,
         {
           method: 'POST',
           headers: { 'Authorization': `Bearer ${todoistToken.trim()}` },
@@ -451,9 +457,33 @@ export async function handleTodoistWebhook(
     // Ignore errors in marking completion
   }
 
-  // ✅ FIX 1: Ensure completedAt is always a Date object
-  const completedAt = new Date();
-  const egyptDate = getEgyptDateString(completedAt);
+  // ✅ FIX 1: Check for pending update FIRST to get startDate (for midnight boundary)
+  // Default to now, but override if pending update has startDate
+  let completedAt = new Date();
+  let egyptDate = getEgyptDateString(completedAt);
+  let timerStartDate: string | null = null;
+
+  // Check for pending timer update early to capture startDate
+  const pendingUpdateKey = `pending_update_${event.event_data.id}`;
+  try {
+    const pendingUpdates = await db.select('conversation_state', {
+      filter: { chat_id: op.eq(pendingUpdateKey) },
+    });
+
+    if (pendingUpdates.length > 0) {
+      const pendingData = (pendingUpdates[0] as any).data || {};
+      // ✅ Use startDate from pending update if available (midnight boundary fix)
+      if (pendingData.startDate) {
+        timerStartDate = pendingData.startDate as string;
+        egyptDate = timerStartDate;
+        // Set completedAt to end of start day in Egypt timezone
+        completedAt = new Date(`${timerStartDate}T23:59:59+02:00`);
+        console.log('📅 Using startDate from timer for Egypt date:', egyptDate);
+      }
+    }
+  } catch (e) {
+    console.error('❌ Error reading startDate from pending update:', e);
+  }
 
   console.log('⏰ UTC completion timestamp:', completedAt.toISOString());
   console.log('📅 Egypt date:', egyptDate);
@@ -473,11 +503,28 @@ export async function handleTodoistWebhook(
     await syncParentTaskFromTodoist(db, settings, event.event_data.parent_id, egyptDate);
   }
 
+  // Check and remove from failures - both today AND yesterday if task started yesterday
+  const todayDate = getEgyptDateString(new Date());
   const wasFailedBefore = await wasTaskFailedToday(db, egyptDate, event.event_data.id);
-  
+
   if (wasFailedBefore) {
-    console.log('🔄 Task was in failed JSON - removing it');
+    console.log('🔄 Task was in failed JSON - removing it from', egyptDate);
     await removeFromFailedTasks(db, egyptDate, event.event_data.id);
+  }
+
+  // ✅ Also check yesterday's failures if task started yesterday but we're completing today
+  if (egyptDate !== todayDate) {
+    const wasFailedYesterday = await wasTaskFailedToday(db, egyptDate, event.event_data.id);
+    if (wasFailedYesterday) {
+      console.log('🔄 Task was in yesterday failed JSON - removing it from', egyptDate);
+      await removeFromFailedTasks(db, egyptDate, event.event_data.id);
+    }
+    // Also check today's failures in case it was added there too
+    const wasFailedToday = await wasTaskFailedToday(db, todayDate, event.event_data.id);
+    if (wasFailedToday) {
+      console.log('🔄 Task was also in today failed JSON - removing it from', todayDate);
+      await removeFromFailedTasks(db, todayDate, event.event_data.id);
+    }
   }
 
   const existingFailure = await checkForFailedTask(
@@ -541,8 +588,8 @@ export async function handleTodoistWebhook(
 
       await withLock(db, lockKey, async () => {
         await updateParentTaskStatus(db, event.event_data.parent_id!);
-        // Pass the subtask ID (current task), not parent_id
-        await completeParentInTodoistIfAllDone(db, settings, event.event_data.id, egyptDate);
+        // Pass the subtask ID and parent ID hint for reliable autocomplete
+        await completeParentInTodoistIfAllDone(db, settings, event.event_data.id, egyptDate, event.event_data.parent_id);
       });
     }
 
@@ -567,11 +614,10 @@ export async function handleTodoistWebhook(
     };
   }
 
-  // Check for pending timer update FIRST (from /starttask -> /completetask flow)
-  // This must happen before duplicate check so we match on correct content
+  // Check for pending timer update (from /starttask -> /completetask flow)
+  // This processes content and duration; startDate was already processed above
   let taskContent = event.event_data.content;
   let timerDuration = 0;
-  const pendingUpdateKey = `pending_update_${event.event_data.id}`;
 
   console.log('🔍 Looking for pending update with key:', pendingUpdateKey);
   console.log('🔍 Original task content from webhook:', taskContent);
@@ -657,7 +703,7 @@ export async function handleTodoistWebhook(
       if (todoistToken) {
         try {
           const parentResponse = await fetch(
-            `https://api.todoist.com/rest/v2/tasks/${event.event_data.parent_id}`,
+            `https://api.todoist.com/rest/v3/tasks/${event.event_data.parent_id}`,
             { headers: { 'Authorization': `Bearer ${todoistToken.trim()}` } }
           );
 
@@ -800,8 +846,8 @@ export async function handleTodoistWebhook(
 
     await withLock(db, lockKey, async () => {
       await updateParentTaskStatus(db, event.event_data.parent_id!);
-      // Pass the subtask ID (current task), not parent_id
-      await completeParentInTodoistIfAllDone(db, settings, event.event_data.id, egyptDate);
+      // Pass the subtask ID and parent ID hint for reliable autocomplete
+      await completeParentInTodoistIfAllDone(db, settings, event.event_data.id, egyptDate, event.event_data.parent_id);
     });
   }
 
@@ -1583,14 +1629,15 @@ export async function triggerOnTaskComplete(
   settings: SettingsManager
 ): Promise<void> {
   try {
-    // Get AI client for coach features
-    const apiKey = await settings.get('OPENROUTER_API_KEY');
+    // Get AI client for coach features - use LOW-TIER model for dopamine/battle
+    const apiKey = await settings.get('openrouter_api_key');
     if (!apiKey) {
       console.log('⚠️ No AI key configured, skipping coach features');
       return;
     }
 
-    const aiClient = createAIClient(apiKey);
+    const aiModel = await getAIModelByTier(settings, 'low');
+    const aiClient = createAIClient(apiKey, aiModel);
     const aiComplete = (msgs: any[], temp?: number, max?: number) => aiClient.complete(msgs, temp, max);
 
     // Get streak info for the task
@@ -1669,10 +1716,12 @@ export async function triggerOnTaskFailed(
     const battleEnabled = await settings.get('gamification.battle_mode');
     if (battleEnabled === 'false') return;
 
-    const apiKey = await settings.get('OPENROUTER_API_KEY');
+    const apiKey = await settings.get('openrouter_api_key');
     if (!apiKey) return;
 
-    const aiClient = createAIClient(apiKey);
+    // Use LOW-TIER model for battle mode
+    const aiModel = await getAIModelByTier(settings, 'low');
+    const aiClient = createAIClient(apiKey, aiModel);
     const battleMode = createBattleMode(db, settings, (msgs, temp, max) => aiClient.complete(msgs, temp, max));
 
     const action = await battleMode.bossHeals(chatId, taskName, severity);

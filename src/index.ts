@@ -4,7 +4,7 @@
 
 import type { Env } from './types';
 import { createSupabaseClient, op } from './database/client';
-import { SettingsManager } from './database/settings';
+import { SettingsManager, getAIModelByTier } from './database/settings';
 import { createBot, createTelegramWebhookHandler } from './bot/grammy';
 import { handleTodoistWebhook, sendTaskNotification } from './handlers/todoist';
 import { syncFailuresFromTodoist } from './handlers/todoist';
@@ -23,6 +23,86 @@ interface EnvWithDO extends Env {
 export { ReportProcessor }; // Export the Durable Object class
 
 export default {
+  /**
+   * Scheduled handler for automatic check-ins (cron-triggered)
+   * Configure in wrangler.toml with crons trigger for auto-coach check-ins
+   */
+  async scheduled(_event: ScheduledEvent, env: EnvWithDO, _ctx: ExecutionContext): Promise<void> {
+    console.log('🕐 Scheduled task triggered at:', new Date().toISOString());
+
+    const db = createSupabaseClient(env);
+    const settings = new SettingsManager(db);
+
+    // Get Egypt time
+    const egyptTime = new Date().toLocaleString('en-US', { timeZone: 'Africa/Cairo' });
+    const egyptDate = new Date(egyptTime);
+    const egyptHour = egyptDate.getHours();
+    const egyptMinute = egyptDate.getMinutes();
+    console.log(`🕐 Egypt time: ${egyptHour}:${egyptMinute.toString().padStart(2, '0')}`);
+
+    // ============================================
+    // AUTO-FAIL: Run at 11:50 PM Egypt time
+    // ============================================
+    if (egyptHour === 23 && egyptMinute >= 45) {
+      await handleAutoFail(db, settings, env);
+    }
+
+    // ============================================
+    // AUTO-COACH: Run every 30 minutes
+    // ============================================
+    try {
+      // Import auto-coach dependencies
+      const { createAutoCoach } = await import('./coach/auto-coach');
+      const { createAIClient } = await import('./services/ai-client');
+
+      // Get API key and chat ID
+      const apiKey = await settings.get('openrouter_api_key');
+      const chatId = env.TELEGRAM_CHAT_ID || await settings.get('telegram_chat_id');
+      const botToken = env.TELEGRAM_BOT_TOKEN;
+
+      if (!apiKey || !chatId) {
+        console.log('⏭️ Auto-coach skipped: missing API key or chat ID');
+        return;
+      }
+
+      // Create auto-coach - use LOW-TIER model for coaching probes
+      const aiModel = await getAIModelByTier(settings, 'low');
+      const aiClient = createAIClient(apiKey, aiModel);
+      const autoCoach = createAutoCoach(db, settings, (msgs, temp, max) => aiClient.complete(msgs, temp, max));
+
+      // Check if we should send a probe
+      const probeResult = await autoCoach.shouldProbe(chatId);
+
+      if (probeResult.shouldProbe && probeResult.reason !== 'none') {
+        console.log(`✅ Auto-coach probe triggered: ${probeResult.reason}`);
+
+        // Generate and send the probe
+        const message = await autoCoach.generateProbe(chatId, probeResult.reason);
+
+        // Send via Telegram API directly
+        const telegramResponse = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            chat_id: chatId,
+            text: message,
+            parse_mode: 'Markdown',
+          }),
+        });
+
+        if (telegramResponse.ok) {
+          console.log('✅ Auto-coach message sent successfully');
+        } else {
+          console.error('❌ Failed to send auto-coach message:', await telegramResponse.text());
+        }
+      } else {
+        console.log('⏭️ No auto-coach probe needed');
+      }
+    } catch (error) {
+      console.error('❌ Scheduled task error:', error);
+    }
+  },
+
   /**
    * Main HTTP request handler
    */
@@ -268,15 +348,20 @@ async function handleTodoistWebhookEndpoint(
     if (result.task) {
       const botToken = env.TELEGRAM_BOT_TOKEN;
       const chatId = env.TELEGRAM_CHAT_ID;
-      
+
       console.log('📤 Sending notification to:', chatId);
-      
+
       try {
         // FIXED: Added db as 4th parameter
         await sendTaskNotification(result.task, chatId, botToken, db);
         console.log('✅ Notification sent successfully');
+
+        // ✅ Trigger dopamine hit and battle mode AFTER notification
+        const { triggerOnTaskComplete } = await import('./handlers/todoist');
+        await triggerOnTaskComplete(result.task, chatId, botToken, db, settings);
+        console.log('✅ Coach features triggered');
       } catch (err) {
-        console.error('❌ Notification failed:', err);
+        console.error('❌ Notification/coach error:', err);
       }
     }
 
@@ -419,7 +504,8 @@ async function handleWidgetAPI(
   const { createAIClient } = await import('./services/ai-client');
   
   const openRouterKey = await settings.get('openrouter_api_key');
-  const aiModel = await settings.get('ai_model') || 'anthropic/claude-sonnet-4';
+  // Use LOW-TIER model for goals management
+  const aiModel = await getAIModelByTier(settings, 'low');
   const aiClient = createAIClient(openRouterKey?.trim() || '', aiModel);
   
   const goalsMgr = createGoalsManager(db, settings, aiClient);
@@ -622,4 +708,197 @@ function getWeekEndDate(): string {
   const friday = new Date(today);
   friday.setDate(today.getDate() + daysToFri);
   return friday.toISOString().split('T')[0] || '';
+}
+
+// ============================================
+// Auto-Fail Handler
+// ============================================
+// Runs at 11:50 PM Egypt time to mark all undone tasks as failures
+
+interface EnvWithDOForAutoFail {
+  TELEGRAM_BOT_TOKEN: string;
+  TELEGRAM_CHAT_ID?: string;
+  SUPABASE_URL: string;
+  SUPABASE_ANON_KEY: string;
+}
+
+async function handleAutoFail(
+  db: any,
+  settings: SettingsManager,
+  env: EnvWithDOForAutoFail
+): Promise<void> {
+  try {
+    // Check if auto-fail is enabled
+    const autoFailEnabled = await settings.get('auto_fail_enabled');
+    if (autoFailEnabled !== 'true') {
+      console.log('⏭️ Auto-fail skipped: feature disabled');
+      return;
+    }
+
+    // Check if we already ran today (prevent duplicate runs)
+    const today = getTodayInEgypt();
+    const autoFailMarker = `auto_fail_ran_${today}`;
+
+    const existingRun = await db.select('conversation_state', {
+      filter: { chat_id: op.eq(autoFailMarker) },
+    });
+
+    if (existingRun.length > 0) {
+      console.log('⏭️ Auto-fail already ran today');
+      return;
+    }
+
+    console.log('🔄 Starting auto-fail process...');
+
+    // Get Todoist token
+    const todoistToken = await settings.get('todoist_api_token');
+    const todoistProjectId = await settings.get('todoist_project_id');
+    const chatId = env.TELEGRAM_CHAT_ID || await settings.get('telegram_chat_id');
+    const botToken = env.TELEGRAM_BOT_TOKEN;
+
+    if (!todoistToken || !chatId) {
+      console.log('⏭️ Auto-fail skipped: missing Todoist token or chat ID');
+      return;
+    }
+
+    // Get priority threshold
+    const priorityThresholdStr = await settings.get('failure_priority_threshold');
+    const priorityThreshold = priorityThresholdStr ? parseInt(priorityThresholdStr, 10) : 2;
+
+    // Get all active tasks from Todoist
+    let url = 'https://api.todoist.com/rest/v3/tasks';
+    if (todoistProjectId) {
+      url += `?project_id=${todoistProjectId.trim()}`;
+    }
+
+    const tasksResponse = await fetch(url, {
+      headers: { 'Authorization': `Bearer ${todoistToken.trim()}` },
+    });
+
+    if (!tasksResponse.ok) {
+      console.error('❌ Failed to fetch Todoist tasks');
+      return;
+    }
+
+    const allTasks = await tasksResponse.json() as Array<{
+      id: string;
+      content: string;
+      priority: number;
+      due?: { date: string; is_recurring?: boolean } | null;
+    }>;
+
+    // Filter tasks due today or earlier (not completed)
+    const tasksDueToday = allTasks.filter(task => {
+      if (!task.due?.date) return false;
+      const dueDate = task.due.date.split('T')[0];
+      return dueDate && dueDate <= today;
+    });
+
+    // Filter by priority threshold (Todoist: 1=lowest, 4=highest)
+    const tasksToFail = tasksDueToday.filter(task => {
+      const ourPriority = 5 - (task.priority || 1); // Convert: Todoist 4 → Our P1
+      return ourPriority <= priorityThreshold;
+    });
+
+    if (tasksToFail.length === 0) {
+      console.log('✅ No tasks to auto-fail');
+      return;
+    }
+
+    console.log(`🔄 Auto-failing ${tasksToFail.length} tasks...`);
+
+    // Get or create daily failures document
+    const { getDailyFailures, upsertDailyFailures } = await import('./services/failure-manager');
+    let dailyFailures = await getDailyFailures(db, today);
+
+    if (!dailyFailures) {
+      dailyFailures = {
+        date: today,
+        last_sync: new Date().toISOString(),
+        failed_tasks: [],
+      };
+    }
+
+    const failedTaskNames: string[] = [];
+
+    for (const task of tasksToFail) {
+      try {
+        // Add to daily failures JSON
+        const { extractCleanTaskName } = await import('./utils/task-parser');
+        const cleanName = extractCleanTaskName(task.content);
+
+        // Check if already in failures
+        const existingIndex = dailyFailures.failed_tasks.findIndex(f =>
+          extractCleanTaskName(f.content) === cleanName
+        );
+
+        if (existingIndex < 0) {
+          dailyFailures.failed_tasks.push({
+            id: task.id,
+            content: task.content,
+            parent_id: null,
+            parent_content: null,
+            priority: task.priority,
+            is_subtask: false,
+            description: 'Auto-failed at end of day',
+          });
+        }
+
+        // Create failure completion marker
+        const markerKey = `failure_completion_${task.id}`;
+        await db.delete('conversation_state', { chat_id: op.eq(markerKey) }).catch(() => {});
+        await db.insert('conversation_state', {
+          chat_id: markerKey,
+          conversation_type: 'failure_completion',
+          data: { taskId: task.id, taskName: task.content, autoFail: true },
+          expires_at: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
+        });
+
+        // Complete the task in Todoist (this postpones recurring tasks)
+        await fetch(`https://api.todoist.com/rest/v3/tasks/${task.id}/close`, {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${todoistToken.trim()}` },
+        });
+
+        failedTaskNames.push(cleanName);
+        console.log(`❌ Auto-failed: ${cleanName}`);
+      } catch (taskError) {
+        console.error(`❌ Failed to auto-fail task ${task.id}:`, taskError);
+      }
+    }
+
+    // Save daily failures
+    dailyFailures.last_sync = new Date().toISOString();
+    await upsertDailyFailures(db, dailyFailures);
+
+    // Mark that we ran today
+    await db.insert('conversation_state', {
+      chat_id: autoFailMarker,
+      conversation_type: 'auto_fail_marker',
+      data: { date: today, count: failedTaskNames.length },
+      expires_at: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
+    });
+
+    // Send notification
+    if (failedTaskNames.length > 0) {
+      const message = `🌙 **تم تسجيل الإخفاقات التلقائية**\n\n` +
+        `عدد المهام: ${failedTaskNames.length}\n\n` +
+        failedTaskNames.map(name => `❌ ${name}`).join('\n') +
+        `\n\n_تم تأجيل المهام المتكررة للموعد التالي_`;
+
+      await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          chat_id: chatId,
+          text: message,
+          parse_mode: 'Markdown',
+        }),
+      });
+    }
+
+    console.log(`✅ Auto-fail complete: ${failedTaskNames.length} tasks failed`);
+  } catch (error) {
+    console.error('❌ Auto-fail error:', error);
+  }
 }

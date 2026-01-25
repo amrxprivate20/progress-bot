@@ -51,94 +51,101 @@ export interface StuckSession {
 // AI Prompts
 // ============================================
 
-const INITIAL_QUESTION_PROMPT = `You are a CONFRONTATIONAL productivity coach. The user just pressed /stuck, signaling they're avoiding something.
+const INITIAL_QUESTION_PROMPT = `أنت كوتش إنتاجية مواجهة. الشخص لسه ضغط /stuck، يعني بيهرب من حاجة.
+
+⚠️ مهم جداً: لازم الرد يكون بالعامية المصرية فقط! مفيش إنجليزي خالص.
 
 {COACHING_CONTEXT}
 
-Generate ONE powerful, DIRECT question to uncover what they're really avoiding.
+اكتب سؤال واحد قوي ومباشر عشان تعرف إيه اللي بيهرب منه فعلاً.
 
-Rules:
-- Be CONFRONTATIONAL - challenge them, don't comfort them
-- No generic questions - make it personal based on their patterns
-- Target the emotional root: fear, overwhelm, boredom, or resistance
-- If you know their triggers from memory, reference them
-- Arabic preferred, mix English for impact
-- Max 2 sentences
+القواعد:
+- كن مواجهة - تحدّيه، متواسيهوش
+- مفيش أسئلة عامة - خليها شخصية بناءً على أنماطه
+- استهدف الجذر العاطفي: خوف، إرهاق، ملل، أو مقاومة
+- لو تعرف محفزاته من الذاكرة، اشر ليها
+- جملتين ماكس
 
-Examples of good confrontational questions:
-- "مرة ثانية؟ وش اللي يخليك تهرب من نفس النوع من المهام؟"
-- "خايف تفشل ولا خايف تنجح وتصير مسؤول؟"
-- "كم مرة قلت 'بعدين' اليوم؟ وش الحقيقة؟"
+أمثلة لأسئلة مواجهة كويسة:
+- "تاني مرة؟ إيه اللي بيخليك تهرب من نفس نوع المهام دي؟"
+- "خايف تفشل ولا خايف تنجح وتبقى مسؤول؟"
+- "كام مرة قلت 'بعدين' النهارده؟ إيه الحقيقة؟"
 
-Respond with ONLY the question, nothing else.`;
+رد بالسؤال بس، من غير أي حاجة تانية.`;
 
-const CLASSIFY_BLOCKAGE_PROMPT = `You are analyzing why someone is stuck and procrastinating.
+const CLASSIFY_BLOCKAGE_PROMPT = `أنت بتحلل ليه الشخص واقف ومش قادر يكمل.
 
-User's response about what they're avoiding:
+⚠️ مهم جداً: لازم الرد يكون بالعامية المصرية فقط! مفيش إنجليزي خالص.
+
+رد الشخص عن اللي بيهرب منه:
 "{USER_RESPONSE}"
 
-Classify this blockage into ONE of these categories:
-- FEAR: Anxiety about outcome, judgment, failure, or the unknown
-- OVERWHELM: Task feels too big, complex, or has too many steps
-- BOREDOM: Task is tedious, repetitive, or unstimulating
-- RESISTANCE: Internal conflict, values clash, or emotional avoidance
+صنّف السبب لفئة واحدة بس:
+- خوف: قلق من النتيجة أو الحكم عليه أو الفشل
+- إرهاق: المهمة كبيرة أوي أو معقدة أو خطواتها كتير
+- ملل: المهمة مملة أو متكررة
+- مقاومة: صراع داخلي أو تجنب عاطفي
 
-Also generate a SHORT, punchy response (2-3 sentences max) that:
-1. Acknowledges their specific situation
-2. Reframes it in a motivating way
-3. Sets up the 2-minute sprint
+كمان اكتب رد قصير وقوي (2-3 جمل ماكس) بيعمل الآتي:
+1. يعترف بموقفه المحدد
+2. يعيد صياغته بشكل محفز
+3. يمهد لسبرنت الدقيقتين
 
-Format your response EXACTLY like this:
-[CLASSIFICATION]
-fear/overwhelm/boredom/resistance
+صيغة الرد لازم تكون كدا بالظبط:
+[التصنيف]
+خوف/إرهاق/ملل/مقاومة
 
-[RESPONSE]
-Your motivating message here in Arabic or English`;
+[الرد]
+رسالتك المحفزة هنا بالمصري`;
 
-const SPRINT_NUDGE_PROMPT = `You are a productivity coach during an active 2-minute sprint.
+const SPRINT_NUDGE_PROMPT = `أنت كوتش إنتاجية في نص سبرنت دقيقتين.
 
-Context:
-- User was stuck due to: {BLOCKAGE_TYPE}
-- They're working on: {TASK_DESCRIPTION}
-- Time remaining: {TIME_REMAINING} seconds
-- This is nudge #{NUDGE_NUMBER}
+⚠️ مهم جداً: لازم الرد يكون بالعامية المصرية فقط! مفيش إنجليزي خالص.
 
-Generate a SHORT (1 sentence) nudge to keep momentum. Be:
-- Urgent but not stressful
-- Specific to their blockage type
-- Encouraging their progress
+السياق:
+- الشخص واقف بسبب: {BLOCKAGE_TYPE}
+- بيشتغل على: {TASK_DESCRIPTION}
+- الوقت المتبقي: {TIME_REMAINING} ثانية
+- دا تنبيه رقم #{NUDGE_NUMBER}
 
-For FEAR: Remind them nothing bad has happened yet
-For OVERWHELM: Celebrate any tiny progress
-For BOREDOM: Make it a micro-game
-For RESISTANCE: Acknowledge the discomfort, push through
+اكتب تنبيه قصير (جملة واحدة) عشان تحافظ على الزخم:
+- ملحّ بس مش ضاغط
+- مخصص لنوع السبب
+- بيشجع على التقدم
 
-Respond with ONLY the nudge message.`;
+للخوف: فكّره إن مفيش حاجة وحشة حصلت لحد دلوقتي
+للإرهاق: احتفل بأي تقدم صغير
+للملل: حوّلها لعبة صغيرة
+للمقاومة: اعترف بالصعوبة، وادفع للأمام
 
-const POST_SPRINT_PROMPT = `The user just completed a 2-minute action sprint.
+رد بالتنبيه بس.`;
 
-Context:
-- They were stuck due to: {BLOCKAGE_TYPE}
-- Original task/situation: {TASK_DESCRIPTION}
+const POST_SPRINT_PROMPT = `الشخص لسه خلّص سبرنت دقيقتين.
 
-Generate a response that:
-1. Celebrates completing the sprint (briefly)
-2. Asks what happened in those 2 minutes
-3. Offers THREE clear options:
-   - 🔥 Continue (they're in flow)
-   - ✅ Mark done (they finished something)
-   - ⏰ Defer with reason (need to stop)
+⚠️ مهم جداً: لازم الرد يكون بالعامية المصرية فقط! مفيش إنجليزي خالص.
 
-Keep it SHORT and action-focused. Arabic preferred.
+السياق:
+- كان واقف بسبب: {BLOCKAGE_TYPE}
+- المهمة/الموقف الأصلي: {TASK_DESCRIPTION}
 
-Format:
-[CELEBRATION]
-Brief celebration (1 sentence)
+اكتب رد بيعمل الآتي:
+1. يحتفل بإكمال السبرنت (بسرعة)
+2. يسأل إيه اللي حصل في الدقيقتين
+3. يقدّم ٣ خيارات واضحة:
+   - 🔥 كمّل (في حالة تدفق)
+   - ✅ خلّص حاجة (أنجز شي)
+   - ⏰ أجّل مع سبب (محتاج يوقف)
 
-[QUESTION]
-What happened question
+خليه قصير ومركز على الفعل.
 
-[OPTIONS]
+الصيغة:
+[الاحتفال]
+احتفال قصير (جملة واحدة)
+
+[السؤال]
+سؤال عن اللي حصل
+
+[الخيارات]
 The three options formatted nicely`;
 
 // ============================================
@@ -225,11 +232,19 @@ export class StuckHandler {
       300
     );
 
-    // Parse classification
-    const classificationMatch = aiResponse.match(/\[CLASSIFICATION\]\s*(fear|overwhelm|boredom|resistance)/i);
-    const responseMatch = aiResponse.match(/\[RESPONSE\]\s*([\s\S]+?)(?:\[|$)/i);
+    // Parse classification - support both English and Arabic
+    const classificationMatch = aiResponse.match(/\[(?:CLASSIFICATION|التصنيف)\]\s*(fear|overwhelm|boredom|resistance|خوف|إرهاق|ملل|مقاومة)/i);
+    const responseMatch = aiResponse.match(/\[(?:RESPONSE|الرد)\]\s*([\s\S]+?)(?:\[|$)/i);
 
-    const blockageType = (classificationMatch?.[1]?.toLowerCase() || 'unknown') as BlockageType;
+    // Map Arabic to English blockage types
+    const blockageMap: Record<string, BlockageType> = {
+      'fear': 'fear', 'خوف': 'fear',
+      'overwhelm': 'overwhelm', 'إرهاق': 'overwhelm',
+      'boredom': 'boredom', 'ملل': 'boredom',
+      'resistance': 'resistance', 'مقاومة': 'resistance',
+    };
+    const rawBlockage = classificationMatch?.[1]?.toLowerCase() || 'unknown';
+    const blockageType = (blockageMap[rawBlockage] || 'unknown') as BlockageType;
     const motivatingResponse = responseMatch?.[1]?.trim() || 'خلينا نبدأ سبرنت دقيقتين!';
 
     // Update session
@@ -478,13 +493,21 @@ export class StuckHandler {
     const expiresAt = new Date();
     expiresAt.setMinutes(expiresAt.getMinutes() + 15); // 15 min expiry
 
-    await this.db.upsert('conversation_state', {
+    // Delete any existing session first, then insert new one
+    // (conversation_state doesn't have unique constraint on chat_id alone)
+    try {
+      await this.db.delete('conversation_state', { chat_id: op.eq(key) });
+    } catch (e) {
+      // Ignore delete errors
+    }
+
+    await this.db.insert('conversation_state', {
       chat_id: key,
       conversation_type: 'stuck_intervention',
       current_step: 0,
       data: state,
-      expires_at: expiresAt,
-    }, 'chat_id');
+      expires_at: expiresAt.toISOString(),
+    });
   }
 
   private async clearSession(chatId: string): Promise<void> {

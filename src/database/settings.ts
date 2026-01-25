@@ -262,7 +262,9 @@ export const SETTINGS_KEYS = {
   
   // AI
   OPENROUTER_API_KEY: 'openrouter_api_key',
-  AI_MODEL: 'ai_model',
+  AI_MODEL: 'ai_model', // Deprecated - use HIGH_TIER/LOW_TIER instead
+  HIGH_TIER_AI_MODEL: 'high_tier_ai_model', // For unified analysis & memory optimization
+  LOW_TIER_AI_MODEL: 'low_tier_ai_model',   // For everything else (plans, coaching, etc.)
   
   // Google Drive
   GOOGLE_DRIVE_FOLDER_ID: 'google_drive_folder_id',
@@ -311,4 +313,39 @@ export async function validateRequiredSettings(
     valid: missing.length === 0,
     missing,
   };
+}
+
+/**
+ * AI Model Tiers
+ * - high: For critical analysis tasks (unified report analysis, memory optimization)
+ * - low: For simpler tasks (planning, coaching, battle mode, etc.)
+ */
+export type AIModelTier = 'high' | 'low';
+
+// Default models for each tier
+const DEFAULT_HIGH_TIER_MODEL = 'anthropic/claude-sonnet-4';
+const DEFAULT_LOW_TIER_MODEL = 'anthropic/claude-haiku';
+
+/**
+ * Get AI model for a specific tier
+ * Falls back to legacy ai_model setting, then to defaults
+ */
+export async function getAIModelByTier(
+  manager: SettingsManager,
+  tier: AIModelTier
+): Promise<string> {
+  if (tier === 'high') {
+    const model = await manager.get(SETTINGS_KEYS.HIGH_TIER_AI_MODEL);
+    if (model) return model;
+
+    // Fallback to legacy ai_model setting
+    const legacyModel = await manager.get(SETTINGS_KEYS.AI_MODEL);
+    return legacyModel || DEFAULT_HIGH_TIER_MODEL;
+  } else {
+    const model = await manager.get(SETTINGS_KEYS.LOW_TIER_AI_MODEL);
+    if (model) return model;
+
+    // Fallback to default low-tier model
+    return DEFAULT_LOW_TIER_MODEL;
+  }
 }

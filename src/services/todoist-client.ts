@@ -62,7 +62,7 @@ export interface GeneratedTask {
 // ============================================
 
 export class TodoistClient {
-  private baseUrl = 'https://api.todoist.com/rest/v2';
+  private baseUrl = 'https://api.todoist.com/rest/v3';
   private rateLimitRemaining = 450;
   private rateLimitReset: Date | null = null;
 

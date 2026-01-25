@@ -12,6 +12,7 @@ import { createReportGenerator } from '../services/report-generator';
 import { createUnifiedAIClient } from '../services/ai-client';
 import { createConversationManager } from '../services/conversation-manager';
 import { op } from '../database/client';
+import { getAIModelByTier } from '../database/settings';
 
 /**
  * Handle /confirm command - Start Durable Object job
@@ -56,7 +57,8 @@ export async function handleConfirmCommand(
     // Get API keys from settings
     const openRouterKey = await ctx.settings.get('openrouter_api_key');
     const anthropicApiKey = await ctx.settings.get('anthropic_api_key');
-    const aiModel = await ctx.settings.get('ai_model') || 'anthropic/claude-sonnet-4';
+    // Use HIGH-TIER model for unified report analysis (critical task)
+    const aiModel = await getAIModelByTier(ctx.settings, 'high');
     const botToken = await ctx.settings.get('telegram_bot_token');
     const useAnthropicPrimary = (await ctx.settings.get('use_anthropic_primary')) !== 'false';
 

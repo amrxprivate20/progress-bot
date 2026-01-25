@@ -53,3 +53,10 @@ vars = { ENVIRONMENT = "production" }
 # Compatibility settings
 # ============================================
 compatibility_flags = ["nodejs_compat"]
+
+# ============================================
+# Scheduled Tasks (Cron Triggers)
+# ============================================
+# Auto-coach check-ins run every 30 minutes
+[triggers]
+crons = ["*/30 * * * *"]

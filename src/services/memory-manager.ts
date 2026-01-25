@@ -270,14 +270,23 @@ export class MemoryManager {
   }
 
   /**
-   * Append new content to existing
+   * Append new content to existing with date prefix
    */
   private appendContent(existing: string, newContent: string): string {
+    // Add date prefix to new content
+    const today = new Date().toLocaleDateString('ar-EG', {
+      year: 'numeric',
+      month: 'short',
+      day: 'numeric',
+      timeZone: 'Africa/Cairo',
+    });
+    const datedContent = `[${today}] ${newContent}`;
+
     if (!existing) {
-      return newContent;
+      return datedContent;
     }
 
-    return `${existing}\n\n${newContent}`;
+    return `${existing}\n\n${datedContent}`;
   }
 
   /**

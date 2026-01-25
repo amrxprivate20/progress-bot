@@ -61,115 +61,121 @@ export interface BattleAction {
 // AI Prompts
 // ============================================
 
-const GENERATE_BOSS_PROMPT = `You are creating today's BOSS - a personified enemy representing procrastination and resistance.
+const GENERATE_BOSS_PROMPT = `أنت بتخلق البوس بتاع اليوم - عدو يجسّد التسويف والمقاومة.
 
-Today's date: {DATE}
-Day of week: {DAY_OF_WEEK}
+تاريخ اليوم: {DATE}
+يوم الأسبوع: {DAY_OF_WEEK}
 
-Create a unique boss with:
-1. NAME: A dramatic, memorable Arabic/English name
-2. TITLE: Their intimidating title
-3. DESCRIPTION: 2-3 sentences describing their appearance/nature
-4. PERSONALITY: How they mock and challenge the player
-5. WEAKNESS: What defeats them (tied to productivity)
-6. TAUNT: Their opening battle cry
+⚠️ مهم جداً: كل الكلام لازم يكون بالعامية المصرية فقط! مفيش إنجليزي خالص.
 
-Theme ideas based on day:
-- Monday: "Lord of Slow Starts"
-- Tuesday: "The Distraction Hydra"
-- Wednesday: "Midweek Doubt Demon"
-- Thursday: "Almost-Friday Laziness"
-- Friday: "Weekend Temptation"
-- Saturday/Sunday: "The Relaxation Trap"
+اعمل بوس فريد بالعناصر دي:
+1. الاسم: اسم درامي ومميز بالعربي
+2. اللقب: لقب مرعب بالعربي
+3. الوصف: 2-3 جمل تصف شكله وطبيعته
+4. الشخصية: إزاي بيستهزأ ويتحدى اللاعب
+5. نقطة الضعف: إيه اللي بيهزمه (مرتبط بالإنتاجية)
+6. التحدي: صيحته في بداية المعركة
 
-Be creative! Make it FUN to fight them.
+أفكار حسب اليوم:
+- السبت: "سيد البدايات الثقيلة"
+- الأحد: "وحش التشتت"
+- الإثنين: "شيطان الشك"
+- الثلاثاء: "حارس الكسل"
+- الأربعاء: "أمير المماطلة"
+- الخميس: "إغواء نهاية الأسبوع"
+- الجمعة: "فخ الراحة"
 
-FORMAT:
-[NAME]
-boss name
+كن مبدع! خلي محاربته ممتعة!
 
-[TITLE]
-their title
+الصيغة:
+[الاسم]
+اسم البوس بالعربي
 
-[DESCRIPTION]
-2-3 sentences
+[اللقب]
+لقبه بالعربي
 
-[PERSONALITY]
-how they act
+[الوصف]
+2-3 جمل بالعربي
 
-[WEAKNESS]
-what defeats them
+[الشخصية]
+إزاي بيتصرف
 
-[TAUNT]
-their opening line`;
+[نقطة_الضعف]
+إيه اللي بيهزمه
 
-const DAMAGE_NARRATIVE_PROMPT = `You are narrating a battle between a productivity warrior and today's boss.
+[التحدي]
+جملته الافتتاحية`;
 
-BOSS: {BOSS_NAME}, {BOSS_TITLE}
-Boss HP: {BOSS_HP}/{BOSS_MAX_HP}
-Player just completed: "{TASK_NAME}"
-Damage dealt: {DAMAGE} HP
-Is critical hit: {IS_CRITICAL}
-Tasks completed today: {TASKS_TODAY}
+const DAMAGE_NARRATIVE_PROMPT = `أنت بتروي معركة بين محارب الإنتاجية وبوس اليوم.
 
-Generate a SHORT (2-3 sentences) dramatic battle narrative:
-- Describe the attack in epic terms
-- Show the boss's reaction (pain, frustration, fear)
-- If critical: Make it EPIC
-- If boss HP low: Show their desperation
-- Use Arabic preferred
+البوس: {BOSS_NAME}، {BOSS_TITLE}
+طاقة البوس: {BOSS_HP}/{BOSS_MAX_HP}
+اللاعب أنجز للتو: "{TASK_NAME}"
+الضرر: {DAMAGE} نقطة
+ضربة حاسمة؟: {IS_CRITICAL}
+المهام المنجزة اليوم: {TASKS_TODAY}
 
-Keep the energy HIGH. Make completing tasks feel POWERFUL.`;
+⚠️ مهم جداً: الرد لازم يكون بالعامية المصرية فقط! مفيش إنجليزي.
 
-const BOSS_HEAL_PROMPT = `The boss is HEALING because the player failed or deferred a task!
+اكتب رواية قصيرة (2-3 جمل) درامية:
+- وصف الهجوم بشكل ملحمي
+- إظهار رد فعل البوس (ألم، إحباط، خوف)
+- لو ضربة حاسمة: خليها ملحمية جداً!
+- لو طاقة البوس قليلة: أظهر يأسه
 
-BOSS: {BOSS_NAME}, {BOSS_TITLE}
-Boss HP: {BOSS_HP}/{BOSS_MAX_HP}
-Failed/deferred task: "{TASK_NAME}"
-HP healed: {HEAL_AMOUNT}
+خلي الطاقة عالية! خلي إكمال المهام حاسة بالقوة!`;
 
-Generate a SHORT (2-3 sentences) narrative:
-- Boss gloats about the player's weakness
-- Uses their personality to mock
-- Creates URGENCY - motivates player to fight back
-- Arabic preferred
+const BOSS_HEAL_PROMPT = `البوس بيتعافى لأن اللاعب فشل أو أجّل مهمة!
 
-Don't be cruel, but make inaction feel COSTLY.`;
+البوس: {BOSS_NAME}، {BOSS_TITLE}
+طاقة البوس: {BOSS_HP}/{BOSS_MAX_HP}
+المهمة الفاشلة/المؤجلة: "{TASK_NAME}"
+الشفاء: {HEAL_AMOUNT} نقطة
 
-const VICTORY_NARRATIVE_PROMPT = `THE PLAYER HAS DEFEATED TODAY'S BOSS!
+⚠️ مهم جداً: الرد لازم يكون بالعامية المصرية فقط! مفيش إنجليزي.
 
-BOSS: {BOSS_NAME}, {BOSS_TITLE}
-Final stats:
-- Damage dealt: {TOTAL_DAMAGE}
-- Tasks completed: {TASKS_COMPLETED}
-- Critical hits: {CRITICAL_HITS}
-- Boss healing: {BOSS_HEALING}
+اكتب رواية قصيرة (2-3 جمل):
+- البوس بيتباهى بضعف اللاعب
+- بيستخدم شخصيته للسخرية
+- بيخلق إلحاح - بيحفز اللاعب يرد
+- متكونش قاسي، بس خلي التقاعس يحسس بالخسارة`;
 
-Generate a VICTORY celebration (4-6 lines):
-1. Dramatic defeat description
-2. Boss's final words
-3. Player's earned title for the day
-4. Tomorrow's preview (new challenge awaits)
+const VICTORY_NARRATIVE_PROMPT = `اللاعب هزم بوس اليوم!
 
-Make this feel AMAZING. They earned it!
-Arabic preferred with some English flair.`;
+البوس: {BOSS_NAME}، {BOSS_TITLE}
+الإحصائيات النهائية:
+- الضرر الكلي: {TOTAL_DAMAGE}
+- المهام المنجزة: {TASKS_COMPLETED}
+- الضربات الحاسمة: {CRITICAL_HITS}
+- شفاء البوس: {BOSS_HEALING}
 
-const DEFEAT_NARRATIVE_PROMPT = `The boss has SURVIVED! The player didn't defeat them today.
+⚠️ مهم جداً: الرد لازم يكون بالعامية المصرية فقط! مفيش إنجليزي.
 
-BOSS: {BOSS_NAME}, {BOSS_TITLE}
-Boss remaining HP: {BOSS_HP}/{BOSS_MAX_HP}
-Stats:
-- Damage dealt: {TOTAL_DAMAGE}
-- Tasks completed: {TASKS_COMPLETED}
-- Boss healing: {BOSS_HEALING}
+اكتب احتفال بالنصر (4-6 سطور):
+1. وصف درامي للهزيمة
+2. كلمات البوس الأخيرة
+3. لقب اللاعب لليوم
+4. تشويق لبكرة (تحدي جديد في الانتظار)
 
-Generate a DEFEAT message (3-4 lines):
-- Boss victory taunt (humorous, not cruel)
-- What could have been different
-- Motivation for tomorrow (this isn't over)
+خلي اللحظة دي مذهلة! هو يستاهل!`;
 
-Be sharp but not crushing. Leave them hungry for revenge.
-Arabic preferred.`;
+const DEFEAT_NARRATIVE_PROMPT = `البوس نجا! اللاعب مهزمهوش النهارده.
+
+البوس: {BOSS_NAME}، {BOSS_TITLE}
+طاقة البوس المتبقية: {BOSS_HP}/{BOSS_MAX_HP}
+الإحصائيات:
+- الضرر الكلي: {TOTAL_DAMAGE}
+- المهام المنجزة: {TASKS_COMPLETED}
+- شفاء البوس: {BOSS_HEALING}
+
+⚠️ مهم جداً: الرد لازم يكون بالعامية المصرية فقط! مفيش إنجليزي.
+
+اكتب رسالة الهزيمة (3-4 سطور):
+- البوس بيتباهى بالفوز (كوميدي، مش قاسي)
+- إيه اللي كان ممكن يبقى مختلف
+- تحفيز لبكرة (الموضوع لسه مخلصش)
+
+كن حاد بس مش محطم. خليه متحمس للانتقام.`;
 
 // ============================================
 // Battle Mode Class
@@ -382,13 +388,13 @@ _أكمل المهام لتوجيه الضربات!_
       500
     );
 
-    // Parse response
-    const nameMatch = response.match(/\[NAME\]\s*(.+?)(?:\[|$)/is);
-    const titleMatch = response.match(/\[TITLE\]\s*(.+?)(?:\[|$)/is);
-    const descMatch = response.match(/\[DESCRIPTION\]\s*([\s\S]+?)(?:\[|$)/i);
-    const personalityMatch = response.match(/\[PERSONALITY\]\s*([\s\S]+?)(?:\[|$)/i);
-    const weaknessMatch = response.match(/\[WEAKNESS\]\s*([\s\S]+?)(?:\[|$)/i);
-    const tauntMatch = response.match(/\[TAUNT\]\s*([\s\S]+?)$/i);
+    // Parse response - support both English and Arabic headers for backwards compatibility
+    const nameMatch = response.match(/\[(?:NAME|الاسم)\]\s*(.+?)(?:\[|$)/is);
+    const titleMatch = response.match(/\[(?:TITLE|اللقب)\]\s*(.+?)(?:\[|$)/is);
+    const descMatch = response.match(/\[(?:DESCRIPTION|الوصف)\]\s*([\s\S]+?)(?:\[|$)/i);
+    const personalityMatch = response.match(/\[(?:PERSONALITY|الشخصية)\]\s*([\s\S]+?)(?:\[|$)/i);
+    const weaknessMatch = response.match(/\[(?:WEAKNESS|نقطة_الضعف)\]\s*([\s\S]+?)(?:\[|$)/i);
+    const tauntMatch = response.match(/\[(?:TAUNT|التحدي)\]\s*([\s\S]+?)$/i);
 
     return {
       name: nameMatch?.[1]?.trim() || 'سيد التسويف',
@@ -553,14 +559,23 @@ _نقطة ضعفه: ${state.boss.weakness}_`;
 
   private async saveBattleState(chatId: string, state: BattleState): Promise<void> {
     try {
-      await this.db.upsert('battle_states', {
+      // Delete existing state first (upsert may not work without proper unique constraint)
+      await this.db.delete('battle_states', {
+        chat_id: op.eq(chatId),
+        battle_date: op.eq(state.date),
+      }).catch(() => {});
+
+      // Insert new state
+      await this.db.insert('battle_states', {
         chat_id: chatId,
         battle_date: state.date,
         state: state,
         updated_at: new Date().toISOString(),
-      }, 'chat_id,battle_date');
+      });
+
+      console.log(`✅ Battle state saved: HP ${state.bossCurrentHP}/${state.bossMaxHP}, Tasks: ${state.tasksCompleted}`);
     } catch (error) {
-      console.log('Could not save battle state (table may not exist):', error);
+      console.error('❌ Could not save battle state:', error);
     }
   }
 }

@@ -15,7 +15,9 @@
       "Bash(echo:*)",
       "Bash(tree:*)",
       "Bash(xargs cat:*)",
-      "Bash(grep:*)"
+      "Bash(grep:*)",
+      "Bash(tail:*)",
+      "Bash(pkill:*)"
     ]
   }
 }

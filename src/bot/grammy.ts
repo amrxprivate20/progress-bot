@@ -12,6 +12,7 @@ import { Bot, Context, webhookCallback } from 'grammy';
 import type { SupabaseClient } from '../database/client';
 import { op } from '../database/client';
 import type { SettingsManager } from '../database/settings';
+import { getAIModelByTier } from '../database/settings';
 import { createConversationManager } from '../services/conversation-manager';
 import { createMemoryManager } from '../services/memory-manager';
 import { createReportGenerator } from '../services/report-generator';
@@ -434,7 +435,7 @@ function getArabicOperationType(type: string): string {
 
     // Check for AI keys
     const openRouterKey = await ctx.settings.get('openrouter_api_key');
-    const aiModel = await ctx.settings.get('ai_model') || 'anthropic/claude-sonnet-4';
+    const aiModel = await getAIModelByTier(ctx.settings, 'low');
 
     if (!openRouterKey) {
       return `📅 **خطة ${titleWord} (${dayName} ${targetDate})**\n\n` +
@@ -557,14 +558,14 @@ ${memoryContext ? `**معلومات عن المستخدم:**\n${memoryContext}` 
 استخدم الإيموجي بشكل معتدل. اجعل الخطة عملية وقابلة للتنفيذ.
 `;
 
-    // Call AI
+    // Call AI - use 4000 tokens to allow comprehensive plans
     const aiClient = createAIClient(openRouterKey, aiModel);
 
     try {
       const aiResponse = await aiClient.complete([
         { role: 'system', content: 'أنت مساعد تخطيط يومي ذكي. تتحدث بالعامية المصرية بشكل طبيعي ومحفز.' },
         { role: 'user', content: prompt }
-      ], 0.7, 2000);
+      ], 0.7, 4000);
 
       // Build final message
       let planMessage = `📅 **خطة ${titleWord} (${dayName} ${targetDate})**\n`;
@@ -927,7 +928,7 @@ async function sendLongMessage(ctx: Context, message: string) {
           if (reportState.aiResponse.memoryUpdates && Object.keys(reportState.aiResponse.memoryUpdates).length > 0) {
             try {
               const openRouterKey = await ctx.settings.get('openrouter_api_key');
-              const aiModel = await ctx.settings.get('ai_model') || 'anthropic/claude-sonnet-4';
+              const aiModel = await getAIModelByTier(ctx.settings, 'low');
               const aiClient = createAIClient(openRouterKey?.trim() || '', aiModel);
               const memoryMgr = createMemoryManager(ctx.db, aiClient);
 
@@ -963,7 +964,7 @@ async function sendLongMessage(ctx: Context, message: string) {
       // Start Durable Object job with partial answers
       const openRouterKey = await ctx.settings.get('openrouter_api_key');
       const anthropicApiKey = await ctx.settings.get('anthropic_api_key');
-      const aiModel = await ctx.settings.get('ai_model') || 'anthropic/claude-sonnet-4';
+      const aiModel = await getAIModelByTier(ctx.settings, 'low');
       const botToken = await ctx.settings.get('telegram_bot_token');
       const useAnthropicPrimary = (await ctx.settings.get('use_anthropic_primary')) !== 'false';
 
@@ -1224,7 +1225,7 @@ bot.command('log_failure', async (ctx) => {
       await ctx.reply('🔄 جاري تحميل الذاكرة...');
 
       const openRouterKey = await ctx.settings.get('openrouter_api_key');
-      const aiModel = await ctx.settings.get('ai_model') || 'anthropic/claude-sonnet-4';
+      const aiModel = await getAIModelByTier(ctx.settings, 'low');
 
       if (!openRouterKey) {
         // Fallback: show raw memory if no AI key
@@ -1328,7 +1329,7 @@ bot.command('clearmemory', async (ctx) => {
   bot.command('setmodel', async (ctx) => {
     try {
       const args = ctx.message?.text?.split(' ').slice(1).join(' ') || '';
-      const currentModel = await ctx.settings.get('ai_model') || 'anthropic/claude-sonnet-4';
+      const currentModel = await getAIModelByTier(ctx.settings, 'low');
 
       if (!args.trim()) {
         // Show available models and current setting
@@ -2185,7 +2186,7 @@ bot.command(['completetask', 'complete_task'], async (ctx) => {
 
     if (todoistToken && todoistTaskId) {
       try {
-        // Store pending update
+        // Store pending update - include startDate for midnight boundary handling
         const pendingUpdateKey = `pending_update_${todoistTaskId}`;
         await ctx.db.insert('conversation_state', {
           chat_id: pendingUpdateKey,
@@ -2195,6 +2196,7 @@ bot.command(['completetask', 'complete_task'], async (ctx) => {
             updatedContent: updatedTaskName,
             durationMinutes: durationMinutes,
             createdAt: Date.now(),
+            startDate: startDate, // ✅ Include startDate for yesterday task handling
           },
           expires_at: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
         });
@@ -2218,12 +2220,13 @@ bot.command(['completetask', 'complete_task'], async (ctx) => {
             headers: { 'Authorization': `Bearer ${todoistToken.trim()}` },
           });
 
-          // ✅ FIX: Check if parent should autocomplete
+          // ✅ FIX: Check if parent should autocomplete (pass undefined for parent hint - DB lookup as fallback)
           await completeParentInTodoistIfAllDone(
             ctx.db,
             ctx.settings,
             todoistTaskId,
-            startDate
+            startDate,
+            undefined // No parent hint for /completetask - this is typically a main task
           );
 
            await ctx.reply(
@@ -2359,7 +2362,7 @@ bot.command(['completetask', 'complete_task'], async (ctx) => {
     try {
       console.log('Getting settings...');
       const openRouterKey = await ctx.settings.get('openrouter_api_key');
-      const aiModel = await ctx.settings.get('ai_model') || 'anthropic/claude-sonnet-4';
+      const aiModel = await getAIModelByTier(ctx.settings, 'low');
 
       if (!openRouterKey) {
         console.log('No OpenRouter key configured');
@@ -2388,7 +2391,7 @@ bot.command(['completetask', 'complete_task'], async (ctx) => {
       await ctx.reply('🔄 جاري توليد أهداف الأسبوع القادم...');
 
       const openRouterKey = await ctx.settings.get('openrouter_api_key');
-      const aiModel = await ctx.settings.get('ai_model') || 'anthropic/claude-sonnet-4';
+      const aiModel = await getAIModelByTier(ctx.settings, 'low');
 
       if (!openRouterKey) {
         await ctx.reply('❌ مفتاح API غير مكون');
@@ -2435,7 +2438,7 @@ bot.command(['completetask', 'complete_task'], async (ctx) => {
 
       // Get current week's goals
       const openRouterKey = await ctx.settings.get('openrouter_api_key');
-      const aiModel = await ctx.settings.get('ai_model') || 'anthropic/claude-sonnet-4';
+      const aiModel = await getAIModelByTier(ctx.settings, 'low');
       const aiClient = createAIClient(openRouterKey?.trim() || '', aiModel);
       const goalsMgr = createGoalsManager(ctx.db, ctx.settings, aiClient);
 
@@ -2476,7 +2479,7 @@ bot.command(['completetask', 'complete_task'], async (ctx) => {
 
       // Get current week's challenges
       const openRouterKey = await ctx.settings.get('openrouter_api_key');
-      const aiModel = await ctx.settings.get('ai_model') || 'anthropic/claude-sonnet-4';
+      const aiModel = await getAIModelByTier(ctx.settings, 'low');
       const aiClient = createAIClient(openRouterKey?.trim() || '', aiModel);
       const goalsMgr = createGoalsManager(ctx.db, ctx.settings, aiClient);
 
@@ -2567,7 +2570,7 @@ bot.command(['completetask', 'complete_task'], async (ctx) => {
       // Get settings
       const openRouterKey = await ctx.settings.get('openrouter_api_key');
       const anthropicApiKey = await ctx.settings.get('anthropic_api_key');
-      const aiModel = await ctx.settings.get('ai_model') || 'anthropic/claude-sonnet-4';
+      const aiModel = await getAIModelByTier(ctx.settings, 'low');
       const botToken = await ctx.settings.get('telegram_bot_token');
 
       const hasValidOpenRouterKey = openRouterKey && openRouterKey.trim().startsWith('sk-or-v1-');
@@ -2725,7 +2728,7 @@ async function processTaskFailure(
 
         // Complete the task in Todoist
         const closeResponse = await fetch(
-          `https://api.todoist.com/rest/v2/tasks/${todoistTaskId}/close`,
+          `https://api.todoist.com/rest/v3/tasks/${todoistTaskId}/close`,
           {
             method: 'POST',
             headers: { 'Authorization': `Bearer ${todoistToken.trim()}` },
@@ -2859,13 +2862,19 @@ bot.command('stuck', async (ctx) => {
     // Run in background
     const backgroundTask = (async () => {
       try {
+        console.log('🚨 Starting stuck intervention for chat:', chatId);
         const aiClient = createAIClient(apiKey);
+        console.log('✅ AI client created');
         const stuckHandler = createStuckHandler(ctx.db, ctx.settings, (msgs, temp, max) => aiClient.complete(msgs, temp, max));
+        console.log('✅ Stuck handler created, starting intervention...');
         const response = await stuckHandler.startIntervention(chatId);
+        console.log('✅ Intervention response generated:', response.substring(0, 100) + '...');
         await sendTelegramMessageDirect(botToken, chatId, response);
+        console.log('✅ Response sent to user');
       } catch (error) {
-        console.error('Stuck background error:', error);
-        await sendTelegramMessageDirect(botToken, chatId, '❌ حدث خطأ في التحليل');
+        console.error('❌ Stuck background error:', error);
+        const errorMsg = error instanceof Error ? error.message : 'Unknown error';
+        await sendTelegramMessageDirect(botToken, chatId, `❌ حدث خطأ في التحليل:\n${errorMsg}`);
       }
     })();
 
@@ -3486,7 +3495,7 @@ if (pendingFailureNewTask.length > 0) {
             if (reportState.aiResponse.memoryUpdates && Object.keys(reportState.aiResponse.memoryUpdates).length > 0) {
               try {
                 const openRouterKey = await ctx.settings.get('openrouter_api_key');
-                const aiModel = await ctx.settings.get('ai_model') || 'anthropic/claude-sonnet-4';
+                const aiModel = await getAIModelByTier(ctx.settings, 'low');
                 const aiClient = createAIClient(openRouterKey?.trim() || '', aiModel);
                 const memoryMgr = createMemoryManager(ctx.db, aiClient);
 
@@ -3523,7 +3532,7 @@ if (pendingFailureNewTask.length > 0) {
 
         // Update goals
         const openRouterKey = await ctx.settings.get('openrouter_api_key');
-        const aiModel = await ctx.settings.get('ai_model') || 'anthropic/claude-sonnet-4';
+        const aiModel = await getAIModelByTier(ctx.settings, 'low');
         const aiClient = createAIClient(openRouterKey?.trim() || '', aiModel);
         const goalsMgr = createGoalsManager(ctx.db, ctx.settings, aiClient);
 
@@ -3553,7 +3562,7 @@ if (pendingFailureNewTask.length > 0) {
         let updatedCount = 0;
 
         const openRouterKey = await ctx.settings.get('openrouter_api_key');
-        const aiModel = await ctx.settings.get('ai_model') || 'anthropic/claude-sonnet-4';
+        const aiModel = await getAIModelByTier(ctx.settings, 'low');
         const aiClient = createAIClient(openRouterKey?.trim() || '', aiModel);
         const goalsMgr = createGoalsManager(ctx.db, ctx.settings, aiClient);
 
@@ -3592,7 +3601,7 @@ if (pendingFailureNewTask.length > 0) {
           
           try {
             const openRouterKey = await ctx.settings.get('openrouter_api_key');
-            const aiModel = await ctx.settings.get('ai_model') || 'anthropic/claude-sonnet-4';
+            const aiModel = await getAIModelByTier(ctx.settings, 'low');
             
             if (!openRouterKey) {
               await ctx.reply('❌ مفتاح API غير مكون');
@@ -4041,7 +4050,7 @@ if (pendingQuantityInputState.length > 0) {
           // Start Durable Object job with answers
           const openRouterKey = await ctx.settings.get('openrouter_api_key');
           const anthropicApiKey = await ctx.settings.get('anthropic_api_key');
-          const aiModel = await ctx.settings.get('ai_model') || 'anthropic/claude-sonnet-4';
+          const aiModel = await getAIModelByTier(ctx.settings, 'low');
           const botToken = await ctx.settings.get('telegram_bot_token');
           const useAnthropicPrimary = (await ctx.settings.get('use_anthropic_primary')) !== 'false';
 

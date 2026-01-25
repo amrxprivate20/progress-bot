@@ -51,80 +51,85 @@ export interface RoastResult {
 // AI Prompts
 // ============================================
 
-const ROAST_PROMPT = `You are a brutally honest but caring coach doing a ROAST.
+const ROAST_PROMPT = `أنت كوتش صادق جداً بس بتحب الشخص وبتعمل روست (إحراق).
 
-The user asked to be roasted. This is consensual tough love.
+الشخص طلب يتحرق. دا حب قاسي بالتراضي.
 
-ROAST CONTEXT:
+⚠️ مهم جداً جداً: كل كلامك لازم يكون بالعامية المصرية فقط!
+❌ ممنوع منعاً باتاً استخدام كلمات إنجليزية
+❌ ممنوع كتابة headers بالإنجليزي
+✅ كل حاجة بالمصري الصميم
+
+سياق الروست:
 ==============
-Days analyzed: {DAYS_ANALYZED}
-Success rate: {SUCCESS_RATE}%
+عدد الأيام المحللة: {DAYS_ANALYZED}
+نسبة النجاح: {SUCCESS_RATE}%
 
-Recent failures (last 7 days):
+الإخفاقات الأخيرة (آخر 7 أيام):
 {RECENT_FAILURES}
 
-Broken commitments:
+الالتزامات المكسورة:
 {BROKEN_COMMITMENTS}
 
-Excuse patterns detected:
+أنماط الأعذار:
 {EXCUSE_PATTERNS}
 
-Streak breaks:
+سلاسل مكسورة:
 {STREAK_BREAKS}
 
-User's memory (for callbacks):
+ذاكرة الشخص (للإشارات):
 {MEMORY}
 
-ROAST RULES:
+قواعد الروست:
 ============
-1. Be SPECIFIC - reference actual tasks and patterns
-2. Use callbacks to past behavior (from memory)
-3. Be FUNNY - this is comedy, not abuse
-4. Be HONEST - don't sugarcoat the truth
-5. Show you KNOW them - personalize based on memory
-6. End with a twist of encouragement (small)
-7. Arabic preferred, mix in English for effect
-8. 4-6 lines max for the roast
+1. كن محدد - اذكر مهام وأنماط حقيقية
+2. استخدم إشارات للسلوك السابق (من الذاكرة)
+3. كن مضحك - دا كوميدي مش إهانة
+4. كن صادق - متلطفش الحقيقة
+5. أظهر إنك تعرفه - خصص بناءً على الذاكرة
+6. اختم بتشجيع صغير
+7. كل الكلام بالعامية المصرية بس
+8. 4-6 سطور ماكس للروست
 
-SEVERITY GUIDE:
-- GENTLE: They're doing okay, light teasing
-- MEDIUM: Notable failures, pointed humor
-- SPICY: Repeated patterns, honest pain points
-- SCORCHED: Serial avoidance, gloves off (still funny, not cruel)
+دليل الحدة:
+- خفيف: أداءه كويس، تهكم خفيف
+- متوسط: إخفاقات ملحوظة، فكاهة موجهة
+- حار: أنماط متكررة، نقاط ألم صادقة
+- محروق: تجنب مستمر، من غير قفازات (لسه مضحك مش قاسي)
 
-FORMAT:
-[SEVERITY]
-gentle/medium/spicy/scorched
+الصيغة:
+[الحدة]
+خفيف/متوسط/حار/محروق
 
-[ROAST]
-Your roast here
+[الروست]
+الروست بتاعك هنا (بالمصري!)
 
-[CALLBACKS]
-List of specific past behaviors you referenced (for tracking)
+[الإشارات]
+قائمة السلوكيات السابقة اللي أشرت ليها
 
-[ENCOURAGEMENT]
-One sentence of genuine encouragement at the end`;
+[التشجيع]
+جملة تشجيع واحدة صادقة في الآخر`;
 
-const ANALYZE_PATTERNS_PROMPT = `Analyze these task failures and identify excuse patterns.
+const ANALYZE_PATTERNS_PROMPT = `حلل الإخفاقات دي وحدد أنماط الأعذار.
 
-FAILURES:
+الإخفاقات:
 {FAILURES}
 
-STREAKS BROKEN:
+السلاسل المكسورة:
 {STREAKS}
 
-Identify:
-1. Common excuses or reasons
-2. Recurring failure types
-3. Time-based patterns (certain days/times)
-4. Task categories most failed
+حدد:
+1. الأعذار الشائعة
+2. أنواع الإخفاقات المتكررة
+3. أنماط زمنية (أيام/أوقات معينة)
+4. فئات المهام الأكثر فشلاً
 
-Return as JSON:
+رجّع كـ JSON:
 {
-  "excusePatterns": ["pattern1", "pattern2"],
-  "recurringTypes": ["type1", "type2"],
-  "timePatterns": ["pattern1"],
-  "worstCategories": ["category1"]
+  "excusePatterns": ["نمط1", "نمط2"],
+  "recurringTypes": ["نوع1", "نوع2"],
+  "timePatterns": ["نمط1"],
+  "worstCategories": ["فئة1"]
 }`;
 
 // ============================================
@@ -181,11 +186,12 @@ export class RoastMode {
    * Get a quick roast for when someone defers a task
    */
   async quickRoast(_chatId: string, taskName: string): Promise<string> {
-    const quickPrompt = `Generate a QUICK one-liner roast (max 2 sentences) for someone who just deferred this task:
+    const quickPrompt = `اكتب روست سريع (جملة أو اتنين بس) لحد لسه أجّل المهمة دي:
 
-Task: "${taskName}"
+المهمة: "${taskName}"
 
-Be witty, not mean. Arabic preferred. Reference procrastination humorously.`;
+⚠️ مهم: لازم يكون بالعامية المصرية فقط! مفيش إنجليزي خالص.
+كن ذكي مش قاسي. أشر للتسويف بطريقة كوميدية.`;
 
     const response = await this.aiComplete(
       [{ role: 'user', content: quickPrompt }],
@@ -469,15 +475,33 @@ Include:
   }
 
   private parseRoastResponse(response: string): RoastResult {
-    const severityMatch = response.match(/\[SEVERITY\]\s*(gentle|medium|spicy|scorched)/i);
-    const roastMatch = response.match(/\[ROAST\]\s*([\s\S]+?)(?:\[|$)/i);
-    const callbacksMatch = response.match(/\[CALLBACKS\]\s*([\s\S]+?)(?:\[|$)/i);
-    const encouragementMatch = response.match(/\[ENCOURAGEMENT\]\s*([\s\S]+?)$/i);
+    // Support both English and Arabic severity names
+    const severityMatch = response.match(/\[(?:SEVERITY|الحدة)\]\s*(gentle|medium|spicy|scorched|خفيف|متوسط|حار|محروق)/i);
+    const roastMatch = response.match(/\[(?:ROAST|الروست)\]\s*([\s\S]+?)(?:\[|$)/i);
+    const callbacksMatch = response.match(/\[(?:CALLBACKS|الإشارات)\]\s*([\s\S]+?)(?:\[|$)/i);
+    const encouragementMatch = response.match(/\[(?:ENCOURAGEMENT|التشجيع)\]\s*([\s\S]+?)$/i);
 
-    const severity = (severityMatch?.[1]?.toLowerCase() || 'medium') as RoastResult['severity'];
+    // Map Arabic severity to English for internal use
+    const severityMap: Record<string, RoastResult['severity']> = {
+      'gentle': 'gentle', 'خفيف': 'gentle',
+      'medium': 'medium', 'متوسط': 'medium',
+      'spicy': 'spicy', 'حار': 'spicy',
+      'scorched': 'scorched', 'محروق': 'scorched',
+    };
+    const rawSeverity = severityMatch?.[1]?.toLowerCase() || 'medium';
+    const severity = severityMap[rawSeverity] || 'medium';
+
     const roast = roastMatch?.[1]?.trim() || response;
     const callbacks = callbacksMatch?.[1]?.trim().split('\n').filter(c => c.trim()) || [];
     const encouragement = encouragementMatch?.[1]?.trim() || 'بس برضو، انت تقدر.';
+
+    // Arabic severity labels
+    const severityArabic: Record<string, string> = {
+      gentle: 'خفيف',
+      medium: 'متوسط',
+      spicy: 'حار',
+      scorched: 'محروق',
+    };
 
     // Add severity emoji
     const severityEmoji: Record<string, string> = {
@@ -488,7 +512,7 @@ Include:
     };
 
     return {
-      roast: `${severityEmoji[severity]} *وضع الإحراق: ${severity.toUpperCase()}*\n\n${roast}`,
+      roast: `${severityEmoji[severity]} *وضع الإحراق: ${severityArabic[severity]}*\n\n${roast}`,
       severity,
       callbacks,
       encouragement: `\n_${encouragement}_`,

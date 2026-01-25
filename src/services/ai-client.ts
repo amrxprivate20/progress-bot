@@ -262,6 +262,16 @@ ${recentInsights.map((insight, i) => `${i + 1}. ${insight}`).join('\n')}
 4. اجعل الصياغة موجزة وواضحة
 5. احتفظ بالمعلومات القيمة فقط
 
+⚠️ **مهم جداً - الحفاظ على التواريخ:**
+- المحتوى الحالي يحتوي على تواريخ بين قوسين مثل [٢٥ يناير ٢٠٢٥]
+- **يجب الحفاظ على هذه التواريخ** مع المعلومات المرتبطة بها
+- عند دمج معلومات متشابهة، احتفظ بأحدث تاريخ
+- الصيغة المطلوبة: [التاريخ] المعلومة
+
+مثال للمخرجات المتوقعة:
+[٢٥ يناير ٢٠٢٥] يعمل بشكل أفضل في الصباح الباكر
+[٢٢ يناير ٢٠٢٥] التركيز يقل بعد الظهر
+
 أعد المحتوى المحسن بدون مقدمات، فقط المحتوى المنظم النهائي.
 `;
 
@@ -456,12 +466,13 @@ Q: [سؤالك هنا]
 - Recurring Themes & Lessons
 - Personal Information & Facts
 
-**What to update:**
-- New patterns in productivity or emotions
-- Successful strategies discovered today
-- Recurring challenges or triggers
-- Personal information learned
-- Important achievements
+**What to update in each category:**
+1. **Personal Insights & Patterns**: أنماط الإنتاجية، تقلبات الطاقة، عادات العمل
+2. **Successful Strategies & What Works**: الطرق اللي نجحت، التقنيات المفيدة
+3. **Triggers & Challenges**: المحفزات السلبية، التحديات المتكررة
+4. **Important Milestones & Breakthroughs**: الإنجازات الكبيرة، اللحظات الفارقة
+5. **Recurring Themes & Lessons**: الدروس المستفادة، الأنماط المتكررة
+6. **Personal Information & Facts**: معلومات شخصية مثل: الاسم، العمل، الهوايات، الأهداف الشخصية، الحالة الصحية، الروتين اليومي، الأماكن المفضلة، الأصدقاء/العائلة، أي حقيقة شخصية ذكرها المستخدم
 
 **Format (MUST follow EXACTLY):**
 
@@ -474,11 +485,15 @@ CONTENT: Breaking large tasks into 30-minute chunks helps maintain focus
 CATEGORY: Triggers & Challenges
 CONTENT: Procrastinates when task feels overwhelming or unclear
 
-⚠️ **IMPORTANT:** 
+CATEGORY: Personal Information & Facts
+CONTENT: Works as a software developer. Has a dog named Max. Prefers working from home.
+
+⚠️ **IMPORTANT:**
 - Even small insights are valuable - add them!
 - You can update MULTIPLE categories (common to have 2-4 updates per day)
+- **Personal Information & Facts is CRITICAL** - extract ANY personal details mentioned (job, hobbies, family, preferences, location, habits, health, etc.)
 - If truly NO new information, write: "لا توجد تحديثات"
-- DO NOT skip the first category - it's the most important one!
+- DO NOT skip ANY category - look carefully for information in each!
 
 **Examples of good updates:**
 
@@ -490,6 +505,9 @@ CONTENT: Using timer method helped complete 5 tasks today. Taking breaks every 4
 
 CATEGORY: Triggers & Challenges
 CONTENT: Struggles with focus when notifications are enabled. Needs quiet environment for deep work.
+
+CATEGORY: Personal Information & Facts
+CONTENT: Mentioned working on a startup project. Has 2 years experience in programming. Prefers coffee in the morning. Lives in Cairo.
 
 ## [MEMORY_OPTIMIZATION]
 (إذا كانت الذاكرة بحاجة لتحسين وإعادة تنظيم (كبيرة جداً أو غير منظمة)، اكتب "OPTIMIZE_NEEDED"، وإلا اكتب "NOT_NEEDED")
@@ -1053,6 +1071,16 @@ ${recentInsights.map((insight, i) => `${i + 1}. ${insight}`).join('\n')}
 4. اجعل الصياغة موجزة وواضحة
 5. احتفظ بالمعلومات القيمة فقط
 
+⚠️ **مهم جداً - الحفاظ على التواريخ:**
+- المحتوى الحالي يحتوي على تواريخ بين قوسين مثل [٢٥ يناير ٢٠٢٥]
+- **يجب الحفاظ على هذه التواريخ** مع المعلومات المرتبطة بها
+- عند دمج معلومات متشابهة، احتفظ بأحدث تاريخ
+- الصيغة المطلوبة: [التاريخ] المعلومة
+
+مثال للمخرجات المتوقعة:
+[٢٥ يناير ٢٠٢٥] يعمل بشكل أفضل في الصباح الباكر
+[٢٢ يناير ٢٠٢٥] التركيز يقل بعد الظهر
+
 أعد المحتوى المحسن بدون مقدمات، فقط المحتوى المنظم النهائي.
 `;
 
@@ -1247,12 +1275,13 @@ Q: [سؤالك هنا]
 - Recurring Themes & Lessons
 - Personal Information & Facts
 
-**What to update:**
-- New patterns in productivity or emotions
-- Successful strategies discovered today
-- Recurring challenges or triggers
-- Personal information learned
-- Important achievements
+**What to update in each category:**
+1. **Personal Insights & Patterns**: أنماط الإنتاجية، تقلبات الطاقة، عادات العمل
+2. **Successful Strategies & What Works**: الطرق اللي نجحت، التقنيات المفيدة
+3. **Triggers & Challenges**: المحفزات السلبية، التحديات المتكررة
+4. **Important Milestones & Breakthroughs**: الإنجازات الكبيرة، اللحظات الفارقة
+5. **Recurring Themes & Lessons**: الدروس المستفادة، الأنماط المتكررة
+6. **Personal Information & Facts**: معلومات شخصية مثل: الاسم، العمل، الهوايات، الأهداف الشخصية، الحالة الصحية، الروتين اليومي، الأماكن المفضلة، الأصدقاء/العائلة، أي حقيقة شخصية ذكرها المستخدم
 
 **Format (MUST follow EXACTLY):**
 
@@ -1265,11 +1294,15 @@ CONTENT: Breaking large tasks into 30-minute chunks helps maintain focus
 CATEGORY: Triggers & Challenges
 CONTENT: Procrastinates when task feels overwhelming or unclear
 
-⚠️ **IMPORTANT:** 
+CATEGORY: Personal Information & Facts
+CONTENT: Works as a software developer. Has a dog named Max. Prefers working from home.
+
+⚠️ **IMPORTANT:**
 - Even small insights are valuable - add them!
 - You can update MULTIPLE categories (common to have 2-4 updates per day)
+- **Personal Information & Facts is CRITICAL** - extract ANY personal details mentioned (job, hobbies, family, preferences, location, habits, health, etc.)
 - If truly NO new information, write: "لا توجد تحديثات"
-- DO NOT skip the first category - it's the most important one!
+- DO NOT skip ANY category - look carefully for information in each!
 
 **Examples of good updates:**
 
@@ -1281,6 +1314,9 @@ CONTENT: Using timer method helped complete 5 tasks today. Taking breaks every 4
 
 CATEGORY: Triggers & Challenges
 CONTENT: Struggles with focus when notifications are enabled. Needs quiet environment for deep work.
+
+CATEGORY: Personal Information & Facts
+CONTENT: Mentioned working on a startup project. Has 2 years experience in programming. Prefers coffee in the morning. Lives in Cairo.
 
 ## [MEMORY_OPTIMIZATION]
 (إذا كانت الذاكرة بحاجة لتحسين وإعادة تنظيم (كبيرة جداً أو غير منظمة)، اكتب "OPTIMIZE_NEEDED"، وإلا اكتب "NOT_NEEDED")
