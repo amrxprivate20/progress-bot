@@ -59,4 +59,4 @@ compatibility_flags = ["nodejs_compat"]
 # ============================================
 # Auto-coach check-ins run every 30 minutes
 [triggers]
-crons = ["*/30 * * * *"]
+crons = ["*/30 * * * *", "50 21 * * *", "50 20 * * *"]

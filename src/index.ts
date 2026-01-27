@@ -27,7 +27,7 @@ export default {
    * Scheduled handler for automatic check-ins (cron-triggered)
    * Configure in wrangler.toml with crons trigger for auto-coach check-ins
    */
-  async scheduled(_event: ScheduledEvent, env: EnvWithDO, _ctx: ExecutionContext): Promise<void> {
+  async scheduled(_event: ScheduledEvent, env: EnvWithDO, ctx: ExecutionContext): Promise<void> {
     console.log('🕐 Scheduled task triggered at:', new Date().toISOString());
 
     const db = createSupabaseClient(env);
@@ -41,11 +41,21 @@ export default {
     console.log(`🕐 Egypt time: ${egyptHour}:${egyptMinute.toString().padStart(2, '0')}`);
 
     // ============================================
-    // AUTO-FAIL: Run at 11:50 PM Egypt time
-    // ============================================
-    if (egyptHour === 23 && egyptMinute >= 45) {
-      await handleAutoFail(db, settings, env);
-    }
+// AUTO-FAIL: Run at 11:50 PM Egypt time
+// ============================================
+if (egyptHour === 23 && egyptMinute >= 45) {
+  // Check if already ran today to prevent duplicates
+  const today = getTodayInEgypt();
+  const autoFailMarker = `auto_fail_ran_${today}`;
+  
+  const existingRun = await db.select('conversation_state', {
+    filter: { chat_id: op.eq(autoFailMarker) },
+  });
+  
+  if (existingRun.length === 0) {
+    ctx.waitUntil(handleAutoFail(db, settings, env));
+  }
+}
 
     // ============================================
     // AUTO-COACH: Run every 30 minutes
@@ -715,17 +725,10 @@ function getWeekEndDate(): string {
 // ============================================
 // Runs at 11:50 PM Egypt time to mark all undone tasks as failures
 
-interface EnvWithDOForAutoFail {
-  TELEGRAM_BOT_TOKEN: string;
-  TELEGRAM_CHAT_ID?: string;
-  SUPABASE_URL: string;
-  SUPABASE_ANON_KEY: string;
-}
-
 async function handleAutoFail(
   db: any,
   settings: SettingsManager,
-  env: EnvWithDOForAutoFail
+  env: EnvWithDO
 ): Promise<void> {
   try {
     // Check if auto-fail is enabled
@@ -735,7 +738,7 @@ async function handleAutoFail(
       return;
     }
 
-    // Check if we already ran today (prevent duplicate runs)
+    // Check if we already ran today
     const today = getTodayInEgypt();
     const autoFailMarker = `auto_fail_ran_${today}`;
 
@@ -748,156 +751,54 @@ async function handleAutoFail(
       return;
     }
 
-    console.log('🔄 Starting auto-fail process...');
+    // Mark as started to prevent duplicates
+    await db.insert('conversation_state', {
+      chat_id: autoFailMarker,
+      conversation_type: 'auto_fail_marker',
+      data: { date: today, status: 'processing' },
+      expires_at: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
+    });
 
-    // Get Todoist token
+    console.log('🔄 Starting auto-fail via Durable Object...');
+
+    // Get settings
     const todoistToken = await settings.get('todoist_api_token');
     const todoistProjectId = await settings.get('todoist_project_id');
     const chatId = env.TELEGRAM_CHAT_ID || await settings.get('telegram_chat_id');
     const botToken = env.TELEGRAM_BOT_TOKEN;
-
-    if (!todoistToken || !chatId) {
-      console.log('⏭️ Auto-fail skipped: missing Todoist token or chat ID');
-      return;
-    }
-
-    // Get priority threshold
     const priorityThresholdStr = await settings.get('failure_priority_threshold');
     const priorityThreshold = priorityThresholdStr ? parseInt(priorityThresholdStr, 10) : 2;
 
-    // Get all active tasks from Todoist
-    let url = 'https://api.todoist.com/rest/v3/tasks';
-    if (todoistProjectId) {
-      url += `?project_id=${todoistProjectId.trim()}`;
-    }
-
-    const tasksResponse = await fetch(url, {
-      headers: { 'Authorization': `Bearer ${todoistToken.trim()}` },
-    });
-
-    if (!tasksResponse.ok) {
-      console.error('❌ Failed to fetch Todoist tasks');
+    if (!todoistToken || !chatId) {
+      console.log('⏭️ Auto-fail skipped: missing config');
       return;
     }
 
-    const allTasks = await tasksResponse.json() as Array<{
-      id: string;
-      content: string;
-      priority: number;
-      due?: { date: string; is_recurring?: boolean } | null;
-    }>;
+    // Use Durable Object for processing
+    const jobId = `autofail_${Date.now()}`;
+    const id = env.REPORT_PROCESSOR.idFromName(jobId);
+    const stub = env.REPORT_PROCESSOR.get(id);
 
-    // Filter tasks due today or earlier (not completed)
-    const tasksDueToday = allTasks.filter(task => {
-      if (!task.due?.date) return false;
-      const dueDate = task.due.date.split('T')[0];
-      return dueDate && dueDate <= today;
-    });
+    const jobData = {
+      jobId,
+      chatId,
+      today,
+      todoistToken: todoistToken.trim(),
+      todoistProjectId: todoistProjectId?.trim(),
+      priorityThreshold,
+      botToken,
+    };
 
-    // Filter by priority threshold (Todoist: 1=lowest, 4=highest)
-    const tasksToFail = tasksDueToday.filter(task => {
-      const ourPriority = 5 - (task.priority || 1); // Convert: Todoist 4 → Our P1
-      return ourPriority <= priorityThreshold;
-    });
+    // Call Durable Object (non-blocking)
+    const doResponse = await stub.fetch(new Request('https://fake-host/autofail', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(jobData),
+    }));
 
-    if (tasksToFail.length === 0) {
-      console.log('✅ No tasks to auto-fail');
-      return;
-    }
+    const result = await doResponse.json();
+    console.log('✅ Auto-fail job started:', result);
 
-    console.log(`🔄 Auto-failing ${tasksToFail.length} tasks...`);
-
-    // Get or create daily failures document
-    const { getDailyFailures, upsertDailyFailures } = await import('./services/failure-manager');
-    let dailyFailures = await getDailyFailures(db, today);
-
-    if (!dailyFailures) {
-      dailyFailures = {
-        date: today,
-        last_sync: new Date().toISOString(),
-        failed_tasks: [],
-      };
-    }
-
-    const failedTaskNames: string[] = [];
-
-    for (const task of tasksToFail) {
-      try {
-        // Add to daily failures JSON
-        const { extractCleanTaskName } = await import('./utils/task-parser');
-        const cleanName = extractCleanTaskName(task.content);
-
-        // Check if already in failures
-        const existingIndex = dailyFailures.failed_tasks.findIndex(f =>
-          extractCleanTaskName(f.content) === cleanName
-        );
-
-        if (existingIndex < 0) {
-          dailyFailures.failed_tasks.push({
-            id: task.id,
-            content: task.content,
-            parent_id: null,
-            parent_content: null,
-            priority: task.priority,
-            is_subtask: false,
-            description: 'Auto-failed at end of day',
-          });
-        }
-
-        // Create failure completion marker
-        const markerKey = `failure_completion_${task.id}`;
-        await db.delete('conversation_state', { chat_id: op.eq(markerKey) }).catch(() => {});
-        await db.insert('conversation_state', {
-          chat_id: markerKey,
-          conversation_type: 'failure_completion',
-          data: { taskId: task.id, taskName: task.content, autoFail: true },
-          expires_at: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
-        });
-
-        // Complete the task in Todoist (this postpones recurring tasks)
-        await fetch(`https://api.todoist.com/rest/v3/tasks/${task.id}/close`, {
-          method: 'POST',
-          headers: { 'Authorization': `Bearer ${todoistToken.trim()}` },
-        });
-
-        failedTaskNames.push(cleanName);
-        console.log(`❌ Auto-failed: ${cleanName}`);
-      } catch (taskError) {
-        console.error(`❌ Failed to auto-fail task ${task.id}:`, taskError);
-      }
-    }
-
-    // Save daily failures
-    dailyFailures.last_sync = new Date().toISOString();
-    await upsertDailyFailures(db, dailyFailures);
-
-    // Mark that we ran today
-    await db.insert('conversation_state', {
-      chat_id: autoFailMarker,
-      conversation_type: 'auto_fail_marker',
-      data: { date: today, count: failedTaskNames.length },
-      expires_at: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
-    });
-
-    // Send notification
-    if (failedTaskNames.length > 0) {
-      const message = `🌙 **تم تسجيل الإخفاقات التلقائية**\n\n` +
-        `عدد المهام: ${failedTaskNames.length}\n\n` +
-        failedTaskNames.map(name => `❌ ${name}`).join('\n') +
-        `\n\n_تم تأجيل المهام المتكررة للموعد التالي_`;
-
-      await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          chat_id: chatId,
-          text: message,
-          parse_mode: 'Markdown',
-        }),
-      });
-    }
-
-    console.log(`✅ Auto-fail complete: ${failedTaskNames.length} tasks failed`);
   } catch (error) {
     console.error('❌ Auto-fail error:', error);
   }

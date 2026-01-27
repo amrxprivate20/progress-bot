@@ -65,6 +65,28 @@ export class ReportProcessor extends DurableObject<Env> {
       });
     }
 
+    // Auto-fail route
+if (url.pathname === '/autofail' && request.method === 'POST') {
+  try {
+    const jobData = await request.json() as any;
+    const result = await this.handleAutoFail(jobData);
+    
+    return new Response(
+      JSON.stringify({ success: true, result }),
+      { headers: { 'Content-Type': 'application/json' } }
+    );
+  } catch (error) {
+    console.error('Auto-fail processing error:', error);
+    return new Response(
+      JSON.stringify({ 
+        success: false, 
+        error: error instanceof Error ? error.message : 'Unknown error' 
+      }),
+      { status: 500, headers: { 'Content-Type': 'application/json' } }
+    );
+  }
+}
+
     // POST /process - Start processing job
     if (path === '/process' && request.method === 'POST') {
       const jobData = await request.json() as ReportJobData;
@@ -875,4 +897,285 @@ const aiResponse = await aiClient.generateDailyReport({
       }
     }
   }
+
+/**
+ * Handle auto-fail processing (no timeout limits) with retry logic
+ */
+async handleAutoFail(jobData: {
+  jobId: string;
+  chatId: string;
+  today: string;
+  todoistToken: string;
+  todoistProjectId?: string;
+  priorityThreshold: number;
+  botToken: string;
+  retryAttempt?: number;
+  processedTaskIds?: string[];
+}): Promise<{ success: boolean; failedCount: number; needsRetry?: boolean }> {
+  const { 
+    jobId, 
+    chatId, 
+    today, 
+    todoistToken, 
+    todoistProjectId, 
+    priorityThreshold, 
+    botToken,
+    retryAttempt = 0,
+    processedTaskIds = []
+  } = jobData;
+
+  try {
+    console.log(`[AutoFail ${jobId}] Attempt ${retryAttempt + 1}, already processed: ${processedTaskIds.length}`);
+
+    // Get all tasks from Todoist (only on first attempt to save subrequests)
+    let tasksToFail: Array<{
+      id: string;
+      content: string;
+      priority: number;
+      due?: { date: string; is_recurring?: boolean } | null;
+    }> = [];
+
+    if (retryAttempt === 0) {
+      let url = 'https://api.todoist.com/rest/v3/tasks';
+      if (todoistProjectId) {
+        url += `?project_id=${todoistProjectId.trim()}`;
+      }
+
+      const tasksResponse = await fetch(url, {
+        headers: { 'Authorization': `Bearer ${todoistToken}` },
+      });
+
+      if (!tasksResponse.ok) {
+        throw new Error(`Todoist API error: ${tasksResponse.status}`);
+      }
+
+      const allTasks = await tasksResponse.json() as Array<{
+        id: string;
+        content: string;
+        priority: number;
+        due?: { date: string; is_recurring?: boolean } | null;
+      }>;
+
+      // Filter tasks due today or earlier
+      const tasksDueToday = allTasks.filter(task => {
+        if (!task.due?.date) return false;
+        const dueDate = task.due.date.split('T')[0];
+        return dueDate && dueDate <= today;
+      });
+
+      // Filter by priority threshold
+      tasksToFail = tasksDueToday.filter(task => {
+        const ourPriority = 5 - (task.priority || 1);
+        return ourPriority <= priorityThreshold;
+      });
+
+      // Store tasks list in durable object state for retries
+      await this.doState.storage.put('autofail_tasks', tasksToFail);
+      await this.doState.storage.put('autofail_metadata', {
+        jobId,
+        chatId,
+        today,
+        todoistToken,
+        todoistProjectId,
+        priorityThreshold,
+        botToken
+      });
+    } else {
+      // Retry: load tasks from storage
+      tasksToFail = (await this.doState.storage.get('autofail_tasks')) || [];
+    }
+
+    // Filter out already processed tasks
+    const remainingTasks = tasksToFail.filter(t => !processedTaskIds.includes(t.id));
+
+    if (remainingTasks.length === 0) {
+      console.log(`[AutoFail ${jobId}] All tasks processed!`);
+      
+      // Clean up storage
+      await this.doState.storage.delete('autofail_tasks');
+      await this.doState.storage.delete('autofail_metadata');
+      
+      // Send final notification
+      if (processedTaskIds.length > 0) {
+        await this.sendAutoFailNotification(chatId, botToken, processedTaskIds.length, today);
+      }
+      
+      return { success: true, failedCount: processedTaskIds.length };
+    }
+
+    console.log(`[AutoFail ${jobId}] Processing ${remainingTasks.length} remaining tasks`);
+
+    // Get or create daily failures
+    const { getDailyFailures, upsertDailyFailures } = await import('../services/failure-manager');
+    const { extractCleanTaskName } = await import('../utils/task-parser');
+    const { createSupabaseClient, op } = await import('../database/client');
+
+    const db = createSupabaseClient(this.env);
+    let dailyFailures = await getDailyFailures(db, today);
+
+    if (!dailyFailures) {
+      dailyFailures = {
+        date: today,
+        last_sync: new Date().toISOString(),
+        failed_tasks: [],
+      };
+    }
+
+    const newlyProcessed: string[] = [];
+
+    // Process ONLY 3 tasks at a time (very conservative to avoid hitting limits)
+    const BATCH_SIZE = 3;
+    const tasksInThisBatch = remainingTasks.slice(0, BATCH_SIZE);
+
+    for (const task of tasksInThisBatch) {
+      try {
+        const cleanName = extractCleanTaskName(task.content);
+
+        // Check if already in failures
+        const existingIndex = dailyFailures.failed_tasks.findIndex(f =>
+          extractCleanTaskName(f.content) === cleanName
+        );
+
+        if (existingIndex < 0) {
+          dailyFailures.failed_tasks.push({
+            id: task.id,
+            content: task.content,
+            parent_id: null,
+            parent_content: null,
+            priority: task.priority,
+            is_subtask: false,
+            description: 'Auto-failed at end of day',
+          });
+        }
+
+        // Create failure completion marker
+        const markerKey = `failure_completion_${task.id}`;
+        await db.delete('conversation_state', { chat_id: op.eq(markerKey) }).catch(() => {});
+        await db.insert('conversation_state', {
+          chat_id: markerKey,
+          conversation_type: 'failure_completion',
+          data: { taskId: task.id, taskName: task.content, autoFail: true },
+          expires_at: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
+        });
+
+        // Complete in Todoist
+        const closeResponse = await fetch(`https://api.todoist.com/rest/v3/tasks/${task.id}/close`, {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${todoistToken}` },
+        });
+
+        if (closeResponse.ok) {
+          newlyProcessed.push(task.id);
+          console.log(`[AutoFail ${jobId}] ✓ ${cleanName}`);
+        } else {
+          console.error(`[AutoFail ${jobId}] Failed to close task ${task.id}: ${closeResponse.status}`);
+        }
+
+        // Small delay between tasks
+        await new Promise(resolve => setTimeout(resolve, 500));
+
+      } catch (taskError) {
+        const errorMsg = taskError instanceof Error ? taskError.message : String(taskError);
+        
+        if (errorMsg.includes('Too many subrequests')) {
+          console.log(`[AutoFail ${jobId}] Hit subrequest limit, will retry...`);
+          break; // Stop processing this batch
+        }
+        
+        console.error(`[AutoFail ${jobId}] Failed task ${task.id}:`, taskError);
+      }
+    }
+
+    // Save daily failures
+    try {
+      dailyFailures.last_sync = new Date().toISOString();
+      await upsertDailyFailures(db, dailyFailures);
+    } catch (saveError) {
+      console.error(`[AutoFail ${jobId}] Failed to save failures:`, saveError);
+    }
+
+    // Update processed list
+    const allProcessed = [...processedTaskIds, ...newlyProcessed];
+
+    // Check if we need to retry
+    const stillRemaining = remainingTasks.length - newlyProcessed.length;
+    
+    if (stillRemaining > 0) {
+      console.log(`[AutoFail ${jobId}] ${stillRemaining} tasks remaining, scheduling retry...`);
+      
+      // Schedule retry with exponential backoff
+      const retryDelay = Math.min(5000 * Math.pow(2, retryAttempt), 60000); // Max 60 seconds
+      
+      await new Promise(resolve => setTimeout(resolve, retryDelay));
+      
+      // Recursive retry
+      return await this.handleAutoFail({
+        jobId,
+        chatId,
+        today,
+        todoistToken,
+        todoistProjectId,
+        priorityThreshold,
+        botToken,
+        retryAttempt: retryAttempt + 1,
+        processedTaskIds: allProcessed,
+      });
+    }
+
+    // All done!
+    console.log(`[AutoFail ${jobId}] Complete: ${allProcessed.length} tasks failed`);
+    
+    // Clean up storage
+    await this.doState.storage.delete('autofail_tasks');
+    await this.doState.storage.delete('autofail_metadata');
+    
+    // Send final notification
+    if (allProcessed.length > 0) {
+      await this.sendAutoFailNotification(chatId, botToken, allProcessed.length, today);
+    }
+
+    return { success: true, failedCount: allProcessed.length };
+
+  } catch (error) {
+    console.error(`[AutoFail ${jobId}] Error:`, error);
+    
+    // If we've processed some tasks, consider it partial success
+    if (processedTaskIds.length > 0) {
+      await this.sendAutoFailNotification(chatId, botToken, processedTaskIds.length, today);
+    }
+    
+    throw error;
+  }
 }
+
+/**
+ * Helper: Send auto-fail completion notification
+ */
+private async sendAutoFailNotification(
+  chatId: string,
+  botToken: string,
+  count: number,
+  date: string
+): Promise<void> {
+  try {
+    const message = `🌙 **تم تسجيل الإخفاقات التلقائية**\n\n` +
+      `📅 التاريخ: ${date}\n` +
+      `عدد المهام: ${count}\n\n` +
+      `_تم تأجيل المهام المتكررة للموعد التالي_`;
+
+    await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        chat_id: chatId,
+        text: message,
+        parse_mode: 'Markdown',
+      }),
+    });
+  } catch (notifError) {
+    console.error('Failed to send notification:', notifError);
+  }
+}
+}
+
+
