@@ -69,14 +69,25 @@ export class ReportProcessor extends DurableObject<Env> {
 if (url.pathname === '/autofail' && request.method === 'POST') {
   try {
     const jobData = await request.json() as any;
-    const result = await this.handleAutoFail(jobData);
     
+    // ✅ Start processing in background using waitUntil
+    this.ctx.waitUntil(
+      this.handleAutoFail(jobData).catch(error => {
+        console.error('Auto-fail background error:', error);
+      })
+    );
+    
+    // ✅ Return immediately (don't wait for result)
     return new Response(
-      JSON.stringify({ success: true, result }),
+      JSON.stringify({ 
+        success: true, 
+        message: 'Auto-fail processing started in background',
+        inProgress: true 
+      }),
       { headers: { 'Content-Type': 'application/json' } }
     );
   } catch (error) {
-    console.error('Auto-fail processing error:', error);
+    console.error('Auto-fail trigger error:', error);
     return new Response(
       JSON.stringify({ 
         success: false, 
@@ -86,7 +97,6 @@ if (url.pathname === '/autofail' && request.method === 'POST') {
     );
   }
 }
-
     // POST /process - Start processing job
     if (path === '/process' && request.method === 'POST') {
       const jobData = await request.json() as ReportJobData;
@@ -122,6 +132,7 @@ if (url.pathname === '/autofail' && request.method === 'POST') {
 
     return new Response('Not found', { status: 404 });
   }
+
 
   /**
    * Process the report in background
@@ -899,43 +910,40 @@ const aiResponse = await aiClient.generateDailyReport({
   }
 
 /**
- * Handle auto-fail processing (no timeout limits) with retry logic
+ * Handle auto-fail processing using storage-based queue
+ * Processes 5 tasks per cron run to avoid subrequest limits
+ * Continues automatically on next cron run via storage persistence
  */
 async handleAutoFail(jobData: {
-  jobId: string;
   chatId: string;
   today: string;
   todoistToken: string;
   todoistProjectId?: string;
   priorityThreshold: number;
   botToken: string;
-  retryAttempt?: number;
-  processedTaskIds?: string[];
-}): Promise<{ success: boolean; failedCount: number; needsRetry?: boolean }> {
+}): Promise<{ success: boolean; failedCount: number; remaining: number; inProgress: boolean }> {
   const { 
-    jobId, 
     chatId, 
     today, 
     todoistToken, 
     todoistProjectId, 
     priorityThreshold, 
-    botToken,
-    retryAttempt = 0,
-    processedTaskIds = []
+    botToken
   } = jobData;
 
+  const BATCH_SIZE = 3; // Ultra-conservative - only 3 tasks per run (avoids subrequest limit)
+  const QUEUE_KEY = `autofail_queue_${today}`;
+  const PROCESSED_KEY = `autofail_processed_${today}`;
+
   try {
-    console.log(`[AutoFail ${jobId}] Attempt ${retryAttempt + 1}, already processed: ${processedTaskIds.length}`);
+    // Check if we have an existing queue
+    let queue = await this.ctx.storage.get<string[]>(QUEUE_KEY);
+    let processedIds = await this.ctx.storage.get<string[]>(PROCESSED_KEY) || [];
 
-    // Get all tasks from Todoist (only on first attempt to save subrequests)
-    let tasksToFail: Array<{
-      id: string;
-      content: string;
-      priority: number;
-      due?: { date: string; is_recurring?: boolean } | null;
-    }> = [];
-
-    if (retryAttempt === 0) {
+    // If no queue, fetch and initialize
+    if (!queue) {
+      console.log(`[AutoFail] Initializing queue for ${today}`);
+      
       let url = 'https://api.todoist.com/rest/v3/tasks';
       if (todoistProjectId) {
         url += `?project_id=${todoistProjectId.trim()}`;
@@ -963,48 +971,57 @@ async handleAutoFail(jobData: {
         return dueDate && dueDate <= today;
       });
 
-      // Filter by priority threshold
-      tasksToFail = tasksDueToday.filter(task => {
-        const ourPriority = 5 - (task.priority || 1);
-        return ourPriority <= priorityThreshold;
-      });
+      // Filter by priority threshold and extract IDs
+      const taskIds = tasksDueToday
+        .filter(task => {
+          const ourPriority = 5 - (task.priority || 1);
+          return ourPriority <= priorityThreshold;
+        })
+        .map(t => t.id);
 
-      // Store tasks list in durable object state for retries
-      await this.doState.storage.put('autofail_tasks', tasksToFail);
-      await this.doState.storage.put('autofail_metadata', {
-        jobId,
+      if (taskIds.length === 0) {
+        console.log(`[AutoFail] No tasks to fail for ${today}`);
+        return { success: true, failedCount: 0, remaining: 0, inProgress: false };
+      }
+
+      // Store queue and task details
+      queue = taskIds;
+      await this.ctx.storage.put(QUEUE_KEY, queue);
+      await this.ctx.storage.put(`autofail_tasks_${today}`, tasksDueToday);
+      
+      console.log(`[AutoFail] Queue initialized with ${queue.length} tasks`);
+      
+      // Send initial notification
+      await this.sendTelegramMessage(
         chatId,
-        today,
-        todoistToken,
-        todoistProjectId,
-        priorityThreshold,
-        botToken
-      });
-    } else {
-      // Retry: load tasks from storage
-      tasksToFail = (await this.doState.storage.get('autofail_tasks')) || [];
+        botToken,
+        `🌙 بدء Autofail...\n📋 ${queue.length} مهمة للمعالجة`
+      );
     }
 
-    // Filter out already processed tasks
-    const remainingTasks = tasksToFail.filter(t => !processedTaskIds.includes(t.id));
-
-    if (remainingTasks.length === 0) {
-      console.log(`[AutoFail ${jobId}] All tasks processed!`);
+    // Get remaining tasks (queue minus already processed)
+    const remainingIds = queue.filter(id => !processedIds.includes(id));
+    
+    if (remainingIds.length === 0) {
+      console.log(`[AutoFail] All tasks processed!`);
       
       // Clean up storage
-      await this.doState.storage.delete('autofail_tasks');
-      await this.doState.storage.delete('autofail_metadata');
+      await this.ctx.storage.delete(QUEUE_KEY);
+      await this.ctx.storage.delete(PROCESSED_KEY);
+      await this.ctx.storage.delete(`autofail_tasks_${today}`);
       
-      // Send final notification
-      if (processedTaskIds.length > 0) {
-        await this.sendAutoFailNotification(chatId, botToken, processedTaskIds.length, today);
-      }
+      // Send completion notification
+      await this.sendAutoFailNotification(chatId, botToken, processedIds.length, today);
       
-      return { success: true, failedCount: processedTaskIds.length };
+      return { success: true, failedCount: processedIds.length, remaining: 0, inProgress: false };
     }
 
-    console.log(`[AutoFail ${jobId}] Processing ${remainingTasks.length} remaining tasks`);
+    console.log(`[AutoFail] Processing batch: ${remainingIds.length} remaining, taking ${BATCH_SIZE}`);
 
+    // Process small batch
+    const batchToProcess = remainingIds.slice(0, BATCH_SIZE);
+    const allTasksData = await this.ctx.storage.get<any[]>(`autofail_tasks_${today}`) || [];
+    
     // Get or create daily failures
     const { getDailyFailures, upsertDailyFailures } = await import('../services/failure-manager');
     const { extractCleanTaskName } = await import('../utils/task-parser');
@@ -1023,15 +1040,19 @@ async handleAutoFail(jobData: {
 
     const newlyProcessed: string[] = [];
 
-    // Process ONLY 3 tasks at a time (very conservative to avoid hitting limits)
-    const BATCH_SIZE = 3;
-    const tasksInThisBatch = remainingTasks.slice(0, BATCH_SIZE);
-
-    for (const task of tasksInThisBatch) {
+    // Process batch with delays
+    for (const taskId of batchToProcess) {
       try {
+        const task = allTasksData.find(t => t.id === taskId);
+        if (!task) {
+          console.warn(`[AutoFail] Task ${taskId} not found in cache`);
+          newlyProcessed.push(taskId); // Mark as processed anyway
+          continue;
+        }
+
         const cleanName = extractCleanTaskName(task.content);
 
-        // Check if already in failures
+        // Add to daily failures if not already there
         const existingIndex = dailyFailures.failed_tasks.findIndex(f =>
           extractCleanTaskName(f.content) === cleanName
         );
@@ -1065,89 +1086,50 @@ async handleAutoFail(jobData: {
         });
 
         if (closeResponse.ok) {
-          newlyProcessed.push(task.id);
-          console.log(`[AutoFail ${jobId}] ✓ ${cleanName}`);
+          newlyProcessed.push(taskId);
+          console.log(`[AutoFail] ✓ ${cleanName}`);
         } else {
-          console.error(`[AutoFail ${jobId}] Failed to close task ${task.id}: ${closeResponse.status}`);
+          console.error(`[AutoFail] Failed to close ${task.id}: ${closeResponse.status}`);
         }
 
-        // Small delay between tasks
-        await new Promise(resolve => setTimeout(resolve, 500));
+        // Delay between tasks to avoid rate limits
+        await new Promise(resolve => setTimeout(resolve, 1000)); // 1 second between tasks
 
       } catch (taskError) {
-        const errorMsg = taskError instanceof Error ? taskError.message : String(taskError);
-        
-        if (errorMsg.includes('Too many subrequests')) {
-          console.log(`[AutoFail ${jobId}] Hit subrequest limit, will retry...`);
-          break; // Stop processing this batch
-        }
-        
-        console.error(`[AutoFail ${jobId}] Failed task ${task.id}:`, taskError);
+        console.error(`[AutoFail] Error processing task ${taskId}:`, taskError);
+        // Don't add to processed - will retry next run
       }
     }
+
+    // Update processed list
+    processedIds = [...processedIds, ...newlyProcessed];
+    await this.ctx.storage.put(PROCESSED_KEY, processedIds);
 
     // Save daily failures
     try {
       dailyFailures.last_sync = new Date().toISOString();
       await upsertDailyFailures(db, dailyFailures);
     } catch (saveError) {
-      console.error(`[AutoFail ${jobId}] Failed to save failures:`, saveError);
+      console.error(`[AutoFail] Failed to save failures:`, saveError);
     }
 
-    // Update processed list
-    const allProcessed = [...processedTaskIds, ...newlyProcessed];
-
-    // Check if we need to retry
-    const stillRemaining = remainingTasks.length - newlyProcessed.length;
+    const remaining = remainingIds.length - newlyProcessed.length;
     
-    if (stillRemaining > 0) {
-      console.log(`[AutoFail ${jobId}] ${stillRemaining} tasks remaining, scheduling retry...`);
-      
-      // Schedule retry with exponential backoff
-      const retryDelay = Math.min(5000 * Math.pow(2, retryAttempt), 60000); // Max 60 seconds
-      
-      await new Promise(resolve => setTimeout(resolve, retryDelay));
-      
-      // Recursive retry
-      return await this.handleAutoFail({
-        jobId,
-        chatId,
-        today,
-        todoistToken,
-        todoistProjectId,
-        priorityThreshold,
-        botToken,
-        retryAttempt: retryAttempt + 1,
-        processedTaskIds: allProcessed,
-      });
-    }
+    console.log(`[AutoFail] Batch complete: ${newlyProcessed.length} processed, ${remaining} remaining`);
 
-    // All done!
-    console.log(`[AutoFail ${jobId}] Complete: ${allProcessed.length} tasks failed`);
-    
-    // Clean up storage
-    await this.doState.storage.delete('autofail_tasks');
-    await this.doState.storage.delete('autofail_metadata');
-    
-    // Send final notification
-    if (allProcessed.length > 0) {
-      await this.sendAutoFailNotification(chatId, botToken, allProcessed.length, today);
-    }
-
-    return { success: true, failedCount: allProcessed.length };
+    // If more work remains, it will be picked up by next cron run
+    return { 
+      success: true, 
+      failedCount: processedIds.length, 
+      remaining,
+      inProgress: remaining > 0
+    };
 
   } catch (error) {
-    console.error(`[AutoFail ${jobId}] Error:`, error);
-    
-    // If we've processed some tasks, consider it partial success
-    if (processedTaskIds.length > 0) {
-      await this.sendAutoFailNotification(chatId, botToken, processedTaskIds.length, today);
-    }
-    
+    console.error(`[AutoFail] Error:`, error);
     throw error;
   }
 }
-
 /**
  * Helper: Send auto-fail completion notification
  */
@@ -1177,5 +1159,3 @@ private async sendAutoFailNotification(
   }
 }
 }
-
-

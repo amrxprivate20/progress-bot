@@ -27,7 +27,7 @@ export default {
    * Scheduled handler for automatic check-ins (cron-triggered)
    * Configure in wrangler.toml with crons trigger for auto-coach check-ins
    */
-  async scheduled(_event: ScheduledEvent, env: EnvWithDO, ctx: ExecutionContext): Promise<void> {
+  async scheduled(_event: ScheduledEvent, env: EnvWithDO, _ctx: ExecutionContext): Promise<void> {
     console.log('🕐 Scheduled task triggered at:', new Date().toISOString());
 
     const db = createSupabaseClient(env);
@@ -44,18 +44,10 @@ export default {
 // AUTO-FAIL: Run at 11:50 PM Egypt time
 // ============================================
 if (egyptHour === 23 && egyptMinute >= 45) {
-  // Check if already ran today to prevent duplicates
-  const today = getTodayInEgypt();
-  const autoFailMarker = `auto_fail_ran_${today}`;
-  
-  const existingRun = await db.select('conversation_state', {
-    filter: { chat_id: op.eq(autoFailMarker) },
-  });
-  
-  if (existingRun.length === 0) {
-    ctx.waitUntil(handleAutoFail(db, settings, env));
+    // ✅ DON'T use waitUntil - just call it directly and return
+    // The Durable Object will continue running independently
+    await handleAutoFailTrigger(db, settings, env);
   }
-}
 
     // ============================================
     // AUTO-COACH: Run every 30 minutes
@@ -454,6 +446,7 @@ async function handleSettingsAPI(
   throw new ValidationError('Invalid settings API endpoint');
 }
 
+
 // ============================================
 // Widget API Handlers
 // ============================================
@@ -721,47 +714,26 @@ function getWeekEndDate(): string {
 }
 
 // ============================================
-// Auto-Fail Handler
+// Auto-Fail Trigger
 // ============================================
-// Runs at 11:50 PM Egypt time to mark all undone tasks as failures
+// Triggers Durable Object to process autofail - returns immediately
 
-async function handleAutoFail(
-  db: any,
+/**
+ * Trigger autofail - returns immediately, DO continues independently
+ */
+async function handleAutoFailTrigger(
+  _db: any,
   settings: SettingsManager,
   env: EnvWithDO
 ): Promise<void> {
   try {
-    // Check if auto-fail is enabled
     const autoFailEnabled = await settings.get('auto_fail_enabled');
     if (autoFailEnabled !== 'true') {
       console.log('⏭️ Auto-fail skipped: feature disabled');
       return;
     }
 
-    // Check if we already ran today
     const today = getTodayInEgypt();
-    const autoFailMarker = `auto_fail_ran_${today}`;
-
-    const existingRun = await db.select('conversation_state', {
-      filter: { chat_id: op.eq(autoFailMarker) },
-    });
-
-    if (existingRun.length > 0) {
-      console.log('⏭️ Auto-fail already ran today');
-      return;
-    }
-
-    // Mark as started to prevent duplicates
-    await db.insert('conversation_state', {
-      chat_id: autoFailMarker,
-      conversation_type: 'auto_fail_marker',
-      data: { date: today, status: 'processing' },
-      expires_at: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
-    });
-
-    console.log('🔄 Starting auto-fail via Durable Object...');
-
-    // Get settings
     const todoistToken = await settings.get('todoist_api_token');
     const todoistProjectId = await settings.get('todoist_project_id');
     const chatId = env.TELEGRAM_CHAT_ID || await settings.get('telegram_chat_id');
@@ -774,13 +746,12 @@ async function handleAutoFail(
       return;
     }
 
-    // Use Durable Object for processing
-    const jobId = `autofail_${Date.now()}`;
+    // Use same Durable Object ID every day (so it persists)
+    const jobId = `autofail_${today}`;
     const id = env.REPORT_PROCESSOR.idFromName(jobId);
     const stub = env.REPORT_PROCESSOR.get(id);
 
     const jobData = {
-      jobId,
       chatId,
       today,
       todoistToken: todoistToken.trim(),
@@ -789,17 +760,23 @@ async function handleAutoFail(
       botToken,
     };
 
-    // Call Durable Object (non-blocking)
-    const doResponse = await stub.fetch(new Request('https://fake-host/autofail', {
+    // ✅ Just trigger it - don't wait for response
+    // The DO will continue processing across multiple cron runs
+    stub.fetch(new Request('https://fake-host/autofail', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(jobData),
-    }));
+    })).then(async (response) => {
+      const result = await response.json() as { success: boolean; result?: { failedCount?: number; remaining?: number } };
+      console.log(`✅ Auto-fail batch: processed=${result.result?.failedCount || 0}, remaining=${result.result?.remaining || 0}`);
+    }).catch(err => {
+      console.error('❌ Auto-fail trigger error:', err);
+    });
 
-    const result = await doResponse.json();
-    console.log('✅ Auto-fail job started:', result);
+    // ✅ Return immediately - DO continues independently
+    console.log(`🌙 Auto-fail triggered for ${today}`);
 
   } catch (error) {
-    console.error('❌ Auto-fail error:', error);
+    console.error('❌ Auto-fail trigger error:', error);
   }
 }

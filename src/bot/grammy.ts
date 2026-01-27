@@ -3327,106 +3327,63 @@ bot.command('coach_summary', async (ctx) => {
 // /autofail - Manually trigger end-of-day autofail
 bot.command('autofail', async (ctx) => {
   try {
+    // Idempotency check
     if (!(await checkCoachIdempotency(ctx, 'autofail'))) return;
 
     const chatId = ctx.chat?.id.toString() || '';
+    
+    // Quick acknowledgment
+    await ctx.reply('🌙 تشغيل Autofail...');
 
-    // Store confirmation state
-    await ctx.db.insert('conversation_state', {
-      chat_id: `autofail_confirm_${chatId}`,
-      conversation_type: 'autofail_confirmation',
-      data: {},
-      expires_at: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
-    });
-
-    // Preview what will be failed
+    // Get minimal settings
     const todoistToken = await ctx.settings.get('todoist_api_token');
     const todoistProjectId = await ctx.settings.get('todoist_project_id');
     const priorityThresholdStr = await ctx.settings.get('failure_priority_threshold');
     const priorityThreshold = priorityThresholdStr ? parseInt(priorityThresholdStr, 10) : 2;
-    const today = getTodayInEgypt();
-
+    const botToken = ctx.env.TELEGRAM_BOT_TOKEN;
+    
     if (!todoistToken) {
       await ctx.reply('❌ لم يتم تكوين مفتاح Todoist');
       return;
     }
 
-    // Get all tasks from Todoist (all projects for preview)
-    const tasksResponse = await fetch('https://api.todoist.com/rest/v3/tasks', {
-      headers: { 'Authorization': `Bearer ${todoistToken.trim()}` },
+    const today = getTodayInEgypt();
+
+    // ✅ Trigger Durable Object immediately
+    const jobId = `autofail_${today}`;
+    const id = ctx.reportProcessorNamespace.idFromName(jobId);
+    const stub = ctx.reportProcessorNamespace.get(id);
+
+    const jobData = {
+      chatId,
+      today,
+      todoistToken: todoistToken.trim(),
+      todoistProjectId: todoistProjectId?.trim(),
+      priorityThreshold,
+      botToken,
+    };
+
+    // Fire and forget - don't wait
+    stub.fetch(new Request('https://fake-host/autofail', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(jobData),
+    })).then(() => {
+      console.log(`✅ Autofail triggered for ${today}`);
+    }).catch(err => {
+      console.error('❌ Autofail trigger error:', err);
     });
 
-    if (!tasksResponse.ok) {
-      await ctx.reply('❌ فشل في جلب المهام من Todoist');
-      return;
-    }
-
-    const allTasks = await tasksResponse.json() as Array<{
-      id: string;
-      content: string;
-      project_id: string;
-      priority: number;
-      parent_id?: string;
-      due?: { date: string; is_recurring?: boolean } | null;
-    }>;
-
-    // Filter tasks due today or earlier
-    const tasksDueToday = allTasks.filter(task => {
-      if (!task.due?.date) return false;
-      const dueDate = task.due.date.split('T')[0];
-      return dueDate && dueDate <= today;
-    });
-
-    // Separate into tasks that will be failed vs ignored
-    const tasksToFail: string[] = [];
-    const tasksIgnored: string[] = [];
-
-    for (const task of tasksDueToday) {
-      const ourPriority = 5 - (task.priority || 1);
-      const isInMainProject = todoistProjectId ? task.project_id === todoistProjectId.trim() : true;
-      const { extractCleanTaskName } = await import('../utils/task-parser');
-      const cleanName = extractCleanTaskName(task.content);
-
-      if (isInMainProject && ourPriority <= priorityThreshold) {
-        tasksToFail.push(`❌ ${cleanName} (P${ourPriority})`);
-      } else {
-        const reason = !isInMainProject ? 'مشروع آخر' : `P${ourPriority} > P${priorityThreshold}`;
-        tasksIgnored.push(`⏭️ ${cleanName} (${reason})`);
-      }
-    }
-
-    let message = `🌙 **معاينة Autofail**\n\n`;
-    message += `📅 التاريخ: ${today}\n`;
-    message += `⚡ عتبة الأولوية: P${priorityThreshold}\n\n`;
-
-    if (tasksToFail.length > 0) {
-      message += `**المهام التي ستُسجل كفاشلة (${tasksToFail.length}):**\n`;
-      message += tasksToFail.join('\n');
-      message += '\n\n';
-    } else {
-      message += '✅ لا توجد مهام للتسجيل كفاشلة!\n\n';
-    }
-
-    if (tasksIgnored.length > 0) {
-      message += `**المهام المُتجاهلة (${tasksIgnored.length}):**\n`;
-      message += tasksIgnored.slice(0, 10).join('\n');
-      if (tasksIgnored.length > 10) {
-        message += `\n... و${tasksIgnored.length - 10} مهام أخرى`;
-      }
-      message += '\n\n';
-    }
-
-    if (tasksToFail.length > 0) {
-      message += '━━━━━━━━━━━━━━━━\n';
-      message += 'للتأكيد أرسل: **نعم** أو **yes**\n';
-      message += 'للإلغاء أرسل: **لا** أو **no**';
-    }
-
-    await ctx.reply(message, { parse_mode: 'Markdown' });
+    // Return immediately
+    await ctx.reply(
+      '✅ تم التشغيل!\n\n' +
+      'المعالجة تتم في الخلفية.\n' +
+      'ستصلك إشعارات بالتقدم.'
+    );
 
   } catch (error) {
-    console.error('Autofail preview error:', error);
-    await ctx.reply('❌ حدث خطأ: ' + (error instanceof Error ? error.message : 'Unknown'));
+    console.error('Autofail command error:', error);
+    await ctx.reply('❌ حدث خطأ');
   }
 });
 
