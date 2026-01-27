@@ -168,7 +168,7 @@ export async function completeParentInTodoistIfAllDone(
       return;
     }
 
-    // Get all tasks for today (Egypt timezone)
+    // Get all tasks for today (Egypt timezone) - needed for DB checks
     const { start, end } = getEgyptDayBoundaries(egyptDate);
     const allTasks = await db.select<Task>('tasks', {});
     const todayTasks = allTasks.filter(t => {
@@ -179,9 +179,7 @@ export async function completeParentInTodoistIfAllDone(
     // Get the parent's Todoist ID - prefer hint, fallback to DB lookup
     let parentTodoistId: string | null = parentIdHint?.split('_')[0] || null;
 
-    if (parentTodoistId) {
-      console.log(`📌 Parent Todoist ID from hint: ${parentTodoistId}`);
-    } else {
+    if (!parentTodoistId) {
       // Fallback: Find the completed subtask in our DB
       const subtask = todayTasks.find(t =>
         t.task_id === subtaskId || t.task_id?.startsWith(subtaskId + '_')
@@ -191,6 +189,8 @@ export async function completeParentInTodoistIfAllDone(
         parentTodoistId = subtask.origin_task.split('_')[0] || null;
         console.log(`📌 Parent Todoist ID from subtask DB: ${parentTodoistId}`);
       }
+    } else {
+      console.log(`📌 Parent Todoist ID from hint: ${parentTodoistId}`);
     }
 
     if (!parentTodoistId) {
@@ -198,15 +198,54 @@ export async function completeParentInTodoistIfAllDone(
       return;
     }
 
+    // ✅ DEDUPLICATION: Check if we already completed this parent recently (within 60 seconds)
+    const completionMarkerKey = `parent_autocomplete_${parentTodoistId}_${egyptDate}`;
+    const existingMarker = await db.select('conversation_state', {
+      filter: { chat_id: op.eq(completionMarkerKey) },
+    });
+
+    if (existingMarker.length > 0) {
+      console.log(`⏭️ Parent ${parentTodoistId} already autocompleted today - skipping duplicate`);
+      return;
+    }
+
+    // ✅ Check parent task status in Todoist - if already done for today, skip
+    const parentResponse = await fetch(
+      `https://api.todoist.com/rest/v3/tasks/${parentTodoistId}`,
+      { headers: { 'Authorization': `Bearer ${todoistToken.trim()}` } }
+    );
+
+    if (!parentResponse.ok) {
+      console.log(`⚠️ Could not fetch parent task: ${parentResponse.status}`);
+      return;
+    }
+
+    const parentTask = await parentResponse.json() as {
+      id: string;
+      content: string;
+      is_completed: boolean;
+      priority: number;
+      due?: { date: string; is_recurring?: boolean } | null;
+    };
+
+    // Get priority threshold from settings (used for subtask filtering, not parent skip)
+    const priorityThresholdStr = await settings.get('failure_priority_threshold');
+    const priorityThreshold = priorityThresholdStr ? parseInt(priorityThresholdStr, 10) : 2;
+
+    // ✅ If parent's due date is already in the future (already completed for today), skip
+    if (parentTask.due?.date) {
+      const parentDueDate = parentTask.due.date.split('T')[0];
+      if (parentDueDate && parentDueDate > egyptDate) {
+        console.log(`⏭️ Parent already done for today (due: ${parentDueDate} > today: ${egyptDate}) - skipping`);
+        return;
+      }
+    }
+
     // ✅ KEY FIX: Query Todoist API to check if all subtasks are completed for TODAY
     // Note: Recurring subtasks don't disappear when completed - they get rescheduled
     // So we check if any subtasks are still due today or earlier
     // Also respects priority threshold - only counts subtasks at or above threshold
     console.log(`🔍 Checking Todoist for subtasks of parent ${parentTodoistId}...`);
-
-    // Get priority threshold from settings
-    const priorityThresholdStr = await settings.get('failure_priority_threshold');
-    const priorityThreshold = priorityThresholdStr ? parseInt(priorityThresholdStr, 10) : 2;
     console.log(`📊 Priority threshold: P${priorityThreshold}`);
 
     try {
@@ -279,12 +318,54 @@ export async function completeParentInTodoistIfAllDone(
         return failedParentId === parentTodoistId;
       }) || [];
 
-      if (failedSubtasksForParent.length > 0) {
-        console.log(`⚠️ ${failedSubtasksForParent.length} failed subtasks found, not autocompleting`);
+      // Count completed subtasks in database for this parent
+      const completedSubtasksInDb = todayTasks.filter(t => {
+        if (!t.origin_task || t.status !== 'done') return false;
+        const taskParentId = t.origin_task.split('_')[0];
+        return taskParentId === parentTodoistId;
+      });
+
+      console.log(`📊 Subtasks: ${completedSubtasksInDb.length} completed, ${failedSubtasksForParent.length} failed`);
+
+      // ✅ NEW LOGIC: Handle mixed results
+      if (failedSubtasksForParent.length > 0 && completedSubtasksInDb.length === 0) {
+        // ALL subtasks failed - log parent as failure and complete to postpone
+        console.log(`❌ All subtasks failed! Logging parent as failure...`);
+
+        // ✅ Create deduplication marker BEFORE completing
+        const failMarkerKey = `parent_autocomplete_${parentTodoistId}_${egyptDate}`;
+        try {
+          await db.delete('conversation_state', { chat_id: op.eq(failMarkerKey) }).catch(() => {});
+          await db.insert('conversation_state', {
+            chat_id: failMarkerKey,
+            conversation_type: 'parent_autocomplete_marker',
+            data: { parentId: parentTodoistId, date: egyptDate, reason: 'all_subtasks_failed' },
+            expires_at: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
+          });
+        } catch (e) { /* ignore marker error */ }
+
+        // Add parent to failures - use parentTask from earlier fetch
+        const { addManualFailure } = await import('../services/failure-manager');
+        await addManualFailure(db, egyptDate, {
+          id: parentTodoistId,
+          content: parentTask.content,
+          priority: parentTask.priority,
+          is_subtask: false,
+        });
+
+        // Complete parent in Todoist to postpone it
+        await fetch(
+          `https://api.todoist.com/rest/v3/tasks/${parentTodoistId}/close`,
+          {
+            method: 'POST',
+            headers: { 'Authorization': `Bearer ${todoistToken.trim()}` },
+          }
+        );
+        console.log(`🔄 Parent logged as failure and completed (will postpone)`);
         return;
       }
 
-      // ✅ All subtasks completed, no failures - check if parent already done before autocompleting!
+      // ✅ Some subtasks completed (even with some failures) - complete parent normally
       console.log(`✅ All subtasks completed! Checking parent ${parentTodoistId}...`);
 
       // Check if parent is already completed in database
@@ -300,6 +381,21 @@ export async function completeParentInTodoistIfAllDone(
 
       // Parent not done in DB, complete in Todoist
       console.log(`🎯 Autocompleting parent ${parentTodoistId} in Todoist...`);
+
+      // ✅ Create deduplication marker BEFORE completing to prevent race conditions
+      const completionMarkerKey = `parent_autocomplete_${parentTodoistId}_${egyptDate}`;
+      try {
+        await db.delete('conversation_state', { chat_id: op.eq(completionMarkerKey) }).catch(() => {});
+        await db.insert('conversation_state', {
+          chat_id: completionMarkerKey,
+          conversation_type: 'parent_autocomplete_marker',
+          data: { parentId: parentTodoistId, date: egyptDate },
+          expires_at: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(), // 24 hours
+        });
+        console.log(`🔒 Created autocomplete marker for parent ${parentTodoistId}`);
+      } catch (markerError) {
+        console.error('⚠️ Failed to create marker, but continuing:', markerError);
+      }
 
       const completeResponse = await fetch(
         `https://api.todoist.com/rest/v3/tasks/${parentTodoistId}/close`,
@@ -324,6 +420,8 @@ export async function completeParentInTodoistIfAllDone(
       } else {
         const errorText = await completeResponse.text();
         console.error(`❌ Autocomplete failed: ${completeResponse.status} ${errorText}`);
+        // Remove marker on failure so it can be retried
+        await db.delete('conversation_state', { chat_id: op.eq(completionMarkerKey) }).catch(() => {});
       }
     } catch (apiError) {
       console.error('❌ Error checking Todoist subtasks:', apiError);

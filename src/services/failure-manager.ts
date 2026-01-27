@@ -20,6 +20,7 @@ export interface FailedTask {
   description?: string;          // Task description
   category?: string;             // Task category/label
   duration_minutes?: number;     // Expected duration
+  is_manual?: boolean;           // Whether this was manually logged (not from Todoist sync)
 }
 
 /**
@@ -33,6 +34,7 @@ export interface DailyFailures {
 
 /**
  * Sync failures from Todoist and store as JSON
+ * IMPORTANT: Preserves manually logged failures
  */
 export async function syncFailuresForDate(
   db: SupabaseClient,
@@ -46,6 +48,11 @@ export async function syncFailuresForDate(
 
   // Use allTasks for parent lookup if provided, otherwise fall back to todoistTasks
   const tasksForParentLookup = allTasks || todoistTasks;
+
+  // ✅ Get existing failures to preserve manual ones
+  const existingFailures = await getDailyFailures(db, date);
+  const manualFailures = existingFailures?.failed_tasks.filter(t => t.is_manual) || [];
+  console.log(`📌 Preserving ${manualFailures.length} manual failures`);
 
   const failedTasks: FailedTask[] = [];
 
@@ -102,21 +109,27 @@ export async function syncFailuresForDate(
     );
   }
   
+  // ✅ Merge with manual failures (avoid duplicates by ID)
+  const todoistTaskIds = new Set(failedTasks.map(t => t.id));
+  const uniqueManualFailures = manualFailures.filter(m => !todoistTaskIds.has(m.id) && !completedTaskIds.has(m.id));
+
+  const allFailedTasks = [...failedTasks, ...uniqueManualFailures];
+
   // Create daily failures document
   const dailyFailures: DailyFailures = {
     date,
     last_sync: new Date().toISOString(),
-    failed_tasks: failedTasks,
+    failed_tasks: allFailedTasks,
   };
-  
+
   // Upsert to database
   await upsertDailyFailures(db, dailyFailures);
-  
+
   console.log(`📊 Summary:`);
-  console.log(`   - Failed tasks: ${failedTasks.length}`);
-  console.log(`   - Main tasks: ${failedTasks.filter(t => !t.is_subtask).length}`);
-  console.log(`   - Subtasks: ${failedTasks.filter(t => t.is_subtask).length}`);
-  
+  console.log(`   - Failed tasks: ${allFailedTasks.length} (${failedTasks.length} from sync + ${uniqueManualFailures.length} manual)`);
+  console.log(`   - Main tasks: ${allFailedTasks.filter(t => !t.is_subtask).length}`);
+  console.log(`   - Subtasks: ${allFailedTasks.filter(t => t.is_subtask).length}`);
+
   return dailyFailures;
 }
 
@@ -303,6 +316,62 @@ export async function removeFromFailedTasks(
   await upsertDailyFailures(db, dailyFailures);
   
   console.log(`✅ Removed ${taskId} from failed tasks for ${date}`);
+}
+
+/**
+ * Add a manual failure to daily failures JSON
+ * This is preserved during Todoist syncs
+ */
+export async function addManualFailure(
+  db: SupabaseClient,
+  date: string,
+  task: {
+    id: string;
+    content: string;
+    parent_id?: string | null;
+    parent_content?: string | null;
+    priority?: number;
+    is_subtask?: boolean;
+    category?: string;
+    duration_minutes?: number;
+  }
+): Promise<void> {
+  let dailyFailures = await getDailyFailures(db, date);
+
+  if (!dailyFailures) {
+    dailyFailures = {
+      date,
+      last_sync: new Date().toISOString(),
+      failed_tasks: [],
+    };
+  }
+
+  // Check if already exists
+  const exists = dailyFailures.failed_tasks.some(t => t.id === task.id);
+  if (exists) {
+    console.log(`ℹ️ Task ${task.id} already in failed list`);
+    return;
+  }
+
+  // Add as manual failure
+  const failedTask: FailedTask = {
+    id: task.id,
+    content: task.content,
+    parent_id: task.parent_id || null,
+    parent_content: task.parent_content || null,
+    priority: task.priority || 1,
+    is_subtask: task.is_subtask || false,
+    category: task.category,
+    duration_minutes: task.duration_minutes,
+    is_manual: true, // Mark as manual
+  };
+
+  dailyFailures.failed_tasks.push(failedTask);
+  dailyFailures.last_sync = new Date().toISOString();
+
+  await upsertDailyFailures(db, dailyFailures);
+
+  console.log(`✅ Added manual failure: ${task.content} for ${date}`);
 }
 
 /**

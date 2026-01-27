@@ -175,6 +175,7 @@ function registerCommands(bot: Bot<BotContext>) {
 /stuck - تدخل فوري عند التأجيل
 /battle_mode - معركة اليوم
 /roast_me - إحراق شخصي 😏
+/autofail - تسجيل المهام كفاشلة
 
 📔 اليوميات:
 /journal_start - بدء جلسة
@@ -304,6 +305,7 @@ function getArabicOperationType(type: string): string {
     'edit_goals': 'تعديل أهداف',
     'edit_challenges': 'تعديل تحديات',
     'clearmemory_confirmation': 'تأكيد مسح الذاكرة',
+    'autofail_confirmation': 'تأكيد Autofail',
     'command_lock': 'أمر قيد التنفيذ',
     'createtasks_lock': 'إنشاء مهام',
     'pending_duration': 'إضافة مدة',
@@ -368,6 +370,7 @@ function getArabicOperationType(type: string): string {
 /coach_check - تنبيه يدوي من الكوتش
 /coach_settings - إعدادات الكوتش التلقائي
 /coach_summary - ملخص التعلم اليومي
+/autofail - تسجيل المهام المتبقية كفاشلة يدوياً
 
 ━━━━━━━━━━━━━━━━━━━━
 📔 اليوميات:
@@ -2386,50 +2389,111 @@ bot.command(['completetask', 'complete_task'], async (ctx) => {
   });
 
   // Generate new weekly goals (typically run on Friday)
-  bot.command(['generate_goals', 'generategoals'], async (ctx) => {
-    await withCommandLock(ctx, '/generate_goals', async () => {
-      await ctx.reply('🔄 جاري توليد أهداف الأسبوع القادم...');
+// Uses waitUntil for background processing to avoid webhook timeout
+bot.command(['generate_goals', 'generategoals'], async (ctx) => {
+  const updateId = ctx.update.update_id;
+  const idempotencyKey = `goals_update_${updateId}`;
+  const chatId = ctx.chat?.id.toString() || '';
+  const botToken = ctx.env.TELEGRAM_BOT_TOKEN;
 
-      const openRouterKey = await ctx.settings.get('openrouter_api_key');
-      const aiModel = await getAIModelByTier(ctx.settings, 'low');
-
-      if (!openRouterKey) {
-        await ctx.reply('❌ مفتاح API غير مكون');
-        return;
-      }
-
-      const aiClient = createAIClient(openRouterKey.trim(), aiModel);
-      const goalsMgr = createGoalsManager(ctx.db, ctx.settings, aiClient);
-
-      const result = await goalsMgr.generateWeeklyGoals();
-
-      if (result.success) {
-        let message = '✅ **تم توليد أهداف الأسبوع القادم!**\n\n';
-
-        if (result.evaluationText) {
-          message += `📊 **تقييم الأسبوع الماضي:**\n${result.evaluationText}\n\n`;
-        }
-
-        message += '🎯 **الأهداف الجديدة:**\n';
-        message += result.weeklyGoals?.goals_text || '';
-
-        if (result.dailyChallenges && result.dailyChallenges.length > 0) {
-          message += '\n\n⚡ **التحديات اليومية:**\n';
-          for (const challenge of result.dailyChallenges) {
-            const date = typeof challenge.challenge_date === 'string'
-              ? challenge.challenge_date
-              : new Date(challenge.challenge_date).toISOString().split('T')[0];
-            message += `• ${date}: ${challenge.challenge_text}\n`;
-          }
-        }
-
-        await sendLongMessage(ctx, message);
-      } else {
-        await ctx.reply(`❌ ${result.error || 'حدث خطأ أثناء توليد الأهداف'}`);
-      }
+  try {
+    // Check if this update was already processed (Telegram retry)
+    const existing = await ctx.db.select('conversation_state', {
+      filter: { chat_id: op.eq(idempotencyKey) },
     });
-    await sendAutoStatus(ctx);
-  });
+
+    if (existing.length > 0) {
+      console.log(`⏭️ Skipping duplicate update ${updateId}`);
+      return;
+    }
+
+    // Mark as processing
+    await ctx.db.insert('conversation_state', {
+      chat_id: idempotencyKey,
+      conversation_type: 'goals_idempotency',
+      data: { startedAt: Date.now() },
+      expires_at: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
+    });
+
+    await ctx.reply('🤖 جاري توليد أهداف الأسبوع القادم...\n⏳ قد يستغرق هذا 30-60 ثانية...');
+
+    // Run AI generation in background using waitUntil
+    const backgroundTask = (async () => {
+      try {
+        console.log('📅 [Background] Generating weekly goals');
+        
+        const openRouterKey = await ctx.settings.get('openrouter_api_key');
+        const aiModel = await getAIModelByTier(ctx.settings, 'low');
+
+        if (!openRouterKey) {
+          await sendTelegramMessageDirect(botToken, chatId, '❌ مفتاح API غير مكون');
+          return;
+        }
+
+        const aiClient = createAIClient(openRouterKey.trim(), aiModel);
+        const goalsMgr = createGoalsManager(ctx.db, ctx.settings, aiClient);
+
+        console.log('🎯 Calling generateWeeklyGoals...');
+        const result = await goalsMgr.generateWeeklyGoals();
+        console.log('✅ Goals generated:', result.success);
+
+        if (result.success) {
+          let message = '✅ **تم توليد أهداف الأسبوع القادم!**\n\n';
+
+          if (result.evaluationText) {
+            message += `📊 **تقييم الأسبوع الماضي:**\n${result.evaluationText}\n\n`;
+          }
+
+          message += '🎯 **الأهداف الجديدة:**\n';
+          message += result.weeklyGoals?.goals_text || '';
+
+          if (result.dailyChallenges && result.dailyChallenges.length > 0) {
+            message += '\n\n⚡ **التحديات اليومية:**\n';
+            for (const challenge of result.dailyChallenges) {
+              const date = typeof challenge.challenge_date === 'string'
+                ? challenge.challenge_date
+                : new Date(challenge.challenge_date).toISOString().split('T')[0];
+              message += `• ${date}: ${challenge.challenge_text}\n`;
+            }
+          }
+
+          // Send via direct Telegram API
+          await sendTelegramMessageDirect(botToken, chatId, message);
+        } else {
+          await sendTelegramMessageDirect(
+            botToken,
+            chatId,
+            `❌ ${result.error || 'حدث خطأ أثناء توليد الأهداف'}`
+          );
+        }
+
+      } catch (error) {
+        console.error('❌ [Background] Goals generation error:', error);
+        await sendTelegramMessageDirect(
+          botToken,
+          chatId,
+          '❌ حدث خطأ: ' + (error instanceof Error ? error.message : 'Unknown')
+        );
+      } finally {
+        // Clean up idempotency marker
+        await ctx.db.delete('conversation_state', { chat_id: op.eq(idempotencyKey) }).catch(() => {});
+      }
+    })();
+
+    // Use waitUntil if available, otherwise just fire and forget
+    if (ctx.executionContext?.waitUntil) {
+      ctx.executionContext.waitUntil(backgroundTask);
+    } else {
+      // Fallback: just await (may timeout on free plan)
+      await backgroundTask;
+    }
+
+  } catch (error) {
+    console.error('Generate goals error:', error);
+    await ctx.reply('❌ حدث خطأ: ' + (error instanceof Error ? error.message : 'Unknown'));
+    await ctx.db.delete('conversation_state', { chat_id: op.eq(idempotencyKey) }).catch(() => {});
+  }
+});
 
   // Edit weekly goals
   bot.command(['edit_goals', 'editgoals'], async (ctx) => {
@@ -2664,7 +2728,7 @@ async function processTaskFailure(
       };
     }
 
-    // Create the failed task entry
+    // Create the failed task entry - mark as manual so it's preserved during sync
     const failedTask: FailedTask = {
       id: todoistTaskId || `manual_fail_${Date.now()}`,
       content: taskName,
@@ -2673,6 +2737,7 @@ async function processTaskFailure(
       priority: 1,
       is_subtask: false,
       description: 'Manual failure logged via /log_failure',
+      is_manual: true, // ✅ Mark as manual to preserve during Todoist sync
     };
 
     // Check if task already exists in failures (by clean name)
@@ -2859,11 +2924,14 @@ bot.command('stuck', async (ctx) => {
 
     await ctx.reply('🚨 جاري تحليل الموقف...');
 
+    // Get low-tier model for coaching
+    const aiModel = await getAIModelByTier(ctx.settings, 'low');
+
     // Run in background
     const backgroundTask = (async () => {
       try {
         console.log('🚨 Starting stuck intervention for chat:', chatId);
-        const aiClient = createAIClient(apiKey);
+        const aiClient = createAIClient(apiKey, aiModel);
         console.log('✅ AI client created');
         const stuckHandler = createStuckHandler(ctx.db, ctx.settings, (msgs, temp, max) => aiClient.complete(msgs, temp, max));
         console.log('✅ Stuck handler created, starting intervention...');
@@ -2899,7 +2967,8 @@ bot.command('stuck_continue', async (ctx) => {
     const apiKey = await ctx.settings.get('openrouter_api_key');
     if (!apiKey) return;
 
-    const aiClient = createAIClient(apiKey);
+    const aiModel = await getAIModelByTier(ctx.settings, 'low');
+    const aiClient = createAIClient(apiKey, aiModel);
     const stuckHandler = createStuckHandler(ctx.db, ctx.settings, (msgs, temp, max) => aiClient.complete(msgs, temp, max));
 
     const response = await stuckHandler.handleContinue(chatId);
@@ -2922,7 +2991,8 @@ bot.command('stuck_done', async (ctx) => {
     const apiKey = await ctx.settings.get('openrouter_api_key');
     if (!apiKey) return;
 
-    const aiClient = createAIClient(apiKey);
+    const aiModel = await getAIModelByTier(ctx.settings, 'low');
+    const aiClient = createAIClient(apiKey, aiModel);
     const stuckHandler = createStuckHandler(ctx.db, ctx.settings, (msgs, temp, max) => aiClient.complete(msgs, temp, max));
 
     const response = await stuckHandler.handleDone(chatId);
@@ -2944,7 +3014,8 @@ bot.command('stuck_defer', async (ctx) => {
     const apiKey = await ctx.settings.get('openrouter_api_key');
     if (!apiKey) return;
 
-    const aiClient = createAIClient(apiKey);
+    const aiModel = await getAIModelByTier(ctx.settings, 'low');
+    const aiClient = createAIClient(apiKey, aiModel);
     const stuckHandler = createStuckHandler(ctx.db, ctx.settings, (msgs, temp, max) => aiClient.complete(msgs, temp, max));
 
     const response = await stuckHandler.handleDefer(chatId, reason);
@@ -2979,10 +3050,13 @@ bot.command('battle_mode', async (ctx) => {
 
     await ctx.reply('⚔️ جاري تحضير المعركة...');
 
+    // Get low-tier model for battle mode
+    const aiModel = await getAIModelByTier(ctx.settings, 'low');
+
     // Run in background
     const backgroundTask = (async () => {
       try {
-        const aiClient = createAIClient(apiKey);
+        const aiClient = createAIClient(apiKey, aiModel);
         const battleMode = createBattleMode(ctx.db, ctx.settings, (msgs, temp, max) => aiClient.complete(msgs, temp, max));
         const { message } = await battleMode.startBattle(chatId);
         await sendTelegramMessageDirect(botToken, chatId, message);
@@ -3013,7 +3087,8 @@ bot.command('battle_status', async (ctx) => {
     const apiKey = await ctx.settings.get('openrouter_api_key');
     if (!apiKey) return;
 
-    const aiClient = createAIClient(apiKey);
+    const aiModel = await getAIModelByTier(ctx.settings, 'low');
+    const aiClient = createAIClient(apiKey, aiModel);
     const battleMode = createBattleMode(ctx.db, ctx.settings, (msgs, temp, max) => aiClient.complete(msgs, temp, max));
 
     const status = await battleMode.getStatus(chatId);
@@ -3048,10 +3123,13 @@ bot.command('roast_me', async (ctx) => {
 
     await ctx.reply('🔥 جاري تحليل أنماط التسويف...');
 
+    // Get low-tier model for roast mode
+    const aiModel = await getAIModelByTier(ctx.settings, 'low');
+
     // Run in background
     const backgroundTask = (async () => {
       try {
-        const aiClient = createAIClient(apiKey);
+        const aiClient = createAIClient(apiKey, aiModel);
         const roastMode = createRoastMode(ctx.db, ctx.settings, (msgs, temp, max) => aiClient.complete(msgs, temp, max));
         const result = await roastMode.generateRoast(chatId);
         await sendTelegramMessageDirect(botToken, chatId, `${result.roast}${result.encouragement}`);
@@ -3091,10 +3169,13 @@ bot.command('weekly_roast', async (ctx) => {
 
     await ctx.reply('🔥 جاري تحليل أنماط الأسبوع...');
 
+    // Get low-tier model for roast mode
+    const aiModel = await getAIModelByTier(ctx.settings, 'low');
+
     // Run in background
     const backgroundTask = (async () => {
       try {
-        const aiClient = createAIClient(apiKey);
+        const aiClient = createAIClient(apiKey, aiModel);
         const roastMode = createRoastMode(ctx.db, ctx.settings, (msgs, temp, max) => aiClient.complete(msgs, temp, max));
         const result = await roastMode.weeklyRoast(chatId);
         await sendTelegramMessageDirect(botToken, chatId, `${result.roast}${result.encouragement}`);
@@ -3131,10 +3212,13 @@ bot.command('coach_check', async (ctx) => {
 
     await ctx.reply('🔍 جاري فحص الحالة...');
 
+    // Get low-tier model for auto-coach
+    const aiModel = await getAIModelByTier(ctx.settings, 'low');
+
     // Run in background
     const backgroundTask = (async () => {
       try {
-        const aiClient = createAIClient(apiKey);
+        const aiClient = createAIClient(apiKey, aiModel);
         const autoCoach = createAutoCoach(ctx.db, ctx.settings, (msgs, temp, max) => aiClient.complete(msgs, temp, max));
         const probeResult = await autoCoach.shouldProbe(chatId);
 
@@ -3212,10 +3296,13 @@ bot.command('coach_summary', async (ctx) => {
 
     await ctx.reply('📊 جاري تحليل تفاعلات اليوم...');
 
+    // Get low-tier model for auto-coach
+    const aiModel = await getAIModelByTier(ctx.settings, 'low');
+
     // Run in background
     const backgroundTask = (async () => {
       try {
-        const aiClient = createAIClient(apiKey);
+        const aiClient = createAIClient(apiKey, aiModel);
         const autoCoach = createAutoCoach(ctx.db, ctx.settings, (msgs, temp, max) => aiClient.complete(msgs, temp, max));
         const summary = await autoCoach.endOfDaySummary(chatId);
         await sendTelegramMessageDirect(botToken, chatId, `📈 ملخص الكوتشنج اليومي\n\n${summary}`);
@@ -3234,6 +3321,112 @@ bot.command('coach_summary', async (ctx) => {
   } catch (error) {
     console.error('Coach summary error:', error);
     await ctx.reply('❌ حدث خطأ');
+  }
+});
+
+// /autofail - Manually trigger end-of-day autofail
+bot.command('autofail', async (ctx) => {
+  try {
+    if (!(await checkCoachIdempotency(ctx, 'autofail'))) return;
+
+    const chatId = ctx.chat?.id.toString() || '';
+
+    // Store confirmation state
+    await ctx.db.insert('conversation_state', {
+      chat_id: `autofail_confirm_${chatId}`,
+      conversation_type: 'autofail_confirmation',
+      data: {},
+      expires_at: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
+    });
+
+    // Preview what will be failed
+    const todoistToken = await ctx.settings.get('todoist_api_token');
+    const todoistProjectId = await ctx.settings.get('todoist_project_id');
+    const priorityThresholdStr = await ctx.settings.get('failure_priority_threshold');
+    const priorityThreshold = priorityThresholdStr ? parseInt(priorityThresholdStr, 10) : 2;
+    const today = getTodayInEgypt();
+
+    if (!todoistToken) {
+      await ctx.reply('❌ لم يتم تكوين مفتاح Todoist');
+      return;
+    }
+
+    // Get all tasks from Todoist (all projects for preview)
+    const tasksResponse = await fetch('https://api.todoist.com/rest/v3/tasks', {
+      headers: { 'Authorization': `Bearer ${todoistToken.trim()}` },
+    });
+
+    if (!tasksResponse.ok) {
+      await ctx.reply('❌ فشل في جلب المهام من Todoist');
+      return;
+    }
+
+    const allTasks = await tasksResponse.json() as Array<{
+      id: string;
+      content: string;
+      project_id: string;
+      priority: number;
+      parent_id?: string;
+      due?: { date: string; is_recurring?: boolean } | null;
+    }>;
+
+    // Filter tasks due today or earlier
+    const tasksDueToday = allTasks.filter(task => {
+      if (!task.due?.date) return false;
+      const dueDate = task.due.date.split('T')[0];
+      return dueDate && dueDate <= today;
+    });
+
+    // Separate into tasks that will be failed vs ignored
+    const tasksToFail: string[] = [];
+    const tasksIgnored: string[] = [];
+
+    for (const task of tasksDueToday) {
+      const ourPriority = 5 - (task.priority || 1);
+      const isInMainProject = todoistProjectId ? task.project_id === todoistProjectId.trim() : true;
+      const { extractCleanTaskName } = await import('../utils/task-parser');
+      const cleanName = extractCleanTaskName(task.content);
+
+      if (isInMainProject && ourPriority <= priorityThreshold) {
+        tasksToFail.push(`❌ ${cleanName} (P${ourPriority})`);
+      } else {
+        const reason = !isInMainProject ? 'مشروع آخر' : `P${ourPriority} > P${priorityThreshold}`;
+        tasksIgnored.push(`⏭️ ${cleanName} (${reason})`);
+      }
+    }
+
+    let message = `🌙 **معاينة Autofail**\n\n`;
+    message += `📅 التاريخ: ${today}\n`;
+    message += `⚡ عتبة الأولوية: P${priorityThreshold}\n\n`;
+
+    if (tasksToFail.length > 0) {
+      message += `**المهام التي ستُسجل كفاشلة (${tasksToFail.length}):**\n`;
+      message += tasksToFail.join('\n');
+      message += '\n\n';
+    } else {
+      message += '✅ لا توجد مهام للتسجيل كفاشلة!\n\n';
+    }
+
+    if (tasksIgnored.length > 0) {
+      message += `**المهام المُتجاهلة (${tasksIgnored.length}):**\n`;
+      message += tasksIgnored.slice(0, 10).join('\n');
+      if (tasksIgnored.length > 10) {
+        message += `\n... و${tasksIgnored.length - 10} مهام أخرى`;
+      }
+      message += '\n\n';
+    }
+
+    if (tasksToFail.length > 0) {
+      message += '━━━━━━━━━━━━━━━━\n';
+      message += 'للتأكيد أرسل: **نعم** أو **yes**\n';
+      message += 'للإلغاء أرسل: **لا** أو **no**';
+    }
+
+    await ctx.reply(message, { parse_mode: 'Markdown' });
+
+  } catch (error) {
+    console.error('Autofail preview error:', error);
+    await ctx.reply('❌ حدث خطأ: ' + (error instanceof Error ? error.message : 'Unknown'));
   }
 });
 
@@ -3291,10 +3484,13 @@ bot.command('coach_summary', async (ctx) => {
           if (apiKey) {
             await ctx.reply('⏳ جاري التحليل...');
 
+            // Get low-tier model for stuck handler
+            const aiModel = await getAIModelByTier(ctx.settings, 'low');
+
             // Run in background
             const backgroundTask = (async () => {
               try {
-                const aiClient = createAIClient(apiKey);
+                const aiClient = createAIClient(apiKey, aiModel);
                 const stuckHandler = createStuckHandler(ctx.db, ctx.settings, (msgs, temp, max) => aiClient.complete(msgs, temp, max));
                 const result = await stuckHandler.processResponse(chatId, text);
                 await sendTelegramMessageDirect(botToken, chatId, result.message);
@@ -3580,6 +3776,159 @@ if (pendingFailureNewTask.length > 0) {
           await ctx.reply(`✅ تم تحديث ${updatedCount} تحدي(ات) بنجاح!`);
         } else {
           await ctx.reply('❌ لم يتم العثور على تحديات صالحة للتحديث.\nتأكد من التنسيق: YYYY-MM-DD (اليوم): التحدي');
+        }
+        return;
+      }
+
+// Check for pending autofail confirmation
+      const autofailKey = `autofail_confirm_${chatId}`;
+      const pendingAutofail = await ctx.db.select('conversation_state', {
+        filter: { chat_id: op.eq(autofailKey) },
+      });
+
+      if (pendingAutofail.length > 0) {
+        // Delete confirmation state
+        await ctx.db.delete('conversation_state', { chat_id: op.eq(autofailKey) });
+
+        const lowerText = text.trim().toLowerCase();
+
+        if (lowerText === 'نعم' || lowerText === 'yes' || lowerText === 'y') {
+          await ctx.reply('🔄 جاري تنفيذ Autofail...');
+
+          const botToken = ctx.env.TELEGRAM_BOT_TOKEN;
+
+          // Run autofail in background
+          const backgroundTask = (async () => {
+            try {
+              const todoistToken = await ctx.settings.get('todoist_api_token');
+              const todoistProjectId = await ctx.settings.get('todoist_project_id');
+              const priorityThresholdStr = await ctx.settings.get('failure_priority_threshold');
+              const priorityThreshold = priorityThresholdStr ? parseInt(priorityThresholdStr, 10) : 2;
+              const today = getTodayInEgypt();
+
+              if (!todoistToken) {
+                await sendTelegramMessageDirect(botToken, chatId, '❌ لم يتم تكوين مفتاح Todoist');
+                return;
+              }
+
+              // Get all tasks from Todoist
+              const tasksResponse = await fetch('https://api.todoist.com/rest/v3/tasks', {
+                headers: { 'Authorization': `Bearer ${todoistToken.trim()}` },
+              });
+
+              if (!tasksResponse.ok) {
+                await sendTelegramMessageDirect(botToken, chatId, '❌ فشل في جلب المهام من Todoist');
+                return;
+              }
+
+              const allTasks = await tasksResponse.json() as Array<{
+                id: string;
+                content: string;
+                project_id: string;
+                priority: number;
+                parent_id?: string;
+                due?: { date: string; is_recurring?: boolean } | null;
+              }>;
+
+              // Filter tasks due today or earlier
+              const tasksDueToday = allTasks.filter(task => {
+                if (!task.due?.date) return false;
+                const dueDate = task.due.date.split('T')[0];
+                return dueDate && dueDate <= today;
+              });
+
+              // Filter to only main project and priority threshold
+              const tasksToFail = tasksDueToday.filter(task => {
+                const ourPriority = 5 - (task.priority || 1);
+                const isInMainProject = todoistProjectId ? task.project_id === todoistProjectId.trim() : true;
+                return isInMainProject && ourPriority <= priorityThreshold;
+              });
+
+              if (tasksToFail.length === 0) {
+                await sendTelegramMessageDirect(botToken, chatId, '✅ لا توجد مهام للتسجيل كفاشلة!');
+                return;
+              }
+
+              // Get or create daily failures
+              let dailyFailures = await getDailyFailures(ctx.db, today);
+              if (!dailyFailures) {
+                dailyFailures = {
+                  date: today,
+                  last_sync: new Date().toISOString(),
+                  failed_tasks: [],
+                };
+              }
+
+              const failedTaskNames: string[] = [];
+              const { extractCleanTaskName } = await import('../utils/task-parser');
+
+              for (const task of tasksToFail) {
+                try {
+                  const cleanName = extractCleanTaskName(task.content);
+
+                  // Check if already in failures
+                  const existingIndex = dailyFailures.failed_tasks.findIndex(f =>
+                    extractCleanTaskName(f.content) === cleanName
+                  );
+
+                  if (existingIndex < 0) {
+                    dailyFailures.failed_tasks.push({
+                      id: task.id,
+                      content: task.content,
+                      parent_id: task.parent_id || null,
+                      parent_content: null,
+                      priority: task.priority,
+                      is_subtask: !!task.parent_id,
+                      description: 'Manual autofail via /autofail command',
+                    });
+                  }
+
+                  // Create failure completion marker
+                  const markerKey = `failure_completion_${task.id}`;
+                  await ctx.db.delete('conversation_state', { chat_id: op.eq(markerKey) }).catch(() => {});
+                  await ctx.db.insert('conversation_state', {
+                    chat_id: markerKey,
+                    conversation_type: 'failure_completion',
+                    data: { taskId: task.id, taskName: task.content, autoFail: true },
+                    expires_at: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
+                  });
+
+                  // Complete the task in Todoist
+                  await fetch(`https://api.todoist.com/rest/v3/tasks/${task.id}/close`, {
+                    method: 'POST',
+                    headers: { 'Authorization': `Bearer ${todoistToken.trim()}` },
+                  });
+
+                  failedTaskNames.push(cleanName);
+                } catch (taskError) {
+                  console.error(`❌ Failed to autofail task ${task.id}:`, taskError);
+                }
+              }
+
+              // Save daily failures
+              dailyFailures.last_sync = new Date().toISOString();
+              await upsertDailyFailures(ctx.db, dailyFailures);
+
+              // Send completion message
+              const message = `🌙 **تم تنفيذ Autofail**\n\n` +
+                `عدد المهام: ${failedTaskNames.length}\n\n` +
+                failedTaskNames.map(name => `❌ ${name}`).join('\n') +
+                `\n\n_تم تأجيل المهام المتكررة للموعد التالي_`;
+
+              await sendTelegramMessageDirect(botToken, chatId, message);
+            } catch (error) {
+              console.error('Autofail execution error:', error);
+              await sendTelegramMessageDirect(botToken, chatId, '❌ حدث خطأ أثناء تنفيذ Autofail');
+            }
+          })();
+
+          if (ctx.executionContext?.waitUntil) {
+            ctx.executionContext.waitUntil(backgroundTask);
+          } else {
+            await backgroundTask;
+          }
+        } else {
+          await ctx.reply('✅ تم إلغاء Autofail.');
         }
         return;
       }

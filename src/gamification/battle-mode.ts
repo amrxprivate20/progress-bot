@@ -21,6 +21,7 @@ import { SettingsManager } from '../database/settings';
 import { AIMessage } from '../services/ai-client';
 import { getTodayInEgypt } from '../utils/timezone';
 import { createCoachingContextBuilder } from '../coach/coaching-context';
+import { createReportGenerator } from '../services/report-generator';
 
 // ============================================
 // Types
@@ -183,6 +184,7 @@ const DEFEAT_NARRATIVE_PROMPT = `البوس نجا! اللاعب مهزمهوش 
 
 export class BattleMode {
   private aiComplete: (messages: AIMessage[], temp?: number, maxTokens?: number) => Promise<string>;
+  private settings: SettingsManager;
 
   constructor(
     private db: SupabaseClient,
@@ -190,8 +192,45 @@ export class BattleMode {
     aiCompleteFunc: (messages: AIMessage[], temp?: number, maxTokens?: number) => Promise<string>
   ) {
     this.aiComplete = aiCompleteFunc;
+    this.settings = settings;
     // Context builder available for future coaching integration
     createCoachingContextBuilder(db, settings);
+  }
+
+  /**
+   * Sync battle stats with accurate report preview data
+   * This ensures task counts are accurate from the report generator
+   */
+  private async syncStatsFromReport(state: BattleState): Promise<BattleState> {
+    try {
+      const reportGen = createReportGenerator(this.db, this.settings);
+      const preview = await reportGen.generatePreview(state.date);
+
+      // Update state with accurate counts from report
+      state.tasksCompleted = preview.completed_tasks;
+      state.tasksFailed = preview.failed_tasks;
+
+      // Recalculate damage based on actual completed tasks
+      // Use success rate to determine effective damage
+      const totalDamageFromTasks = state.tasksCompleted * 10; // Base damage per task
+      state.playerDamageDealt = totalDamageFromTasks + state.criticalHits * 5; // Add crit bonus
+
+      // Recalculate boss HP based on actual progress
+      const effectiveHP = state.bossMaxHP - state.playerDamageDealt + state.bossHealingReceived;
+      state.bossCurrentHP = Math.max(0, Math.min(state.bossMaxHP, effectiveHP));
+
+      // Check for victory/defeat
+      if (state.bossCurrentHP <= 0) {
+        state.isVictory = true;
+      }
+
+      console.log(`📊 Battle stats synced: Completed=${state.tasksCompleted}, Failed=${state.tasksFailed}, HP=${state.bossCurrentHP}`);
+
+      return state;
+    } catch (error) {
+      console.error('❌ Error syncing battle stats:', error);
+      return state; // Return original state on error
+    }
   }
 
   /**
@@ -337,34 +376,44 @@ _أكمل المهام لتوجيه الضربات!_
 
   /**
    * Get current battle status
+   * Syncs with accurate report data before showing status
    */
   async getStatus(chatId: string): Promise<string> {
     const today = getTodayInEgypt();
-    const state = await this.getBattleState(chatId, today);
+    let state = await this.getBattleState(chatId, today);
 
     if (!state) {
       return '⚔️ لا توجد معركة نشطة اليوم.\n\nاستخدم /battle_mode لبدء معركة جديدة!';
     }
+
+    // Sync stats with accurate report data
+    state = await this.syncStatsFromReport(state);
+    await this.saveBattleState(chatId, state);
 
     return this.generateStatusMessage(state);
   }
 
   /**
    * End the day's battle (called at end of day)
+   * Syncs with accurate report data before ending
    */
   async endBattle(chatId: string): Promise<string> {
     const today = getTodayInEgypt();
-    const state = await this.getBattleState(chatId, today);
+    let state = await this.getBattleState(chatId, today);
 
     if (!state) {
       return 'لا توجد معركة لإنهائها.';
     }
 
+    // Sync stats with accurate report data before ending
+    state = await this.syncStatsFromReport(state);
+
     if (state.isVictory) {
-      return 'المعركة انتهت بالنصر! 🎉';
+      await this.saveBattleState(chatId, state);
+      return this.generateVictoryNarrative(state);
     }
 
-    // Mark as defeat
+    // Mark as defeat if boss still has HP
     state.isDefeat = true;
     await this.saveBattleState(chatId, state);
 

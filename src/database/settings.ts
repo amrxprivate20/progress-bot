@@ -324,7 +324,7 @@ export type AIModelTier = 'high' | 'low';
 
 // Default models for each tier
 const DEFAULT_HIGH_TIER_MODEL = 'anthropic/claude-sonnet-4';
-const DEFAULT_LOW_TIER_MODEL = 'anthropic/claude-haiku';
+const DEFAULT_LOW_TIER_MODEL = 'anthropic/claude-3-haiku';
 
 /**
  * Get AI model for a specific tier
