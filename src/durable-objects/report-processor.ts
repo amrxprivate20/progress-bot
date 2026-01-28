@@ -70,24 +70,29 @@ if (url.pathname === '/autofail' && request.method === 'POST') {
   try {
     const jobData = await request.json() as any;
     
-    // ✅ Start processing in background using waitUntil
-    this.ctx.waitUntil(
-      this.handleAutoFail(jobData).catch(error => {
-        console.error('Auto-fail background error:', error);
-      })
-    );
+    // ✅ Store job data and schedule alarm
+    const { today } = jobData;
+    const METADATA_KEY = `autofail_metadata_${today}`;
     
-    // ✅ Return immediately (don't wait for result)
+    // Store metadata for alarm to use
+    await this.ctx.storage.put(METADATA_KEY, jobData);
+    
+    // Schedule alarm to start processing in 2 seconds
+    await this.ctx.storage.setAlarm(Date.now() + 2000);
+    
+    console.log(`[AutoFail] Scheduled alarm for ${today}`);
+    
+    // Return immediately
     return new Response(
       JSON.stringify({ 
         success: true, 
-        message: 'Auto-fail processing started in background',
-        inProgress: true 
+        message: 'Auto-fail scheduled',
+        scheduledFor: new Date(Date.now() + 2000).toISOString()
       }),
       { headers: { 'Content-Type': 'application/json' } }
     );
   } catch (error) {
-    console.error('Auto-fail trigger error:', error);
+    console.error('Auto-fail scheduling error:', error);
     return new Response(
       JSON.stringify({ 
         success: false, 
@@ -97,6 +102,7 @@ if (url.pathname === '/autofail' && request.method === 'POST') {
     );
   }
 }
+
     // POST /process - Start processing job
     if (path === '/process' && request.method === 'POST') {
       const jobData = await request.json() as ReportJobData;
@@ -925,7 +931,7 @@ async handleAutoFail(jobData: {
   todoistProjectId?: string;
   priorityThreshold: number;
   botToken: string;
-}): Promise<{ success: boolean; failedCount: number; remaining: number; inProgress: boolean }> {
+}): Promise<void> {
   const { 
     chatId, 
     today, 
@@ -935,214 +941,82 @@ async handleAutoFail(jobData: {
     botToken
   } = jobData;
 
-  const BATCH_SIZE = 5; // Process 5 tasks per batch (safe for subrequest limits)
   const QUEUE_KEY = `autofail_queue_${today}`;
   const PROCESSED_KEY = `autofail_processed_${today}`;
-  const JOB_DATA_KEY = `autofail_jobdata_${today}`;
 
   try {
-    // Check if we have an existing queue
+    // Check if already initialized
     let queue = await this.ctx.storage.get<string[]>(QUEUE_KEY);
-    let processedIds = await this.ctx.storage.get<string[]>(PROCESSED_KEY) || [];
+    
+    if (queue) {
+      console.log(`[AutoFail] Queue already exists (${queue.length} tasks)`);
+      return;
+    }
 
-    // If no queue, fetch and initialize
-    if (!queue) {
-      console.log(`[AutoFail] Initializing queue for ${today}`);
-      
-      // Store job data for alarm callbacks
-      await this.ctx.storage.put(JOB_DATA_KEY, jobData);
-      
-      let url = 'https://api.todoist.com/rest/v3/tasks';
-      if (todoistProjectId) {
-        url += `?project_id=${todoistProjectId.trim()}`;
-      }
+    console.log(`[AutoFail] Initializing queue for ${today}`);
+    
+    // Fetch tasks from Todoist
+    let url = 'https://api.todoist.com/rest/v3/tasks';
+    if (todoistProjectId) {
+      url += `?project_id=${todoistProjectId.trim()}`;
+    }
 
-      const tasksResponse = await fetch(url, {
-        headers: { 'Authorization': `Bearer ${todoistToken}` },
-      });
+    const tasksResponse = await fetch(url, {
+      headers: { 'Authorization': `Bearer ${todoistToken}` },
+    });
 
-      if (!tasksResponse.ok) {
-        throw new Error(`Todoist API error: ${tasksResponse.status}`);
-      }
+    if (!tasksResponse.ok) {
+      throw new Error(`Todoist API error: ${tasksResponse.status}`);
+    }
 
-      const allTasks = await tasksResponse.json() as Array<{
-        id: string;
-        content: string;
-        priority: number;
-        due?: { date: string; is_recurring?: boolean } | null;
-      }>;
+    const allTasks = await tasksResponse.json() as Array<{
+      id: string;
+      content: string;
+      priority: number;
+      due?: { date: string; is_recurring?: boolean } | null;
+    }>;
 
-      // Filter tasks due today or earlier
-      const tasksDueToday = allTasks.filter(task => {
-        if (!task.due?.date) return false;
-        const dueDate = task.due.date.split('T')[0];
-        return dueDate && dueDate <= today;
-      });
+    // Filter tasks due today or earlier
+    const tasksDueToday = allTasks.filter(task => {
+      if (!task.due?.date) return false;
+      const dueDate = task.due.date.split('T')[0];
+      return dueDate && dueDate <= today;
+    });
 
-      // Filter by priority threshold and extract IDs
-      const taskIds = tasksDueToday
-        .filter(task => {
-          const ourPriority = 5 - (task.priority || 1);
-          return ourPriority <= priorityThreshold;
-        })
-        .map(t => t.id);
+    // Filter by priority threshold
+    const taskIds = tasksDueToday
+      .filter(task => {
+        const ourPriority = 5 - (task.priority || 1);
+        return ourPriority <= priorityThreshold;
+      })
+      .map(t => t.id);
 
-      if (taskIds.length === 0) {
-        console.log(`[AutoFail] No tasks to fail for ${today}`);
-        return { success: true, failedCount: 0, remaining: 0, inProgress: false };
-      }
-
-      // Store queue and task details
-      queue = taskIds;
-      await this.ctx.storage.put(QUEUE_KEY, queue);
-      await this.ctx.storage.put(`autofail_tasks_${today}`, tasksDueToday);
-      
-      console.log(`[AutoFail] Queue initialized with ${queue.length} tasks`);
-      
-      // Send initial notification
+    if (taskIds.length === 0) {
+      console.log(`[AutoFail] No tasks to fail for ${today}`);
       await this.sendTelegramMessage(
         chatId,
         botToken,
-        `🌙 بدء Autofail...\n📋 ${queue.length} مهمة للمعالجة`
+        '✅ لا توجد مهام للتسجيل كفاشلة'
       );
+      return;
     }
 
-    // Get remaining tasks (queue minus already processed)
-    const remainingIds = queue.filter(id => !processedIds.includes(id));
+    // Store queue and task details
+    await this.ctx.storage.put(QUEUE_KEY, taskIds);
+    await this.ctx.storage.put(`autofail_tasks_${today}`, tasksDueToday);
+    await this.ctx.storage.put(PROCESSED_KEY, []);
     
-    if (remainingIds.length === 0) {
-      console.log(`[AutoFail] All tasks processed!`);
-      
-      // Clean up storage
-      await this.ctx.storage.delete(QUEUE_KEY);
-      await this.ctx.storage.delete(PROCESSED_KEY);
-      await this.ctx.storage.delete(`autofail_tasks_${today}`);
-      await this.ctx.storage.delete(JOB_DATA_KEY);
-      
-      // Send completion notification
-      await this.sendAutoFailNotification(chatId, botToken, processedIds.length, today);
-      
-      return { success: true, failedCount: processedIds.length, remaining: 0, inProgress: false };
-    }
-
-    console.log(`[AutoFail] Processing batch: ${remainingIds.length} remaining, taking ${BATCH_SIZE}`);
-
-    // Process batch
-    const batchToProcess = remainingIds.slice(0, BATCH_SIZE);
-    const allTasksData = await this.ctx.storage.get<any[]>(`autofail_tasks_${today}`) || [];
+    console.log(`[AutoFail] Queue initialized with ${taskIds.length} tasks`);
     
-    // Get or create daily failures
-    const { getDailyFailures, upsertDailyFailures } = await import('../services/failure-manager');
-    const { extractCleanTaskName } = await import('../utils/task-parser');
-    const { createSupabaseClient, op } = await import('../database/client');
-
-    const db = createSupabaseClient(this.env);
-    let dailyFailures = await getDailyFailures(db, today);
-
-    if (!dailyFailures) {
-      dailyFailures = {
-        date: today,
-        last_sync: new Date().toISOString(),
-        failed_tasks: [],
-      };
-    }
-
-    const newlyProcessed: string[] = [];
-
-    // Process batch with delays
-    for (const taskId of batchToProcess) {
-      try {
-        const task = allTasksData.find(t => t.id === taskId);
-        if (!task) {
-          console.warn(`[AutoFail] Task ${taskId} not found in cache`);
-          newlyProcessed.push(taskId); // Mark as processed anyway
-          continue;
-        }
-
-        const cleanName = extractCleanTaskName(task.content);
-
-        // Add to daily failures if not already there
-        const existingIndex = dailyFailures.failed_tasks.findIndex(f =>
-          extractCleanTaskName(f.content) === cleanName
-        );
-
-        if (existingIndex < 0) {
-          dailyFailures.failed_tasks.push({
-            id: task.id,
-            content: task.content,
-            parent_id: null,
-            parent_content: null,
-            priority: task.priority,
-            is_subtask: false,
-            description: 'Auto-failed at end of day',
-          });
-        }
-
-        // Create failure completion marker
-        const markerKey = `failure_completion_${task.id}`;
-        await db.delete('conversation_state', { chat_id: op.eq(markerKey) }).catch(() => {});
-        await db.insert('conversation_state', {
-          chat_id: markerKey,
-          conversation_type: 'failure_completion',
-          data: { taskId: task.id, taskName: task.content, autoFail: true },
-          expires_at: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
-        });
-
-        // Complete in Todoist
-        const closeResponse = await fetch(`https://api.todoist.com/rest/v3/tasks/${task.id}/close`, {
-          method: 'POST',
-          headers: { 'Authorization': `Bearer ${todoistToken}` },
-        });
-
-        if (closeResponse.ok) {
-          newlyProcessed.push(taskId);
-          console.log(`[AutoFail] ✓ ${cleanName}`);
-        } else {
-          console.error(`[AutoFail] Failed to close ${task.id}: ${closeResponse.status}`);
-        }
-
-        // Delay between tasks to avoid rate limits
-        await new Promise(resolve => setTimeout(resolve, 1000)); // 1 second between tasks
-
-      } catch (taskError) {
-        console.error(`[AutoFail] Error processing task ${taskId}:`, taskError);
-        // Don't add to processed - will retry next run
-      }
-    }
-
-    // Update processed list
-    processedIds = [...processedIds, ...newlyProcessed];
-    await this.ctx.storage.put(PROCESSED_KEY, processedIds);
-
-    // Save daily failures
-    try {
-      dailyFailures.last_sync = new Date().toISOString();
-      await upsertDailyFailures(db, dailyFailures);
-    } catch (saveError) {
-      console.error(`[AutoFail] Failed to save failures:`, saveError);
-    }
-
-    const remaining = remainingIds.length - newlyProcessed.length;
-    
-    console.log(`[AutoFail] Batch complete: ${newlyProcessed.length} processed, ${remaining} remaining`);
-
-    // ✅ KEY FIX: If more work remains, schedule next batch using Durable Object Alarm
-    if (remaining > 0) {
-      console.log(`[AutoFail] Scheduling next batch in 10 seconds...`);
-      // Schedule alarm to continue processing
-      const nextRun = Date.now() + 10000; // 10 seconds from now
-      await this.ctx.storage.setAlarm(nextRun);
-    }
-
-    return { 
-      success: true, 
-      failedCount: processedIds.length, 
-      remaining,
-      inProgress: remaining > 0
-    };
+    // Send initial notification
+    await this.sendTelegramMessage(
+      chatId,
+      botToken,
+      `🌙 بدء Autofail...\n📋 ${taskIds.length} مهمة للمعالجة`
+    );
 
   } catch (error) {
-    console.error(`[AutoFail] Error:`, error);
+    console.error(`[AutoFail] Initialization error:`, error);
     throw error;
   }
 }
@@ -1178,11 +1052,168 @@ override async alarm(): Promise<void> {
   } catch (error) {
     console.error(`[AutoFail] Alarm error:`, error);
   }
+}override async alarm(): Promise<void> {
+  console.log('[AutoFail Alarm] Triggered');
+
+  try {
+    // Find metadata (we don't know exact date)
+    const allKeys = await this.ctx.storage.list();
+    let metadata: any = null;
+    let metadataKey = '';
+    
+    for (const [key, value] of allKeys) {
+      if (typeof key === 'string' && key.startsWith('autofail_metadata_')) {
+        metadata = value;
+        metadataKey = key;
+        break;
+      }
+    }
+    
+    if (!metadata) {
+      console.log('[AutoFail Alarm] No metadata found');
+      return;
+    }
+
+    const { chatId, today, todoistToken, botToken } = metadata;
+    const QUEUE_KEY = `autofail_queue_${today}`;
+    const PROCESSED_KEY = `autofail_processed_${today}`;
+
+    // Initialize queue if not exists
+    let queue = await this.ctx.storage.get<string[]>(QUEUE_KEY);
+    if (!queue) {
+      console.log('[AutoFail Alarm] Initializing queue...');
+      await this.handleAutoFail(metadata);
+      queue = await this.ctx.storage.get<string[]>(QUEUE_KEY);
+      
+      if (!queue) {
+        console.log('[AutoFail Alarm] No queue after init, stopping');
+        return;
+      }
+      
+      // Schedule next alarm to process first task
+      await this.ctx.storage.setAlarm(Date.now() + 5000);
+      return;
+    }
+
+    // Get processed list
+    const processedIds = await this.ctx.storage.get<string[]>(PROCESSED_KEY) || [];
+    const remainingIds = queue.filter(id => !processedIds.includes(id));
+    
+    if (remainingIds.length === 0) {
+      console.log('[AutoFail Alarm] All tasks processed!');
+      
+      // Cleanup
+      await this.ctx.storage.delete(QUEUE_KEY);
+      await this.ctx.storage.delete(PROCESSED_KEY);
+      await this.ctx.storage.delete(metadataKey);
+      await this.ctx.storage.delete(`autofail_tasks_${today}`);
+      
+      // Send completion notification
+      await this.sendAutoFailNotification(chatId, botToken, processedIds.length, today);
+      return;
+    }
+
+    // Process ONE task
+    console.log(`[AutoFail Alarm] Processing task (${processedIds.length + 1}/${queue.length})`);
+    
+    const taskId = remainingIds[0];
+    const allTasksData = await this.ctx.storage.get<any[]>(`autofail_tasks_${today}`) || [];
+    const task = allTasksData.find(t => t.id === taskId);
+
+    if (!task) {
+      console.warn(`[AutoFail Alarm] Task ${taskId} not found, skipping`);
+      processedIds.push(taskId);
+      await this.ctx.storage.put(PROCESSED_KEY, processedIds);
+      await this.ctx.storage.setAlarm(Date.now() + 3000);
+      return;
+    }
+
+    // Process the task
+    const { getDailyFailures, upsertDailyFailures } = await import('../services/failure-manager');
+    const { extractCleanTaskName } = await import('../utils/task-parser');
+    const { createSupabaseClient, op } = await import('../database/client');
+
+    const db = createSupabaseClient(this.env);
+    let dailyFailures = await getDailyFailures(db, today);
+
+    if (!dailyFailures) {
+      dailyFailures = {
+        date: today,
+        last_sync: new Date().toISOString(),
+        failed_tasks: [],
+      };
+    }
+
+    const cleanName = extractCleanTaskName(task.content);
+    
+    // Add to failures
+    const existingIndex = dailyFailures.failed_tasks.findIndex(f =>
+      extractCleanTaskName(f.content) === cleanName
+    );
+
+    if (existingIndex < 0) {
+      dailyFailures.failed_tasks.push({
+        id: task.id,
+        content: task.content,
+        parent_id: null,
+        parent_content: null,
+        priority: task.priority,
+        is_subtask: false,
+        description: 'Auto-failed at end of day',
+      });
+    }
+
+    // Create marker
+    const markerKey = `failure_completion_${task.id}`;
+    await db.delete('conversation_state', { chat_id: op.eq(markerKey) }).catch(() => {});
+    await db.insert('conversation_state', {
+      chat_id: markerKey,
+      conversation_type: 'failure_completion',
+      data: { taskId: task.id, taskName: task.content, autoFail: true },
+      expires_at: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
+    });
+
+    // Complete in Todoist
+    const closeResponse = await fetch(`https://api.todoist.com/rest/v3/tasks/${task.id}/close`, {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${todoistToken}` },
+    });
+
+    if (closeResponse.ok) {
+      console.log(`[AutoFail Alarm] ✓ ${cleanName}`);
+      processedIds.push(taskId);
+      await this.ctx.storage.put(PROCESSED_KEY, processedIds);
+      
+      // Save failures
+      dailyFailures.last_sync = new Date().toISOString();
+      await upsertDailyFailures(db, dailyFailures);
+      
+      // Progress notification every 5 tasks
+      if (processedIds.length % 5 === 0 && remainingIds.length > 1) {
+        await this.sendTelegramMessage(
+          chatId,
+          botToken,
+          `⏳ Autofail: ${processedIds.length}/${queue.length} ✅`
+        );
+      }
+    } else {
+      console.error(`[AutoFail Alarm] Failed to close ${task.id}`);
+    }
+
+    // Schedule next alarm (10 seconds later)
+    await this.ctx.storage.setAlarm(Date.now() + 10000);
+
+  } catch (error) {
+    console.error('[AutoFail Alarm] Error:', error);
+    // Retry after 30 seconds on error
+    await this.ctx.storage.setAlarm(Date.now() + 30000);
+  }
 }
 
-/**
- * Helper: Send auto-fail completion notification
- */
+// ============================================
+// Helper method (add if not exists)
+// ============================================
+
 private async sendAutoFailNotification(
   chatId: string,
   botToken: string,
@@ -1191,8 +1222,8 @@ private async sendAutoFailNotification(
 ): Promise<void> {
   try {
     const message = `🌙 **تم تسجيل الإخفاقات التلقائية**\n\n` +
-      `📅 التاريخ: ${date}\n` +
-      `عدد المهام: ${count}\n\n` +
+      `📅 ${date}\n` +
+      `✅ ${count} مهمة\n\n` +
       `_تم تأجيل المهام المتكررة للموعد التالي_`;
 
     await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
@@ -1204,8 +1235,8 @@ private async sendAutoFailNotification(
         parse_mode: 'Markdown',
       }),
     });
-  } catch (notifError) {
-    console.error('Failed to send notification:', notifError);
+  } catch (error) {
+    console.error('Failed to send notification:', error);
   }
 }
 }
