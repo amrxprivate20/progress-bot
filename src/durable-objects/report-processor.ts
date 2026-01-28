@@ -1022,37 +1022,10 @@ async handleAutoFail(jobData: {
 }
 
 /**
- * ✅ NEW: Alarm handler - called automatically when alarm fires
+ * ✅ Alarm handler - called automatically when alarm fires
  * This continues autofail processing automatically
  */
 override async alarm(): Promise<void> {
-  console.log(`[AutoFail] Alarm triggered, continuing autofail...`);
-  
-  try {
-    // Get today's date
-    const { getTodayInEgypt } = await import('../utils/timezone');
-    const today = getTodayInEgypt();
-    
-    // Retrieve stored job data
-    const JOB_DATA_KEY = `autofail_jobdata_${today}`;
-    const jobData = await this.ctx.storage.get<any>(JOB_DATA_KEY);
-    
-    if (!jobData) {
-      console.log(`[AutoFail] No job data found, stopping`);
-      return;
-    }
-    
-    // Continue processing
-    const result = await this.handleAutoFail(jobData);
-    
-    console.log(`[AutoFail] Alarm batch complete: ${result.failedCount} total, ${result.remaining} remaining`);
-    
-    // If still in progress, alarm will be set again by handleAutoFail
-    
-  } catch (error) {
-    console.error(`[AutoFail] Alarm error:`, error);
-  }
-}override async alarm(): Promise<void> {
   console.log('[AutoFail Alarm] Triggered');
 
   try {
@@ -1117,12 +1090,19 @@ override async alarm(): Promise<void> {
     console.log(`[AutoFail Alarm] Processing task (${processedIds.length + 1}/${queue.length})`);
     
     const taskId = remainingIds[0];
+    // ✅ FIX: Add type guard for taskId
+    if (!taskId) {
+      console.warn('[AutoFail Alarm] taskId is undefined, skipping');
+      await this.ctx.storage.setAlarm(Date.now() + 3000);
+      return;
+    }
+    
     const allTasksData = await this.ctx.storage.get<any[]>(`autofail_tasks_${today}`) || [];
     const task = allTasksData.find(t => t.id === taskId);
 
     if (!task) {
       console.warn(`[AutoFail Alarm] Task ${taskId} not found, skipping`);
-      processedIds.push(taskId);
+      processedIds.push(taskId); // ✅ Now safe - taskId is string
       await this.ctx.storage.put(PROCESSED_KEY, processedIds);
       await this.ctx.storage.setAlarm(Date.now() + 3000);
       return;
@@ -1181,7 +1161,7 @@ override async alarm(): Promise<void> {
 
     if (closeResponse.ok) {
       console.log(`[AutoFail Alarm] ✓ ${cleanName}`);
-      processedIds.push(taskId);
+      processedIds.push(taskId); // ✅ Now safe - taskId is string
       await this.ctx.storage.put(PROCESSED_KEY, processedIds);
       
       // Save failures
