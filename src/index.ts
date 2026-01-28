@@ -719,7 +719,7 @@ function getWeekEndDate(): string {
 // Triggers Durable Object to process autofail - returns immediately
 
 /**
- * Trigger autofail - returns immediately, DO continues independently
+ * Trigger autofail - returns immediately, DO continues independently with alarms
  */
 async function handleAutoFailTrigger(
   _db: any,
@@ -746,7 +746,7 @@ async function handleAutoFailTrigger(
       return;
     }
 
-    // Use same Durable Object ID every day (so it persists)
+    // Use same Durable Object ID every day (so it persists with alarms)
     const jobId = `autofail_${today}`;
     const id = env.REPORT_PROCESSOR.idFromName(jobId);
     const stub = env.REPORT_PROCESSOR.get(id);
@@ -760,21 +760,19 @@ async function handleAutoFailTrigger(
       botToken,
     };
 
-    // ✅ Just trigger it - don't wait for response
-    // The DO will continue processing across multiple cron runs
+    // ✅ Just trigger it - alarms will handle continuation
     stub.fetch(new Request('https://fake-host/autofail', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(jobData),
     })).then(async (response) => {
-      const result = await response.json() as { success: boolean; result?: { failedCount?: number; remaining?: number } };
-      console.log(`✅ Auto-fail batch: processed=${result.result?.failedCount || 0}, remaining=${result.result?.remaining || 0}`);
+      const result = await response.json() as { success: boolean; failedCount?: number; remaining?: number; inProgress?: boolean };
+      console.log(`✅ Auto-fail started: processed=${result.failedCount || 0}, remaining=${result.remaining || 0}, continuing=${result.inProgress || false}`);
     }).catch(err => {
       console.error('❌ Auto-fail trigger error:', err);
     });
 
-    // ✅ Return immediately - DO continues independently
-    console.log(`🌙 Auto-fail triggered for ${today}`);
+    console.log(`🌙 Auto-fail triggered for ${today} (will continue via alarms)`);
 
   } catch (error) {
     console.error('❌ Auto-fail trigger error:', error);

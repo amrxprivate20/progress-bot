@@ -909,10 +909,14 @@ const aiResponse = await aiClient.generateDailyReport({
     }
   }
 
+// ============================================
+// Part 1: Durable Object Method (report-processor.ts)
+// ============================================
+
 /**
  * Handle auto-fail processing using storage-based queue
- * Processes 5 tasks per cron run to avoid subrequest limits
- * Continues automatically on next cron run via storage persistence
+ * ✅ FIXED: Continuously processes batches until complete
+ * ✅ Uses Durable Object Alarms to schedule next batch automatically
  */
 async handleAutoFail(jobData: {
   chatId: string;
@@ -931,9 +935,10 @@ async handleAutoFail(jobData: {
     botToken
   } = jobData;
 
-  const BATCH_SIZE = 3; // Ultra-conservative - only 3 tasks per run (avoids subrequest limit)
+  const BATCH_SIZE = 5; // Process 5 tasks per batch (safe for subrequest limits)
   const QUEUE_KEY = `autofail_queue_${today}`;
   const PROCESSED_KEY = `autofail_processed_${today}`;
+  const JOB_DATA_KEY = `autofail_jobdata_${today}`;
 
   try {
     // Check if we have an existing queue
@@ -943,6 +948,9 @@ async handleAutoFail(jobData: {
     // If no queue, fetch and initialize
     if (!queue) {
       console.log(`[AutoFail] Initializing queue for ${today}`);
+      
+      // Store job data for alarm callbacks
+      await this.ctx.storage.put(JOB_DATA_KEY, jobData);
       
       let url = 'https://api.todoist.com/rest/v3/tasks';
       if (todoistProjectId) {
@@ -1009,6 +1017,7 @@ async handleAutoFail(jobData: {
       await this.ctx.storage.delete(QUEUE_KEY);
       await this.ctx.storage.delete(PROCESSED_KEY);
       await this.ctx.storage.delete(`autofail_tasks_${today}`);
+      await this.ctx.storage.delete(JOB_DATA_KEY);
       
       // Send completion notification
       await this.sendAutoFailNotification(chatId, botToken, processedIds.length, today);
@@ -1018,7 +1027,7 @@ async handleAutoFail(jobData: {
 
     console.log(`[AutoFail] Processing batch: ${remainingIds.length} remaining, taking ${BATCH_SIZE}`);
 
-    // Process small batch
+    // Process batch
     const batchToProcess = remainingIds.slice(0, BATCH_SIZE);
     const allTasksData = await this.ctx.storage.get<any[]>(`autofail_tasks_${today}`) || [];
     
@@ -1117,7 +1126,14 @@ async handleAutoFail(jobData: {
     
     console.log(`[AutoFail] Batch complete: ${newlyProcessed.length} processed, ${remaining} remaining`);
 
-    // If more work remains, it will be picked up by next cron run
+    // ✅ KEY FIX: If more work remains, schedule next batch using Durable Object Alarm
+    if (remaining > 0) {
+      console.log(`[AutoFail] Scheduling next batch in 10 seconds...`);
+      // Schedule alarm to continue processing
+      const nextRun = Date.now() + 10000; // 10 seconds from now
+      await this.ctx.storage.setAlarm(nextRun);
+    }
+
     return { 
       success: true, 
       failedCount: processedIds.length, 
@@ -1130,6 +1146,40 @@ async handleAutoFail(jobData: {
     throw error;
   }
 }
+
+/**
+ * ✅ NEW: Alarm handler - called automatically when alarm fires
+ * This continues autofail processing automatically
+ */
+override async alarm(): Promise<void> {
+  console.log(`[AutoFail] Alarm triggered, continuing autofail...`);
+  
+  try {
+    // Get today's date
+    const { getTodayInEgypt } = await import('../utils/timezone');
+    const today = getTodayInEgypt();
+    
+    // Retrieve stored job data
+    const JOB_DATA_KEY = `autofail_jobdata_${today}`;
+    const jobData = await this.ctx.storage.get<any>(JOB_DATA_KEY);
+    
+    if (!jobData) {
+      console.log(`[AutoFail] No job data found, stopping`);
+      return;
+    }
+    
+    // Continue processing
+    const result = await this.handleAutoFail(jobData);
+    
+    console.log(`[AutoFail] Alarm batch complete: ${result.failedCount} total, ${result.remaining} remaining`);
+    
+    // If still in progress, alarm will be set again by handleAutoFail
+    
+  } catch (error) {
+    console.error(`[AutoFail] Alarm error:`, error);
+  }
+}
+
 /**
  * Helper: Send auto-fail completion notification
  */

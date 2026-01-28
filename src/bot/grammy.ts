@@ -3363,22 +3363,20 @@ bot.command('autofail', async (ctx) => {
       botToken,
     };
 
-    // Fire and forget - don't wait
+    // Start processing (fire and forget - alarms will handle continuation)
     stub.fetch(new Request('https://fake-host/autofail', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(jobData),
-    })).then(() => {
-      console.log(`✅ Autofail triggered for ${today}`);
-    }).catch(err => {
-      console.error('❌ Autofail trigger error:', err);
+    })).catch(err => {
+      console.error('Autofail trigger error:', err);
     });
 
     // Return immediately
     await ctx.reply(
       '✅ تم التشغيل!\n\n' +
       'المعالجة تتم في الخلفية.\n' +
-      'ستصلك إشعارات بالتقدم.'
+      'ستصلك إشعار عند الانتهاء.'
     );
 
   } catch (error) {
