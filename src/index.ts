@@ -18,6 +18,7 @@ import { getTodayInEgypt } from './utils/timezone';
 interface EnvWithDO extends Env {
   REPORT_PROCESSOR: DurableObjectNamespace; // Durable Object namespace
   SUPABASE_SERVICE_ROLE_KEY?: string; // For storage operations (bypasses RLS)
+  AUTOFAIL_SECRET?: string; // Secret for authenticating external cron requests
 }
 
 export { ReportProcessor }; // Export the Durable Object class
@@ -39,15 +40,6 @@ export default {
     const egyptHour = egyptDate.getHours();
     const egyptMinute = egyptDate.getMinutes();
     console.log(`🕐 Egypt time: ${egyptHour}:${egyptMinute.toString().padStart(2, '0')}`);
-
-    // ============================================
-// AUTO-FAIL: Run at 11:50 PM Egypt time
-// ============================================
-if (egyptHour === 23 && egyptMinute >= 45) {
-    // ✅ DON'T use waitUntil - just call it directly and return
-    // The Durable Object will continue running independently
-    await handleAutoFailTrigger(db, settings, env);
-  }
 
     // ============================================
     // AUTO-COACH: Run every 30 minutes
@@ -270,6 +262,27 @@ if (egyptHour === 23 && egyptMinute >= 45) {
             headers: { 'Content-Type': 'application/json' },
           }
         );
+      }
+
+      // ============================================
+      // AUTO-FAIL API ENDPOINTS
+      // ============================================
+      if (path === '/api/autofail/init' && request.method === 'POST') {
+        return asyncHandler(async () => {
+          return await handleAutoFailInit(request, env, db, settings);
+        })(request, env, ctx);
+      }
+
+      if (path === '/api/autofail/process' && request.method === 'POST') {
+        return asyncHandler(async () => {
+          return await handleAutoFailProcess(request, env, db, settings);
+        })(request, env, ctx);
+      }
+
+      if (path === '/api/autofail/cleanup' && request.method === 'POST') {
+        return asyncHandler(async () => {
+          return await handleAutoFailCleanup(request, env, db);
+        })(request, env, ctx);
       }
 
       // ============================================
@@ -714,67 +727,191 @@ function getWeekEndDate(): string {
 }
 
 // ============================================
-// Auto-Fail Trigger
+// Auto-Fail HTTP Handlers (External Cron)
 // ============================================
-// Triggers Durable Object to process autofail - returns immediately
 
 /**
- * Trigger autofail - returns immediately, DO continues independently with alarms
+ * Initialize auto-fail: fetch tasks and queue them
  */
-async function handleAutoFailTrigger(
-  _db: any,
-  settings: SettingsManager,
-  env: EnvWithDO
-): Promise<void> {
-  try {
-    const autoFailEnabled = await settings.get('auto_fail_enabled');
-    if (autoFailEnabled !== 'true') {
-      console.log('⏭️ Auto-fail skipped: feature disabled');
-      return;
-    }
+async function handleAutoFailInit(
+  request: Request,
+  env: EnvWithDO,
+  db: any,
+  settings: SettingsManager
+): Promise<Response> {
+  // Authenticate
+  const authHeader = request.headers.get('Authorization');
+  if (!env.AUTOFAIL_SECRET || authHeader !== `Bearer ${env.AUTOFAIL_SECRET}`) {
+    return new Response('Unauthorized', { status: 401 });
+  }
 
-    const today = getTodayInEgypt();
-    const todoistToken = await settings.get('todoist_api_token');
-    const todoistProjectId = await settings.get('todoist_project_id');
-    const chatId = env.TELEGRAM_CHAT_ID || await settings.get('telegram_chat_id');
-    const botToken = env.TELEGRAM_BOT_TOKEN;
-    const priorityThresholdStr = await settings.get('failure_priority_threshold');
-    const priorityThreshold = priorityThresholdStr ? parseInt(priorityThresholdStr, 10) : 2;
+  const today = getTodayInEgypt();
+  const todoistToken = await settings.get('todoist_api_token');
+  const todoistProjectId = await settings.get('todoist_project_id');
+  const priorityThresholdStr = await settings.get('failure_priority_threshold');
+  const priorityThreshold = priorityThresholdStr ? parseInt(priorityThresholdStr, 10) : 2;
+  const chatId = env.TELEGRAM_CHAT_ID || await settings.get('telegram_chat_id');
+  const botToken = env.TELEGRAM_BOT_TOKEN;
 
-    if (!todoistToken || !chatId) {
-      console.log('⏭️ Auto-fail skipped: missing config');
-      return;
-    }
+  if (!todoistToken || !chatId) {
+    return new Response(
+      JSON.stringify({ success: false, error: 'Missing configuration' }),
+      { status: 400, headers: { 'Content-Type': 'application/json' } }
+    );
+  }
 
-    // Use same Durable Object ID every day (so it persists with alarms)
-    const jobId = `autofail_${today}`;
-    const id = env.REPORT_PROCESSOR.idFromName(jobId);
-    const stub = env.REPORT_PROCESSOR.get(id);
+  // Check if already processing
+  const jobId = `autofail_${today}`;
+  const id = env.REPORT_PROCESSOR.idFromName(jobId);
+  const stub = env.REPORT_PROCESSOR.get(id);
+  
+  const existingQueue = await stub.fetch(new Request('https://fake-host/autofail/check-queue', {
+    method: 'POST',
+    body: JSON.stringify({ today }),
+  }));
+  const queueData = await existingQueue.json() as { exists: boolean };
+  
+  if (queueData.exists) {
+    return new Response(
+      JSON.stringify({ success: false, error: 'Already processing' }),
+      { status: 409, headers: { 'Content-Type': 'application/json' } }
+    );
+  }
 
-    const jobData = {
-      chatId,
-      today,
-      todoistToken: todoistToken.trim(),
-      todoistProjectId: todoistProjectId?.trim(),
-      priorityThreshold,
-      botToken,
-    };
+  // Fetch tasks from Todoist
+  let url = 'https://api.todoist.com/rest/v3/tasks';
+  if (todoistProjectId) {
+    url += `?project_id=${todoistProjectId.trim()}`;
+  }
 
-    // ✅ Just trigger it - alarms will handle continuation
-    stub.fetch(new Request('https://fake-host/autofail', {
+  const tasksResponse = await fetch(url, {
+    headers: { 'Authorization': `Bearer ${todoistToken.trim()}` },
+  });
+
+  if (!tasksResponse.ok) {
+    return new Response(
+      JSON.stringify({ success: false, error: `Todoist API error: ${tasksResponse.status}` }),
+      { status: 500, headers: { 'Content-Type': 'application/json' } }
+    );
+  }
+
+  const allTasks = await tasksResponse.json() as Array<{
+    id: string;
+    content: string;
+    priority: number;
+    due?: { date: string; is_recurring?: boolean } | null;
+  }>;
+
+  // Filter tasks
+  const tasksDueToday = allTasks.filter(task => {
+    if (!task.due?.date) return false;
+    const dueDate = task.due.date.split('T')[0];
+    return dueDate && dueDate <= today;
+  });
+
+  const filteredTasks = tasksDueToday.filter(task => {
+    const ourPriority = 5 - (task.priority || 1);
+    return ourPriority <= priorityThreshold;
+  });
+
+  if (filteredTasks.length === 0) {
+    // Send message to user
+    await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(jobData),
-    })).then(async (response) => {
-      const result = await response.json() as { success: boolean; failedCount?: number; remaining?: number; inProgress?: boolean };
-      console.log(`✅ Auto-fail started: processed=${result.failedCount || 0}, remaining=${result.remaining || 0}, continuing=${result.inProgress || false}`);
-    }).catch(err => {
-      console.error('❌ Auto-fail trigger error:', err);
+      body: JSON.stringify({
+        chat_id: chatId,
+        text: '✅ لا توجد مهام للتسجيل كفاشلة',
+      }),
     });
 
-    console.log(`🌙 Auto-fail triggered for ${today} (will continue via alarms)`);
-
-  } catch (error) {
-    console.error('❌ Auto-fail trigger error:', error);
+    return new Response(
+      JSON.stringify({ success: true, totalTasks: 0, message: 'No tasks to process' }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } }
+    );
   }
+
+  // Store in Durable Object
+  await stub.fetch(new Request('https://fake-host/autofail/init-queue', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      today,
+      taskIds: filteredTasks.map(t => t.id),
+      tasks: filteredTasks,
+      metadata: { chatId, todoistToken: todoistToken.trim(), botToken, totalTasks: filteredTasks.length },
+    }),
+  }));
+
+  // Send notification
+  await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      chat_id: chatId,
+      text: `🌙 Auto-fail initialized\n📋 ${filteredTasks.length} tasks queued`,
+    }),
+  });
+
+  return new Response(
+    JSON.stringify({ success: true, totalTasks: filteredTasks.length, jobId }),
+    { status: 200, headers: { 'Content-Type': 'application/json' } }
+  );
+}
+
+/**
+ * Process one batch of auto-fail tasks
+ */
+async function handleAutoFailProcess(
+  request: Request,
+  env: EnvWithDO,
+  _db: any,
+  _settings: SettingsManager
+): Promise<Response> {
+  // Authenticate
+  const authHeader = request.headers.get('Authorization');
+  if (!env.AUTOFAIL_SECRET || authHeader !== `Bearer ${env.AUTOFAIL_SECRET}`) {
+    return new Response('Unauthorized', { status: 401 });
+  }
+
+  const today = getTodayInEgypt();
+  const jobId = `autofail_${today}`;
+  const id = env.REPORT_PROCESSOR.idFromName(jobId);
+  const stub = env.REPORT_PROCESSOR.get(id);
+
+  // Process batch in Durable Object
+  const response = await stub.fetch(new Request('https://fake-host/autofail/process-batch', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ today, db: env.SUPABASE_URL }),
+  }));
+
+  return response; // Forward response from Durable Object
+}
+
+async function handleAutoFailCleanup(
+  request: Request,
+  env: EnvWithDO,
+  _db: any
+): Promise<Response> {
+  // Authenticate
+  const authHeader = request.headers.get('Authorization');
+  if (!env.AUTOFAIL_SECRET || authHeader !== `Bearer ${env.AUTOFAIL_SECRET}`) {
+    return new Response('Unauthorized', { status: 401 });
+  }
+
+  const today = getTodayInEgypt();
+  const jobId = `autofail_${today}`;
+  const id = env.REPORT_PROCESSOR.idFromName(jobId);
+  const stub = env.REPORT_PROCESSOR.get(id);
+
+  await stub.fetch(new Request('https://fake-host/autofail/cleanup', {
+    method: 'POST',
+    body: JSON.stringify({ today }),
+  }));
+
+  return new Response(
+    JSON.stringify({ success: true }),
+    { headers: { 'Content-Type': 'application/json' } }
+  );
 }

@@ -3330,54 +3330,40 @@ bot.command('autofail', async (ctx) => {
     // Idempotency check
     if (!(await checkCoachIdempotency(ctx, 'autofail'))) return;
 
-    const chatId = ctx.chat?.id.toString() || '';
-    
-    // Quick acknowledgment
-    await ctx.reply('🌙 تشغيل Autofail...');
+    await ctx.reply('🌙 Starting auto-fail...');
 
-    // Get minimal settings
-    const todoistToken = await ctx.settings.get('todoist_api_token');
-    const todoistProjectId = await ctx.settings.get('todoist_project_id');
-    const priorityThresholdStr = await ctx.settings.get('failure_priority_threshold');
-    const priorityThreshold = priorityThresholdStr ? parseInt(priorityThresholdStr, 10) : 2;
-    const botToken = ctx.env.TELEGRAM_BOT_TOKEN;
+    // Get the worker URL from settings or construct from request
+    const autofailSecret = await ctx.settings.get('autofail_secret');
     
-    if (!todoistToken) {
-      await ctx.reply('❌ لم يتم تكوين مفتاح Todoist');
+    if (!autofailSecret) {
+      await ctx.reply('❌ Auto-fail secret not configured in settings');
       return;
     }
 
-    const today = getTodayInEgypt();
+    // Call the worker's own init endpoint
+    // Note: This assumes the worker is accessible at the same domain
+    // If not, you'll need to store the worker URL in settings
+    const workerUrl = await ctx.settings.get('worker_url') || 'https://progress-bot.your-subdomain.workers.dev';
 
-    // ✅ Trigger Durable Object immediately
-    const jobId = `autofail_${today}`;
-    const id = ctx.reportProcessorNamespace.idFromName(jobId);
-    const stub = ctx.reportProcessorNamespace.get(id);
-
-    const jobData = {
-      chatId,
-      today,
-      todoistToken: todoistToken.trim(),
-      todoistProjectId: todoistProjectId?.trim(),
-      priorityThreshold,
-      botToken,
-    };
-
-    // Start processing (fire and forget - alarms will handle continuation)
-    stub.fetch(new Request('https://fake-host/autofail', {
+    const response = await fetch(`${workerUrl}/api/autofail/init`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(jobData),
-    })).catch(err => {
-      console.error('Autofail trigger error:', err);
+      headers: {
+        'Authorization': `Bearer ${autofailSecret}`,
+        'Content-Type': 'application/json',
+      },
     });
 
-    // Return immediately
-    await ctx.reply(
-      '✅ تم التشغيل!\n\n' +
-      'المعالجة تتم في الخلفية.\n' +
-      'ستصلك إشعار عند الانتهاء.'
-    );
+    const result = await response.json() as { success: boolean; totalTasks?: number; error?: string };
+
+    if (result.success) {
+      await ctx.reply(
+        `✅ Processing started!\n\n` +
+        `📋 ${result.totalTasks || 0} tasks queued\n\n` +
+        `You'll get progress updates every 20 tasks and a completion notification.`
+      );
+    } else {
+      await ctx.reply(`❌ ${result.error || 'Failed to start auto-fail'}`);
+    }
 
   } catch (error) {
     console.error('Autofail command error:', error);

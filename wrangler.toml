@@ -48,6 +48,7 @@ vars = { ENVIRONMENT = "development" }
 # ============================================
 [env.production]
 vars = { ENVIRONMENT = "production" }
+AUTOFAIL_SECRET = "R3mTq7kV8P1YwFJxZC2H9N0eKQbU6L4aS5oD+MciXg="
 
 # ============================================
 # Compatibility settings
@@ -59,4 +60,4 @@ compatibility_flags = ["nodejs_compat"]
 # ============================================
 # Auto-coach check-ins run every 30 minutes
 [triggers]
-crons = ["*/30 * * * *", "50 21 * * *", "50 20 * * *"]
+crons = ["*/30 * * * *"]
