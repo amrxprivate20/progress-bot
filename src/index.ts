@@ -809,10 +809,40 @@ async function handleAutoFailInit(
     return dueDate && dueDate <= today;
   });
 
-  const filteredTasks = tasksDueToday.filter(task => {
-    const ourPriority = 5 - (task.priority || 1);
-    return ourPriority <= priorityThreshold;
-  });
+// Split tasks: high-priority (track failures) vs low-priority (just complete)
+const highPriorityTasks = tasksDueToday.filter(task => {
+  const ourPriority = 5 - (task.priority || 1);
+  return ourPriority <= priorityThreshold;
+});
+
+const lowPriorityTasks = tasksDueToday.filter(task => {
+  const ourPriority = 5 - (task.priority || 1);
+  return ourPriority > priorityThreshold;
+});
+
+const allTasksToComplete = [...highPriorityTasks, ...lowPriorityTasks];
+
+if (allTasksToComplete.length === 0) {
+  // ... (no tasks message)
+}
+
+// Store BOTH lists in metadata
+await stub.fetch(new Request('https://fake-host/autofail/init-queue', {
+  method: 'POST',
+  body: JSON.stringify({
+    today,
+    taskIds: allTasksToComplete.map(t => t.id),
+    tasks: allTasksToComplete,
+    metadata: { 
+      chatId, 
+      todoistToken: todoistToken.trim(), 
+      botToken, 
+      totalTasks: allTasksToComplete.length,
+      priorityThreshold, // ADD THIS
+      highPriorityIds: highPriorityTasks.map(t => t.id), // ADD THIS
+    },
+  }),
+}));
 
   if (filteredTasks.length === 0) {
     // Send message to user

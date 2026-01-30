@@ -3340,20 +3340,110 @@ bot.command('autofail', async (ctx) => {
       return;
     }
 
-    // Call the worker's own init endpoint
-    // Note: This assumes the worker is accessible at the same domain
-    // If not, you'll need to store the worker URL in settings
-    const workerUrl = await ctx.settings.get('worker_url') || 'https://progress-bot.your-subdomain.workers.dev';
+    // Don't call HTTP endpoint - use Durable Object directly
+const today = getTodayInEgypt();
+const todoistToken = await ctx.settings.get('todoist_api_token');
+const todoistProjectId = await ctx.settings.get('todoist_project_id');
+const priorityThresholdStr = await ctx.settings.get('failure_priority_threshold');
+const priorityThreshold = priorityThresholdStr ? parseInt(priorityThresholdStr, 10) : 2;
+const botToken = ctx.env.TELEGRAM_BOT_TOKEN;
 
-    const response = await fetch(`${workerUrl}/api/autofail/init`, {
+if (!todoistToken) {
+  await ctx.reply('❌ Todoist API token not configured');
+  return;
+}
+
+// Fetch tasks from Todoist
+let url = 'https://api.todoist.com/rest/v3/tasks';
+if (todoistProjectId) {
+  url += `?project_id=${todoistProjectId.trim()}`;
+}
+
+const tasksResponse = await fetch(url, {
+  headers: { 'Authorization': `Bearer ${todoistToken.trim()}` },
+});
+
+if (!tasksResponse.ok) {
+  await ctx.reply(`❌ Failed to fetch tasks from Todoist: ${tasksResponse.status}`);
+  return;
+}
+
+const allTasks = await tasksResponse.json() as Array<{
+  id: string;
+  content: string;
+  priority: number;
+  due?: { date: string; is_recurring?: boolean } | null;
+}>;
+
+// Filter tasks due today
+const tasksDueToday = allTasks.filter(task => {
+  if (!task.due?.date) return false;
+  const dueDate = task.due.date.split('T')[0];
+  return dueDate && dueDate <= today;
+});
+
+// Split by priority
+const highPriorityTasks = tasksDueToday.filter(task => {
+  const ourPriority = 5 - (task.priority || 1);
+  return ourPriority <= priorityThreshold;
+});
+
+const lowPriorityTasks = tasksDueToday.filter(task => {
+  const ourPriority = 5 - (task.priority || 1);
+  return ourPriority > priorityThreshold;
+});
+
+const allTasksToComplete = [...highPriorityTasks, ...lowPriorityTasks];
+
+if (allTasksToComplete.length === 0) {
+  await ctx.reply('✅ No tasks to auto-fail!');
+  return;
+}
+
+// Initialize queue in Durable Object
+const jobId = `autofail_${today}`;
+const id = ctx.reportProcessorNamespace.idFromName(jobId);
+const stub = ctx.reportProcessorNamespace.get(id);
+
+await stub.fetch(new Request('https://fake-host/autofail/init-queue', {
+  method: 'POST',
+  body: JSON.stringify({
+    today,
+    taskIds: allTasksToComplete.map(t => t.id),
+    tasks: allTasksToComplete,
+    metadata: { 
+      chatId, 
+      todoistToken: todoistToken.trim(), 
+      botToken, 
+      totalTasks: allTasksToComplete.length,
+      priorityThreshold,
+      highPriorityIds: highPriorityTasks.map(t => t.id),
+    },
+  }),
+}));
+
+await ctx.reply(
+  `✅ Processing started!\n\n` +
+  `📋 ${allTasksToComplete.length} tasks (${highPriorityTasks.length} tracked)\n\n` +
+  `Progress updates every 20 tasks.`
+);
+
+// Process in background
+const backgroundTask = (async () => {
+  // Process batches until complete
+  while (true) {
+    const result = await stub.fetch(new Request('https://fake-host/autofail/process-batch', {
       method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${autofailSecret}`,
-        'Content-Type': 'application/json',
-      },
-    });
+    }));
+    const data = await result.json() as { complete: boolean };
+    if (data.complete) break;
+    await new Promise(r => setTimeout(r, 2000)); // 2s delay between batches
+  }
+})();
 
-    const result = await response.json() as { success: boolean; totalTasks?: number; error?: string };
+if (ctx.executionContext?.waitUntil) {
+  ctx.executionContext.waitUntil(backgroundTask);
+}
 
     if (result.success) {
       await ctx.reply(

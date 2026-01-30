@@ -610,6 +610,108 @@ const aiResponse = await aiClient.generateDailyReport({
       };
 
       console.log(`🎉 [Job ${jobId}] Processing complete!`);
+	// ✅ NEW: Auto-trigger autofail if report saved on same day before midnight
+const reportDate = reportData.date;
+const egyptNow = new Date().toLocaleString('en-US', { timeZone: 'Africa/Cairo' });
+const egyptToday = new Date(egyptNow).toISOString().split('T')[0];
+
+if (reportDate === egyptToday) {
+  console.log(`✅ Same-day report (${reportDate}) - triggering auto-fail`);
+  
+  // Trigger auto-fail in background (don't await)
+  this.ctx.waitUntil((async () => {
+    try {
+      const todoistToken = await settings.get('todoist_api_token');
+      const todoistProjectId = await settings.get('todoist_project_id');
+      const priorityThresholdStr = await settings.get('failure_priority_threshold');
+      const priorityThreshold = priorityThresholdStr ? parseInt(priorityThresholdStr, 10) : 2;
+
+      if (!todoistToken) return;
+
+      // Fetch tasks
+      let url = 'https://api.todoist.com/rest/v3/tasks';
+      if (todoistProjectId) url += `?project_id=${todoistProjectId.trim()}`;
+
+      const tasksResponse = await fetch(url, {
+        headers: { 'Authorization': `Bearer ${todoistToken.trim()}` },
+      });
+
+      if (!tasksResponse.ok) return;
+
+      const allTasks = await tasksResponse.json() as Array<{
+        id: string; content: string; priority: number;
+        due?: { date: string } | null;
+      }>;
+
+      const tasksDueToday = allTasks.filter(task => {
+        if (!task.due?.date) return false;
+        const dueDate = task.due.date.split('T')[0];
+        return dueDate && dueDate <= reportDate;
+      });
+
+      const highPriorityTasks = tasksDueToday.filter(task => {
+        const ourPriority = 5 - (task.priority || 1);
+        return ourPriority <= priorityThreshold;
+      });
+
+      const lowPriorityTasks = tasksDueToday.filter(task => {
+        const ourPriority = 5 - (task.priority || 1);
+        return ourPriority > priorityThreshold;
+      });
+
+      const allTasksToComplete = [...highPriorityTasks, ...lowPriorityTasks];
+      if (allTasksToComplete.length === 0) return;
+
+      // Get or create autofail DO
+      const jobId = `autofail_${reportDate}`;
+      const id = this.env.REPORT_PROCESSOR.idFromName(jobId);
+      const stub = this.env.REPORT_PROCESSOR.get(id);
+
+      // Check if already processing
+      const queueCheck = await stub.fetch(new Request('https://fake-host/autofail/check-queue', {
+        method: 'POST',
+        body: JSON.stringify({ today: reportDate }),
+      }));
+      const queueData = await queueCheck.json() as { exists: boolean };
+      if (queueData.exists) return; // Already processing
+
+      // Initialize queue
+      await stub.fetch(new Request('https://fake-host/autofail/init-queue', {
+        method: 'POST',
+        body: JSON.stringify({
+          today: reportDate,
+          taskIds: allTasksToComplete.map(t => t.id),
+          tasks: allTasksToComplete,
+          metadata: {
+            chatId,
+            todoistToken: todoistToken.trim(),
+            botToken,
+            totalTasks: allTasksToComplete.length,
+            priorityThreshold,
+            highPriorityIds: highPriorityTasks.map(t => t.id),
+          },
+        }),
+      }));
+
+      console.log(`🌙 Auto-fail triggered: ${allTasksToComplete.length} tasks`);
+
+      // Process batches
+      while (true) {
+        const result = await stub.fetch(new Request('https://fake-host/autofail/process-batch', {
+          method: 'POST',
+        }));
+        const data = await result.json() as { complete: boolean };
+        if (data.complete) break;
+        await new Promise(r => setTimeout(r, 2000));
+      }
+    } catch (error) {
+      console.error('Auto-fail trigger error:', error);
+    }
+  })());
+} else {
+  console.log(`⏭️ Different-day report (${reportDate} vs ${egyptToday}) - skipping auto-fail`);
+}
+
 
     } catch (error) {
       console.error(`💥 [Job ${jobId}] Error:`, error);
@@ -945,7 +1047,7 @@ const aiResponse = await aiClient.generateDailyReport({
     // Import getTodayInEgypt
     const { getTodayInEgypt } = await import('../utils/timezone');
     const today = getTodayInEgypt();
-    const BATCH_SIZE = 20;
+    const BATCH_SIZE = 4;
 
     // Load state
     const queue = await this.ctx.storage.get<string[]>(`autofail_queue_${today}`);
@@ -1007,25 +1109,30 @@ const aiResponse = await aiClient.generateDailyReport({
 
         const cleanName = extractCleanTaskName(task.content);
 
-        // Add to failures JSON
-        const existingIndex = dailyFailures.failed_tasks.findIndex(f =>
-          extractCleanTaskName(f.content) === cleanName
-        );
+        // Get metadata to check priority
+const highPriorityIds = new Set(metadata.highPriorityIds || []);
 
-        if (existingIndex < 0) {
-          dailyFailures.failed_tasks.push({
-            id: task.id,
-            content: task.content,
-            parent_id: null,
-            parent_content: null,
-            priority: task.priority,
-            is_subtask: false,
-            description: 'Auto-failed at end of day',
-          });
-        }
+// Only add to failures JSON if high priority
+if (highPriorityIds.has(task.id)) {
+  const existingIndex = dailyFailures.failed_tasks.findIndex(f =>
+    extractCleanTaskName(f.content) === cleanName
+  );
 
-        // Create failure completion marker
-        const markerKey = `failure_completion_${task.id}`;
+  if (existingIndex < 0) {
+    dailyFailures.failed_tasks.push({
+      id: task.id,
+      content: task.content,
+      parent_id: null,
+      parent_content: null,
+      priority: task.priority,
+      is_subtask: false,
+      description: 'Auto-failed at end of day',
+    });
+  }
+}
+
+	// Create failure completion marker (for ALL tasks)
+	const markerKey = `failure_completion_${task.id}`;
         await db.delete('conversation_state', { chat_id: op.eq(markerKey) }).catch(() => {});
         await db.insert('conversation_state', {
           chat_id: markerKey,
