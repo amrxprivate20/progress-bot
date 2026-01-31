@@ -281,7 +281,7 @@ export default {
 
       if (path === '/api/autofail/cleanup' && request.method === 'POST') {
         return asyncHandler(async () => {
-          return await handleAutoFailCleanup(request, env, db);
+          return await handleAutoFailCleanup(request, env);
         })(request, env, ctx);
       }
 
@@ -731,12 +731,13 @@ function getWeekEndDate(): string {
 // ============================================
 
 /**
- * Initialize auto-fail: fetch tasks and queue them
+ * Initialize auto-fail: fetch tasks from Todoist, filter due today,
+ * split by priority, queue them in Durable Object if any exist
  */
 async function handleAutoFailInit(
   request: Request,
   env: EnvWithDO,
-  db: any,
+  _db: any,
   settings: SettingsManager
 ): Promise<Response> {
   // Authenticate
@@ -764,13 +765,13 @@ async function handleAutoFailInit(
   const jobId = `autofail_${today}`;
   const id = env.REPORT_PROCESSOR.idFromName(jobId);
   const stub = env.REPORT_PROCESSOR.get(id);
-  
+
   const existingQueue = await stub.fetch(new Request('https://fake-host/autofail/check-queue', {
     method: 'POST',
     body: JSON.stringify({ today }),
   }));
   const queueData = await existingQueue.json() as { exists: boolean };
-  
+
   if (queueData.exists) {
     return new Response(
       JSON.stringify({ success: false, error: 'Already processing' }),
@@ -802,50 +803,28 @@ async function handleAutoFailInit(
     due?: { date: string; is_recurring?: boolean } | null;
   }>;
 
-  // Filter tasks
+  // Filter tasks due today or earlier
   const tasksDueToday = allTasks.filter(task => {
     if (!task.due?.date) return false;
     const dueDate = task.due.date.split('T')[0];
     return dueDate && dueDate <= today;
   });
 
-// Split tasks: high-priority (track failures) vs low-priority (just complete)
-const highPriorityTasks = tasksDueToday.filter(task => {
-  const ourPriority = 5 - (task.priority || 1);
-  return ourPriority <= priorityThreshold;
-});
+  // Split tasks: high-priority (track failures) vs low-priority (just complete)
+  const highPriorityTasks = tasksDueToday.filter(task => {
+    const ourPriority = 5 - (task.priority || 1);
+    return ourPriority <= priorityThreshold;
+  });
 
-const lowPriorityTasks = tasksDueToday.filter(task => {
-  const ourPriority = 5 - (task.priority || 1);
-  return ourPriority > priorityThreshold;
-});
+  const lowPriorityTasks = tasksDueToday.filter(task => {
+    const ourPriority = 5 - (task.priority || 1);
+    return ourPriority > priorityThreshold;
+  });
 
-const allTasksToComplete = [...highPriorityTasks, ...lowPriorityTasks];
+  const allTasksToComplete = [...highPriorityTasks, ...lowPriorityTasks];
 
-if (allTasksToComplete.length === 0) {
-  // ... (no tasks message)
-}
-
-// Store BOTH lists in metadata
-await stub.fetch(new Request('https://fake-host/autofail/init-queue', {
-  method: 'POST',
-  body: JSON.stringify({
-    today,
-    taskIds: allTasksToComplete.map(t => t.id),
-    tasks: allTasksToComplete,
-    metadata: { 
-      chatId, 
-      todoistToken: todoistToken.trim(), 
-      botToken, 
-      totalTasks: allTasksToComplete.length,
-      priorityThreshold, // ADD THIS
-      highPriorityIds: highPriorityTasks.map(t => t.id), // ADD THIS
-    },
-  }),
-}));
-
-  if (filteredTasks.length === 0) {
-    // Send message to user
+  // ── Early exit when no tasks to process ───────────────────────────────
+  if (allTasksToComplete.length === 0) {
     await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -861,30 +840,38 @@ await stub.fetch(new Request('https://fake-host/autofail/init-queue', {
     );
   }
 
-  // Store in Durable Object
+  // ── Initialize queue in Durable Object ───────────────────────────────
   await stub.fetch(new Request('https://fake-host/autofail/init-queue', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       today,
-      taskIds: filteredTasks.map(t => t.id),
-      tasks: filteredTasks,
-      metadata: { chatId, todoistToken: todoistToken.trim(), botToken, totalTasks: filteredTasks.length },
+      taskIds: allTasksToComplete.map(t => t.id),
+      tasks: allTasksToComplete,
+      metadata: {
+        chatId,
+        todoistToken: todoistToken.trim(),
+        botToken,
+        totalTasks: allTasksToComplete.length,
+        priorityThreshold,
+        highPriorityIds: highPriorityTasks.map(t => t.id),
+      },
     }),
   }));
 
-  // Send notification
+  // ── Notify user that auto-fail has started ────────────────────────────
   await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       chat_id: chatId,
-      text: `🌙 Auto-fail initialized\n📋 ${filteredTasks.length} tasks queued`,
+      text: `🌙 Auto-fail initialized\n📋 ${allTasksToComplete.length} tasks queued`,
     }),
   });
 
+  // ── Success response ──────────────────────────────────────────────────
   return new Response(
-    JSON.stringify({ success: true, totalTasks: filteredTasks.length, jobId }),
+    JSON.stringify({ success: true, totalTasks: allTasksToComplete.length, jobId }),
     { status: 200, headers: { 'Content-Type': 'application/json' } }
   );
 }
@@ -922,7 +909,6 @@ async function handleAutoFailProcess(
 async function handleAutoFailCleanup(
   request: Request,
   env: EnvWithDO,
-  _db: any
 ): Promise<Response> {
   // Authenticate
   const authHeader = request.headers.get('Authorization');

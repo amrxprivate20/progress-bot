@@ -664,7 +664,7 @@ if (reportDate === egyptToday) {
 
       // Get or create autofail DO
       const jobId = `autofail_${reportDate}`;
-      const id = this.env.REPORT_PROCESSOR.idFromName(jobId);
+      const id   = this.env.REPORT_PROCESSOR.idFromName(jobId);
       const stub = this.env.REPORT_PROCESSOR.get(id);
 
       // Check if already processing

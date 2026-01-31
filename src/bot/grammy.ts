@@ -3405,6 +3405,8 @@ const jobId = `autofail_${today}`;
 const id = ctx.reportProcessorNamespace.idFromName(jobId);
 const stub = ctx.reportProcessorNamespace.get(id);
 
+const chatId = ctx.chat?.id.toString() || ''; // ADD THIS LINE
+
 await stub.fetch(new Request('https://fake-host/autofail/init-queue', {
   method: 'POST',
   body: JSON.stringify({
@@ -3412,7 +3414,7 @@ await stub.fetch(new Request('https://fake-host/autofail/init-queue', {
     taskIds: allTasksToComplete.map(t => t.id),
     tasks: allTasksToComplete,
     metadata: { 
-      chatId, 
+      chatId, // Now defined above
       todoistToken: todoistToken.trim(), 
       botToken, 
       totalTasks: allTasksToComplete.length,
@@ -3430,30 +3432,19 @@ await ctx.reply(
 
 // Process in background
 const backgroundTask = (async () => {
-  // Process batches until complete
   while (true) {
     const result = await stub.fetch(new Request('https://fake-host/autofail/process-batch', {
       method: 'POST',
     }));
     const data = await result.json() as { complete: boolean };
     if (data.complete) break;
-    await new Promise(r => setTimeout(r, 2000)); // 2s delay between batches
+    await new Promise(r => setTimeout(r, 2000));
   }
 })();
 
 if (ctx.executionContext?.waitUntil) {
   ctx.executionContext.waitUntil(backgroundTask);
 }
-
-    if (result.success) {
-      await ctx.reply(
-        `✅ Processing started!\n\n` +
-        `📋 ${result.totalTasks || 0} tasks queued\n\n` +
-        `You'll get progress updates every 20 tasks and a completion notification.`
-      );
-    } else {
-      await ctx.reply(`❌ ${result.error || 'Failed to start auto-fail'}`);
-    }
 
   } catch (error) {
     console.error('Autofail command error:', error);
