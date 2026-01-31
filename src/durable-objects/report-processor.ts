@@ -12,8 +12,22 @@ import { createReportGenerator } from '../services/report-generator';
 import { createUnifiedAIClient } from '../services/ai-client';
 import { createMemoryManager } from '../services/memory-manager';
 import { createDriveService } from '../services/google-drive';
-import type { Env } from '../types';
 import { createDebugLogger } from '../utils/debug-logger';
+
+// ============================================
+// Extended Env with Durable Object binding
+// ============================================
+
+interface EnvWithDO {
+  SUPABASE_URL: string;
+  SUPABASE_ANON_KEY: string;
+  TELEGRAM_BOT_TOKEN: string;
+  TELEGRAM_CHAT_ID: string;
+  TODOIST_API_TOKEN: string;
+  REPORT_PROCESSOR: DurableObjectNamespace;
+  SUPABASE_SERVICE_ROLE_KEY?: string;
+  AUTOFAIL_SECRET?: string;
+}
 
 // ============================================
 // Types
@@ -44,12 +58,12 @@ export interface JobStatus {
 // Report Processor Durable Object
 // ============================================
 
-export class ReportProcessor extends DurableObject<Env> {
+export class ReportProcessor extends DurableObject<EnvWithDO> {
   private status: JobStatus = {
     status: 'pending',
     progress: 'في قائمة الانتظار...',
   };
-
+  
   /**
    * Handle HTTP requests to this Durable Object
    */
@@ -610,13 +624,15 @@ const aiResponse = await aiClient.generateDailyReport({
       };
 
       console.log(`🎉 [Job ${jobId}] Processing complete!`);
-	// ✅ NEW: Auto-trigger autofail if report saved on same day before midnight
+	// ✅ Auto-trigger autofail if report saved on same day (earlier trigger at 11 PM Egypt time)
 const reportDate = reportData.date;
 const egyptNow = new Date().toLocaleString('en-US', { timeZone: 'Africa/Cairo' });
 const egyptToday = new Date(egyptNow).toISOString().split('T')[0];
+const egyptHour = new Date(egyptNow).getHours();
 
-if (reportDate === egyptToday) {
-  console.log(`✅ Same-day report (${reportDate}) - triggering auto-fail`);
+// Trigger if: same day AND after 11 PM Egypt time (23:00)
+if (reportDate === egyptToday && egyptHour >= 23) {
+  console.log(`✅ Same-day report (${reportDate}) after 11 PM - triggering auto-fail`);
   
   // Trigger auto-fail in background (don't await)
   this.ctx.waitUntil((async () => {
@@ -662,9 +678,9 @@ if (reportDate === egyptToday) {
       const allTasksToComplete = [...highPriorityTasks, ...lowPriorityTasks];
       if (allTasksToComplete.length === 0) return;
 
-      // Get or create autofail DO
+      // ✅ FIX: Use this.ctx.env instead of this.env
       const jobId = `autofail_${reportDate}`;
-      const id   = this.env.REPORT_PROCESSOR.idFromName(jobId);
+      const id = this.env.REPORT_PROCESSOR.idFromName(jobId);
       const stub = this.env.REPORT_PROCESSOR.get(id);
 
       // Check if already processing
@@ -708,11 +724,11 @@ if (reportDate === egyptToday) {
       console.error('Auto-fail trigger error:', error);
     }
   })());
-} else {
+} else if (reportDate !== egyptToday) {
   console.log(`⏭️ Different-day report (${reportDate} vs ${egyptToday}) - skipping auto-fail`);
+} else {
+  console.log(`⏭️ Same-day report but before 6 PM (${egyptHour}:00) - skipping auto-fail`);
 }
-
-
     } catch (error) {
       console.error(`💥 [Job ${jobId}] Error:`, error);
 
