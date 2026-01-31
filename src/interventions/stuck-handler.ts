@@ -47,6 +47,55 @@ export interface StuckSession {
   expires_at: Date;
 }
 
+// Task recommendation types
+export interface TaskRecommendation {
+  taskId: string;
+  taskContent: string;
+  reason: string;
+  daysDeferring: number;
+  pattern: string; // "afternoon avoidance", "fear-based", etc.
+}
+
+export interface AvoidancePattern {
+  taskId: string;
+  taskContent: string;
+  deferCount: number;
+  lastDeferred: Date;
+  commonTime: string; // "afternoon", "evening"
+  category?: string;
+}
+
+// Task recommendation AI prompt
+const TASK_RECOMMENDATION_PROMPT = `حلل قائمة مهام المستخدم وأنماط التجنب لديه.
+
+⚠️ مهم جداً: لازم الرد يكون بالعامية المصرية فقط! مفيش إنجليزي خالص.
+
+المهام المتاحة:
+{TASK_LIST}
+
+تاريخ الفشل (آخر 7 أيام):
+{FAILURE_PATTERNS}
+
+الوقت الحالي: {TIME}
+اليوم: {DAY_OF_WEEK}
+
+اقترح مهمة واحدة يجب أن يعمل عليها الآن.
+اعتبر:
+1. أي المهام يتجنبها باستمرار
+2. أنماط الوقت خلال اليوم
+3. أولوية المهمة والمواعيد النهائية
+4. صعوبة المهمة مقارنة بالطاقة الحالية
+
+الصيغة:
+[المهمة_المقترحة]
+اسم المهمة بالضبط كما هو مكتوب
+
+[السبب]
+2-3 جمل تشرح لماذا هذه المهمة الآن
+
+[النمط]
+نوع التجنب المكتشف (مثل: تجنب فترة بعد الظهر، مبني على الخوف، إرهاق)`;
+
 // ============================================
 // AI Prompts
 // ============================================
@@ -451,6 +500,426 @@ export class StuckHandler {
       return 0;
     }
     return Math.max(0, ((session.data.sprintEndTime || 0) - Date.now()) / 1000);
+  }
+
+  // ============================================
+  // Task Recommendation Methods (Enhanced Stuck Mode)
+  // ============================================
+
+  /**
+   * Analyze tasks and recommend the one task to tackle
+   */
+  async analyzeAndRecommendTask(
+    chatId: string,
+    todoistToken: string,
+    projectId?: string
+  ): Promise<TaskRecommendation | null> {
+    try {
+      // Fetch active tasks from Todoist
+      let url = 'https://api.todoist.com/rest/v3/tasks';
+      if (projectId) {
+        url += `?project_id=${projectId.trim()}`;
+      }
+
+      const response = await fetch(url, {
+        headers: { 'Authorization': `Bearer ${todoistToken.trim()}` },
+      });
+
+      if (!response.ok) {
+        console.error('Todoist API error:', response.status);
+        return null;
+      }
+
+      const tasks = await response.json() as Array<{
+        id: string;
+        content: string;
+        priority: number;
+        due?: { date: string };
+      }>;
+
+      // Filter to today's tasks
+      const today = getTodayInEgypt();
+      const todayTasks = tasks.filter(t => {
+        if (!t.due?.date) return false;
+        const dueDate = t.due.date.split('T')[0];
+        return dueDate && dueDate <= today;
+      });
+
+      if (todayTasks.length === 0) {
+        return null;
+      }
+
+      // Get avoidance patterns
+      const patterns = await this.getAvoidancePatterns(chatId);
+
+      // Build task list string
+      const taskListStr = todayTasks
+        .map((t, i) => `${i + 1}. ${t.content} (أولوية: ${5 - t.priority})`)
+        .join('\n');
+
+      // Build failure patterns string
+      const patternStr = patterns.length > 0
+        ? patterns.map(p => `- ${p.taskContent}: ${p.deferCount} مرات تأجيل (${p.commonTime})`).join('\n')
+        : 'لا توجد أنماط تأجيل واضحة';
+
+      // Get current time and day
+      const egyptTime = new Date().toLocaleString('ar-EG', {
+        timeZone: 'Africa/Cairo',
+        hour: '2-digit',
+        minute: '2-digit',
+      });
+      const dayNames = ['الأحد', 'الإثنين', 'الثلاثاء', 'الأربعاء', 'الخميس', 'الجمعة', 'السبت'];
+      const dayOfWeek = dayNames[new Date().getDay()] || '';
+
+      // Ask AI for recommendation
+      const prompt = TASK_RECOMMENDATION_PROMPT
+        .replace('{TASK_LIST}', taskListStr)
+        .replace('{FAILURE_PATTERNS}', patternStr)
+        .replace('{TIME}', egyptTime)
+        .replace('{DAY_OF_WEEK}', dayOfWeek);
+
+      const aiResponse = await this.aiComplete(
+        [{ role: 'user', content: prompt }],
+        0.7,
+        400
+      );
+
+      // Parse AI response
+      const taskMatch = aiResponse.match(/\[(?:المهمة_المقترحة|RECOMMENDED_TASK)\]\s*(.+?)(?:\[|$)/is);
+      const reasonMatch = aiResponse.match(/\[(?:السبب|REASON)\]\s*([\s\S]+?)(?:\[|$)/i);
+      const patternMatch = aiResponse.match(/\[(?:النمط|PATTERN)\]\s*(.+?)(?:\[|$)/is);
+
+      if (!taskMatch) {
+        return null;
+      }
+
+      const recommendedTaskName = taskMatch[1]?.trim() || '';
+      const reason = reasonMatch?.[1]?.trim() || 'مهمة ذات أولوية عالية';
+      const detectedPattern = patternMatch?.[1]?.trim() || 'غير محدد';
+
+      // Find matching task
+      const matchedTask = todayTasks.find(t =>
+        t.content.toLowerCase().includes(recommendedTaskName.toLowerCase()) ||
+        recommendedTaskName.toLowerCase().includes(t.content.toLowerCase())
+      );
+
+      if (!matchedTask) {
+        // If no exact match, return first high priority task
+        const highPriority = todayTasks.filter(t => t.priority >= 3)[0] || todayTasks[0];
+        if (!highPriority) return null;
+
+        return {
+          taskId: highPriority.id,
+          taskContent: highPriority.content,
+          reason,
+          daysDeferring: 0,
+          pattern: detectedPattern,
+        };
+      }
+
+      // Find deferral count for this task
+      const taskPattern = patterns.find(p =>
+        p.taskContent.toLowerCase().includes(matchedTask.content.toLowerCase()) ||
+        matchedTask.content.toLowerCase().includes(p.taskContent.toLowerCase())
+      );
+
+      return {
+        taskId: matchedTask.id,
+        taskContent: matchedTask.content,
+        reason,
+        daysDeferring: taskPattern?.deferCount || 0,
+        pattern: detectedPattern,
+      };
+    } catch (error) {
+      console.error('Task recommendation error:', error);
+      return null;
+    }
+  }
+
+  /**
+   * Get avoidance patterns from failure history
+   */
+  async getAvoidancePatterns(chatId: string): Promise<AvoidancePattern[]> {
+    try {
+      // Get failures from last 7 days
+      const sevenDaysAgo = new Date();
+      sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+
+      // Get intervention logs for deferrals
+      const logs = await this.db.select('intervention_logs', {
+        filter: {
+          chat_id: op.eq(chatId),
+          intervention_type: op.eq('stuck'),
+        },
+        order: 'created_at.desc',
+        limit: 50,
+      });
+
+      // Also get from daily_failures
+      const failures = await this.db.select('daily_failures', {
+        order: 'date.desc',
+        limit: 7,
+      });
+
+      // Count task deferrals
+      const deferralCounts = new Map<string, {
+        count: number;
+        lastDate: Date;
+        times: string[];
+      }>();
+
+      // Process intervention logs
+      for (const log of logs) {
+        const data = log.data as any;
+        if (data?.type === 'stuck_deferred' || data?.deferred) {
+          const taskContent = data.taskDescription || data.taskContent || 'unknown';
+          const createdAt = new Date(log.created_at as string);
+
+          if (createdAt >= sevenDaysAgo) {
+            const existing = deferralCounts.get(taskContent);
+            const hour = createdAt.getHours();
+            const timeOfDay = hour < 12 ? 'morning' : hour < 17 ? 'afternoon' : 'evening';
+
+            if (existing) {
+              existing.count++;
+              existing.times.push(timeOfDay);
+              if (createdAt > existing.lastDate) {
+                existing.lastDate = createdAt;
+              }
+            } else {
+              deferralCounts.set(taskContent, {
+                count: 1,
+                lastDate: createdAt,
+                times: [timeOfDay],
+              });
+            }
+          }
+        }
+      }
+
+      // Process daily_failures
+      for (const failure of failures) {
+        const failedTasks = (failure.data as any)?.failed_tasks || [];
+        const failureDate = new Date(failure.date as string);
+
+        for (const task of failedTasks) {
+          const taskContent = task.content || task.name || 'unknown';
+          const existing = deferralCounts.get(taskContent);
+
+          if (existing) {
+            existing.count++;
+            if (failureDate > existing.lastDate) {
+              existing.lastDate = failureDate;
+            }
+          } else {
+            deferralCounts.set(taskContent, {
+              count: 1,
+              lastDate: failureDate,
+              times: ['afternoon'], // Default for daily failures
+            });
+          }
+        }
+      }
+
+      // Convert to patterns array
+      const patterns: AvoidancePattern[] = [];
+      for (const [taskContent, data] of deferralCounts) {
+        if (data.count >= 2) { // Only include tasks deferred 2+ times
+          // Find most common time
+          const timeCounts = data.times.reduce((acc, t) => {
+            acc[t] = (acc[t] || 0) + 1;
+            return acc;
+          }, {} as Record<string, number>);
+          const commonTime = Object.entries(timeCounts).sort((a, b) => b[1] - a[1])[0]?.[0] || 'afternoon';
+
+          patterns.push({
+            taskId: '', // We don't have task ID from logs
+            taskContent,
+            deferCount: data.count,
+            lastDeferred: data.lastDate,
+            commonTime,
+          });
+        }
+      }
+
+      // Sort by deferral count
+      return patterns.sort((a, b) => b.deferCount - a.deferCount);
+    } catch (error) {
+      console.error('Get avoidance patterns error:', error);
+      return [];
+    }
+  }
+
+  /**
+   * Start intervention with task recommendation
+   */
+  async startInterventionWithRecommendation(
+    chatId: string,
+    todoistToken: string,
+    projectId?: string
+  ): Promise<{ message: string; recommendation: TaskRecommendation | null }> {
+    // Get recommendation
+    const recommendation = await this.analyzeAndRecommendTask(chatId, todoistToken, projectId);
+
+    if (!recommendation) {
+      // Fall back to regular intervention
+      const message = await this.startIntervention(chatId);
+      return { message, recommendation: null };
+    }
+
+    // Check for existing session
+    const existing = await this.getSession(chatId);
+    if (existing) {
+      await this.clearSession(chatId);
+    }
+
+    // Create session with recommendation
+    const state: StuckState = {
+      phase: 'awaiting_response',
+      interventionCount: 1,
+      taskDescription: recommendation.taskContent,
+    };
+
+    await this.saveSession(chatId, state);
+
+    // Store recommendation for later use
+    const recommendKey = `stuck_recommend_${chatId}`;
+    await this.db.delete('conversation_state', { chat_id: op.eq(recommendKey) }).catch(() => {});
+    await this.db.insert('conversation_state', {
+      chat_id: recommendKey,
+      conversation_type: 'stuck_recommendation',
+      data: recommendation,
+      expires_at: new Date(Date.now() + 15 * 60 * 1000).toISOString(),
+    });
+
+    // Build message with recommendation
+    let message = `🎯 *تحليل المهام*\n\n`;
+    message += `اقتراحي لك:\n`;
+    message += `📌 *${recommendation.taskContent}*\n\n`;
+    message += `💡 ${recommendation.reason}\n`;
+    if (recommendation.daysDeferring > 0) {
+      message += `⚠️ تأجيلات سابقة: ${recommendation.daysDeferring} مرات\n`;
+    }
+    message += `\n━━━━━━━━━━━━━━━━━━\n`;
+    message += `1️⃣ موافق - نبدأ سبرنت\n`;
+    message += `2️⃣ مهمة تانية - عايز أشوف بدائل\n`;
+    message += `3️⃣ أختار بنفسي - عايز أدخل اسم المهمة`;
+
+    return { message, recommendation };
+  }
+
+  /**
+   * Show alternative task suggestions
+   */
+  async showAlternatives(
+    chatId: string,
+    todoistToken: string,
+    rejectedTask: string,
+    projectId?: string
+  ): Promise<string> {
+    try {
+      // Fetch tasks
+      let url = 'https://api.todoist.com/rest/v3/tasks';
+      if (projectId) {
+        url += `?project_id=${projectId.trim()}`;
+      }
+
+      const response = await fetch(url, {
+        headers: { 'Authorization': `Bearer ${todoistToken.trim()}` },
+      });
+
+      if (!response.ok) {
+        return '❌ فشل في جلب المهام من Todoist';
+      }
+
+      const tasks = await response.json() as Array<{
+        id: string;
+        content: string;
+        priority: number;
+        due?: { date: string };
+      }>;
+
+      const today = getTodayInEgypt();
+      const todayTasks = tasks
+        .filter(t => {
+          if (!t.due?.date) return false;
+          const dueDate = t.due.date.split('T')[0];
+          return dueDate && dueDate <= today && t.content !== rejectedTask;
+        })
+        .slice(0, 5);
+
+      if (todayTasks.length === 0) {
+        return '❌ لا توجد مهام بديلة متاحة';
+      }
+
+      // Build task list
+      let message = `📋 *المهام البديلة:*\n\n`;
+      todayTasks.forEach((t, i) => {
+        const priorityStars = '⭐'.repeat(5 - t.priority);
+        message += `${i + 1}. ${t.content} ${priorityStars}\n`;
+      });
+      message += `\n🔢 أرسل رقم المهمة للبدء:`;
+
+      // Store alternatives for selection
+      const altKey = `stuck_alt_${chatId}`;
+      await this.db.delete('conversation_state', { chat_id: op.eq(altKey) }).catch(() => {});
+      await this.db.insert('conversation_state', {
+        chat_id: altKey,
+        conversation_type: 'stuck_alternatives',
+        data: { tasks: todayTasks },
+        expires_at: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
+      });
+
+      return message;
+    } catch (error) {
+      console.error('Show alternatives error:', error);
+      return '❌ حدث خطأ في جلب البدائل';
+    }
+  }
+
+  /**
+   * Handle alternative selection
+   */
+  async handleAlternativeSelection(
+    chatId: string,
+    selection: number
+  ): Promise<{ success: boolean; task?: { id: string; content: string }; message: string }> {
+    const altKey = `stuck_alt_${chatId}`;
+    const alternatives = await this.db.select('conversation_state', {
+      filter: { chat_id: op.eq(altKey) },
+      limit: 1,
+    });
+
+    if (alternatives.length === 0) {
+      return { success: false, message: '❌ انتهت صلاحية القائمة. استخدم /stuck مرة أخرى.' };
+    }
+
+    const tasks = (alternatives[0]?.data as any)?.tasks || [];
+    await this.db.delete('conversation_state', { chat_id: op.eq(altKey) });
+
+    if (selection < 1 || selection > tasks.length) {
+      return { success: false, message: '❌ رقم غير صحيح' };
+    }
+
+    const selectedTask = tasks[selection - 1];
+    if (!selectedTask) {
+      return { success: false, message: '❌ حدث خطأ' };
+    }
+
+    // Update session with selected task
+    const session = await this.getSession(chatId);
+    if (session) {
+      await this.saveSession(chatId, {
+        ...session.data,
+        taskDescription: selectedTask.content,
+      });
+    }
+
+    return {
+      success: true,
+      task: { id: selectedTask.id, content: selectedTask.content },
+      message: `✅ تم اختيار: ${selectedTask.content}`,
+    };
   }
 
   // ============================================

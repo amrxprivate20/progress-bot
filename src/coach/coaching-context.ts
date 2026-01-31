@@ -23,7 +23,7 @@ export interface CoachingInteraction {
   chat_id: string;
   interaction_date: string;
   timestamp: string;
-  interaction_type: 'stuck' | 'battle' | 'dopamine' | 'roast' | 'checkin' | 'auto_probe';
+  interaction_type: 'stuck' | 'battle' | 'dopamine' | 'roast' | 'checkin' | 'auto_probe' | 'meta_coach';
   user_input?: string;
   bot_response?: string;
   outcome?: 'positive' | 'negative' | 'neutral' | 'pending';

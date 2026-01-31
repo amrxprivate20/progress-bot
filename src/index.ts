@@ -42,6 +42,56 @@ export default {
     console.log(`🕐 Egypt time: ${egyptHour}:${egyptMinute.toString().padStart(2, '0')}`);
 
     // ============================================
+    // AUTO-PAUSE: Check for stale active tasks (4+ hours)
+    // ============================================
+    try {
+      const chatId = env.TELEGRAM_CHAT_ID || await settings.get('telegram_chat_id');
+      const botToken = env.TELEGRAM_BOT_TOKEN;
+
+      if (chatId && botToken) {
+        const { createTaskSessionManager } = await import('./services/task-session-manager');
+        const sessionMgr = createTaskSessionManager(db);
+
+        const pausedSession = await sessionMgr.autoPauseStaleSession(chatId);
+
+        if (pausedSession) {
+          // Format time nicely
+          const formatTime = (mins: number): string => {
+            if (mins < 60) return `${mins} دقيقة`;
+            const h = Math.floor(mins / 60);
+            const m = mins % 60;
+            if (m === 0) return h === 1 ? 'ساعة' : `${h} ساعات`;
+            return `${h} ساعة ${m} دقيقة`;
+          };
+
+          // Also clean up conversation_state active_task if exists
+          const taskKey = `active_task_${chatId}`;
+          await db.delete('conversation_state', { chat_id: op.eq(taskKey) }).catch(() => {});
+
+          // Send notification
+          const message = `⏸️ *إيقاف تلقائي*\n\n` +
+            `تم إيقاف المهمة "${pausedSession.taskContent}" تلقائياً بعد 4+ ساعات.\n\n` +
+            `⏱️ الوقت المسجل: ${formatTime(pausedSession.totalTimeWorked)}\n\n` +
+            `استخدم /resumetask عندما تكون جاهزاً للاستئناف.`;
+
+          await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              chat_id: chatId,
+              text: message,
+              parse_mode: 'Markdown',
+            }),
+          });
+
+          console.log('✅ Auto-paused stale task:', pausedSession.taskContent);
+        }
+      }
+    } catch (autoPauseError) {
+      console.error('❌ Auto-pause error:', autoPauseError);
+    }
+
+    // ============================================
     // AUTO-COACH: Run every 30 minutes
     // ============================================
     try {

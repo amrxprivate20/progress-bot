@@ -1,0 +1,149 @@
+Context
+We have a productivity bot with coaching features (stuck mode, roast mode, battle mode, auto-coach, dopamine hits). Currently, the features work independently. We need to make the bot more intelligent and add critical missing functionality.
+
+🎯 IMPROVEMENT #1: Meta-Coach Orchestrator
+Problem: Bot features don't talk to each other. Auto-coach always probes the same way. Roast mode only activates on command. Battle mode just tracks damage. No intelligent decision-making.
+Solution: Create a Meta-Coach that analyzes user state and intelligently chooses which intervention to use.
+Requirements:
+
+Build a new service src/coach/meta-coach.ts
+It should analyze:
+
+How long user has been inactive
+What tasks they keep failing
+Current battle state (boss HP)
+Time of day
+Last intervention type and outcome
+User's coaching style preference
+
+
+AI should decide: "User needs roast + specific task push" OR "gentle check-in" OR "stuck mode activation" OR "battle narrative to motivate"
+Should be able to COMBINE tools (e.g., roast them THEN recommend a task)
+Hook into auto-coach scheduled checks - replace static probes with intelligent decisions
+Add conversational flow: bot can start gentle, escalate if ignored
+
+Key Feature: Before any intervention, bot can optionally start a natural conversation. If user responds, great. If ignored for X minutes, escalate to stronger intervention.
+
+🎯 IMPROVEMENT #2: Enhanced Stuck Mode with Task Recommendations
+Problem: Current stuck mode just asks "what are you avoiding?" then runs a 2-minute sprint. Doesn't help user CHOOSE what to work on.
+Solution: Stuck mode should intelligently recommend a specific task.
+Requirements:
+
+When user types /stuck, instead of just asking what they're avoiding:
+
+Analyze their task list (from Todoist)
+Find tasks they keep deferring/failing
+Consider task priority, deadlines, categories
+Use AI to recommend THE ONE TASK they should tackle right now
+
+
+Message format:
+
+   🚨 I see you're stuck.
+   
+   Based on your patterns, I think you're avoiding: "Write project report"
+   
+   This task has been on your list for 3 days. You defer it every afternoon.
+   
+   Let's do a 2-minute sprint on JUST THIS TASK.
+   Ready? [Yes] [No, different task]
+
+If user says "different task", show top 3 recommendations with reasons
+After sprint, ask: "Did you make progress on [task name]?"
+Track which recommended tasks actually get completed (learn what works)
+
+Integration: This should work WITH the meta-coach. Meta-coach might trigger stuck mode automatically if it detects avoidance patterns.
+
+🎯 IMPROVEMENT #3: /resumelater Command for Task Sessions
+Problem: User starts a task with /starttask, works for 2 minutes, gets stuck, but stopping loses all progress. They can't pause and resume later while keeping track of total time worked.
+Solution: Add /resumelater command to pause task sessions and track cumulative progress.
+Requirements:
+Database Changes:
+
+Create new table task_sessions or add to existing conversation state:
+
+   - task_id (Todoist ID)
+   - task_content (task name)
+   - total_time_worked (cumulative minutes)
+   - session_count (how many times resumed)
+   - first_started_at (timestamp)
+   - last_resumed_at (timestamp)
+   - status: 'active' | 'paused' | 'completed'
+   - pause_reason (optional text)
+Commands:
+/starttask [task] - Modified behavior:
+
+Check if this task has a paused session
+If yes: "You have 23 minutes already logged on this task. Resume? [Yes] [Start Fresh]"
+If no: Start new session as normal
+Track start time
+
+/resumelater - New command:
+
+Can ONLY be used if a task is currently active (started with /starttask)
+Calculates time worked so far
+Saves session state as 'paused'
+Optional: Ask "Why are you pausing? (for my learning)" → store reason
+Message: "✅ Session paused. You've worked 15 minutes so far. Use /resumetask when ready."
+Timer stops but data is saved
+
+/resumetask - New command:
+
+Shows paused task: "Resume: 'Write report' (15 mins logged, paused 2 hours ago)"
+Starts timer from where they left off
+Increments session_count
+
+/completetask - Modified behavior:
+
+If task has session data, include TOTAL cumulative time in Todoist update
+Format: "Task name ⏱️45m (3 sessions)"
+Clear session data after completion
+
+/abandonsession - New command:
+
+Completely abandon current session without saving
+Useful if they started a wrong resume for task
+
+Auto-Pause Feature:
+
+If user starts a task but doesn't complete or resume for 4+ hours → auto-pause
+Send notification: "I auto-paused 'Write report'. You worked 8 minutes. Resume anytime with /resumetask"
+
+Session Stats:
+
+In daily report, show: "Tasks with multiple sessions: [list]"
+Track which tasks consistently need multiple sessions (helps identify hard tasks)
+Battle mode: Each session resumed = damage to boss (reward persistence)
+
+Integration with Stuck Mode:
+
+If user is in stuck mode sprint and has active task session → automatically link them
+After stuck sprint: "Want to /resumelater or /completetask?"
+
+
+🎯 BONUS IMPROVEMENT: Battle Mode Boss Personality Phases
+Quick Enhancement: Make battle bosses more dynamic.
+Requirements:
+
+Boss should change dialogue based on HP:
+
+100-75%: Confident, mocking
+75-50%: Getting worried, defensive
+50-25%: Desperate, trying new tactics
+<25%: Begging, defeated tone
+
+
+Different boss types (Procrastination Dragon, Perfectionism Spider, etc.) have unique mechanics
+Boss can send random taunts throughout the day (not just on task complete)
+
+
+🎯 Implementation Priority
+
+CRITICAL: /resumelater functionality (huge UX improvement)
+HIGH: Enhanced stuck mode with task recommendations
+MEDIUM: Meta-coach orchestrator
+NICE-TO-HAVE: Boss personality phases
+
+Make sure to use task name for matching and not IDs since it always change!
+Make sure to update the start and help messages and tell me what new commands to add to the bot
+Make sure to type-check and deploy!

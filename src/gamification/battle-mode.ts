@@ -59,6 +59,46 @@ export interface BattleAction {
 }
 
 // ============================================
+// Boss Personality Phases
+// ============================================
+
+export interface BossPhase {
+  hpRange: [number, number]; // [min%, max%]
+  mood: 'confident' | 'worried' | 'desperate' | 'defeated';
+  dialogueStyle: string;
+}
+
+export const BOSS_PHASES: BossPhase[] = [
+  { hpRange: [75, 100], mood: 'confident', dialogueStyle: 'متغطرس، ساخر، مستهزئ بالمحارب' },
+  { hpRange: [50, 75], mood: 'worried', dialogueStyle: 'دفاعي، متفاجئ، يحاول إخفاء قلقه' },
+  { hpRange: [25, 50], mood: 'desperate', dialogueStyle: 'يجرب تكتيكات جديدة، يساوم، يهدد' },
+  { hpRange: [0, 25], mood: 'defeated', dialogueStyle: 'يتوسل، يستجدي، منكسر' },
+];
+
+export type BossType =
+  | 'procrastination_dragon'  // يتعافى أسرع من التأجيلات
+  | 'perfectionism_spider'    // يتلقى ضرر أقل من الإنجازات الجزئية
+  | 'distraction_hydra'       // رؤوس متعددة، يحتاج مهام متعددة من نفس الفئة
+  | 'anxiety_shadow'          // أصعب في المساء
+  | 'overwhelm_titan';        // أضعف ضد المهام الصغيرة، أقوى ضد الكبيرة
+
+// Phase-aware taunt prompts
+const PHASE_TAUNT_PROMPT = `البوس "{BOSS_NAME}" في معركة.
+
+طاقته الحالية: {HP_PERCENT}%
+المزاج: {MOOD}
+أسلوب الكلام: {DIALOGUE_STYLE}
+شخصيته: {PERSONALITY}
+
+⚠️ مهم جداً: لازم الرد يكون بالعامية المصرية فقط! مفيش إنجليزي خالص.
+
+اكتب جملة واحدة قصيرة (تحدي أو استفزاز) تناسب مزاجه الحالي:
+- لو واثق: يستهزأ
+- لو قلق: يحاول يخبي خوفه
+- لو يائس: يساوم أو يهدد
+- لو منهزم: يتوسل`;
+
+// ============================================
 // AI Prompts
 // ============================================
 
@@ -545,17 +585,122 @@ _أكمل المهام لتوجيه الضربات!_
   }
 
   private generateQuickBossResponse(boss: Boss, currentHP: number, maxHP: number): string {
-    const hpPercent = currentHP / maxHP;
+    const hpPercent = (currentHP / maxHP) * 100;
+    const phase = this.getCurrentPhase(hpPercent);
 
-    if (hpPercent > 0.7) {
-      return `💬 "${boss.name}: هذا كل ما عندك؟"`;
-    } else if (hpPercent > 0.4) {
-      return `💬 "${boss.name}: بدأت أشعر بالألم... لكن لن أسقط!"`;
-    } else if (hpPercent > 0.15) {
-      return `💬 "${boss.name}: أنت... قوي. لكن اليوم لم ينته بعد!"`;
-    } else {
-      return `💬 "${boss.name}: لا... لا! كيف يمكن هذا؟!"`;
+    // Phase-specific responses
+    const responses: Record<BossPhase['mood'], string[]> = {
+      confident: [
+        `${boss.name}: هذا كل ما عندك؟ 😏`,
+        `${boss.name}: ضعيف... ضعيف جداً!`,
+        `${boss.name}: استمر، أنا مستمتع!`,
+        `${boss.name}: لسه بدري على هزيمتي!`,
+      ],
+      worried: [
+        `${boss.name}: بدأت أشعر بالألم... لكن لن أسقط!`,
+        `${boss.name}: أنت... أقوى مما توقعت`,
+        `${boss.name}: لا تظن إنك انتصرت!`,
+        `${boss.name}: هذه مجرد خدوش!`,
+      ],
+      desperate: [
+        `${boss.name}: انتظر! ممكن نتفاوض؟`,
+        `${boss.name}: لو وقفت دلوقتي... هنسى كل ده!`,
+        `${boss.name}: أنت مش فاهم قوتي الحقيقية!`,
+        `${boss.name}: هعوضك... بس توقف!`,
+      ],
+      defeated: [
+        `${boss.name}: لا... لا! كيف يمكن هذا؟!`,
+        `${boss.name}: أرجوك... ارحمني...`,
+        `${boss.name}: كنت... كنت الأقوى...`,
+        `${boss.name}: هزمتني... فعلاً هزمتني...`,
+      ],
+    };
+
+    const phaseResponses = responses[phase.mood];
+    const randomResponse = phaseResponses[Math.floor(Math.random() * phaseResponses.length)] || phaseResponses[0];
+
+    return `💬 "${randomResponse}"`;
+  }
+
+  /**
+   * Get current boss phase based on HP percentage
+   */
+  private getCurrentPhase(hpPercent: number): BossPhase {
+    for (const phase of BOSS_PHASES) {
+      if (hpPercent >= phase.hpRange[0] && hpPercent <= phase.hpRange[1]) {
+        return phase;
+      }
     }
+    // Default to defeated if HP is very low
+    return BOSS_PHASES[BOSS_PHASES.length - 1]!;
+  }
+
+  /**
+   * Generate a random boss taunt for scheduled interventions
+   */
+  async generateRandomTaunt(chatId: string): Promise<string | null> {
+    const today = getTodayInEgypt();
+    const state = await this.getBattleState(chatId, today);
+
+    if (!state || state.isVictory || state.isDefeat) {
+      return null;
+    }
+
+    const hpPercent = (state.bossCurrentHP / state.bossMaxHP) * 100;
+    const phase = this.getCurrentPhase(hpPercent);
+
+    const prompt = PHASE_TAUNT_PROMPT
+      .replace('{BOSS_NAME}', state.boss.name)
+      .replace('{HP_PERCENT}', hpPercent.toFixed(0))
+      .replace('{MOOD}', phase.mood)
+      .replace('{DIALOGUE_STYLE}', phase.dialogueStyle)
+      .replace('{PERSONALITY}', state.boss.personality);
+
+    try {
+      const taunt = await this.aiComplete(
+        [{ role: 'user', content: prompt }],
+        0.95,
+        100
+      );
+
+      const hpBar = this.generateHPBar(state.bossCurrentHP, state.bossMaxHP);
+
+      return `⚔️ *${state.boss.name}* يتحداك:\n\n` +
+        `💬 "${taunt.trim()}"\n\n` +
+        `${hpBar}`;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Calculate persistence bonus for multi-session tasks
+   */
+  calculatePersistenceBonus(sessionCount: number): number {
+    if (sessionCount <= 1) return 1;
+    // 10% bonus per additional session, max 50%
+    return 1 + Math.min(0.5, (sessionCount - 1) * 0.1);
+  }
+
+  /**
+   * Deal damage with persistence bonus
+   */
+  async dealDamageWithBonus(
+    chatId: string,
+    taskName: string,
+    taskDifficulty: number = 1,
+    sessionCount: number = 1
+  ): Promise<BattleAction | null> {
+    const bonus = this.calculatePersistenceBonus(sessionCount);
+    const adjustedDifficulty = taskDifficulty * bonus;
+
+    const result = await this.dealDamage(chatId, taskName, adjustedDifficulty);
+
+    if (result && sessionCount > 1) {
+      result.narrative += `\n\n🔥 *بونص المثابرة!* (+${Math.round((bonus - 1) * 100)}%)`;
+    }
+
+    return result;
   }
 
   private generateHPBar(current: number, max: number): string {

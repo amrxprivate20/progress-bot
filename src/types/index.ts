@@ -361,3 +361,89 @@ export interface ReportJobData {
   aiModel: string;
   botToken: string;
 }
+
+// ============================================
+// Task Session Types (for /resumelater feature)
+// ============================================
+
+export interface TaskSession {
+  id: string;
+  chatId: string;
+  taskId: string | null;
+  taskContent: string;
+  totalTimeWorked: number; // cumulative minutes
+  sessionCount: number;
+  firstStartedAt: Date;
+  lastResumedAt: Date | null;
+  lastPausedAt: Date | null;
+  status: 'active' | 'paused' | 'completed' | 'abandoned';
+  pauseReason: string | null;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+// ============================================
+// Meta-Coach Types
+// ============================================
+
+export interface UserState {
+  hoursInactive: number;
+  tasksCompletedToday: number;
+  tasksFailed: number;
+  currentBattleState: any | null;
+  timeOfDay: 'morning' | 'afternoon' | 'evening' | 'night';
+  lastInterventionType: string | null;
+  lastInterventionOutcome: 'positive' | 'negative' | 'pending' | null;
+  minutesSinceLastIntervention: number;
+  coachingStyle: 'confrontational' | 'supportive' | 'balanced';
+  deferralsToday: number;
+  avoidancePatterns: string[];
+  activeTaskSession: TaskSession | null;
+}
+
+export interface InterventionDecision {
+  type: 'gentle_checkin' | 'stuck_mode' | 'roast' | 'battle_narrative' | 'task_recommendation' | 'escalation' | 'combined';
+  components?: string[];
+  message: string;
+  targetTask?: string;
+  escalationLevel: number; // 1-5
+  followUpDelay?: number; // Minutes until escalation if ignored
+}
+
+// ============================================
+// Enhanced Stuck Mode Types
+// ============================================
+
+export interface TaskRecommendation {
+  taskId: string;
+  taskContent: string;
+  reason: string;
+  daysDeferring: number;
+  pattern: string; // "afternoon avoidance", "fear-based", etc.
+}
+
+export interface AvoidancePattern {
+  taskId: string;
+  taskContent: string;
+  deferCount: number;
+  lastDeferred: Date;
+  commonTime: string; // "afternoon", "evening"
+  category?: string;
+}
+
+// ============================================
+// Boss Personality Phases
+// ============================================
+
+export interface BossPhase {
+  hpRange: [number, number]; // [min%, max%]
+  mood: 'confident' | 'worried' | 'desperate' | 'defeated';
+  dialogueStyle: string;
+}
+
+export type BossType =
+  | 'procrastination_dragon'
+  | 'perfectionism_spider'
+  | 'distraction_hydra'
+  | 'anxiety_shadow'
+  | 'overwhelm_titan';

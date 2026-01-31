@@ -165,6 +165,11 @@ function registerCommands(bot: Bot<BotContext>) {
 /addquantity - إضافة كمية
 /log_failure - تسجيل فشل
 
+⏸️ جلسات المهام:
+/resumelater - إيقاف مؤقت مع حفظ الوقت
+/resumetask - استئناف مهمة موقوفة
+/abandonsession - إلغاء الجلسة
+
 🎯 التخطيط:
 /todayplan - خطة اليوم بالذكاء الاصطناعي
 /tomorrowplan - خطة الغد
@@ -342,6 +347,13 @@ function getArabicOperationType(type: string): string {
 /log_failure - تسجيل مهمة كفاشلة وتأجيلها
 
 ━━━━━━━━━━━━━━━━━━━━
+⏸️ جلسات المهام:
+━━━━━━━━━━━━━━━━━━━━
+/resumelater - إيقاف مؤقت مع حفظ الوقت المسجل
+/resumetask - استئناف مهمة موقوفة مسبقاً
+/abandonsession - إلغاء الجلسة بدون حفظ الوقت
+
+━━━━━━━━━━━━━━━━━━━━
 🎯 التخطيط والأهداف:
 ━━━━━━━━━━━━━━━━━━━━
 /todayplan - خطة اليوم بالذكاء الاصطناعي
@@ -403,6 +415,8 @@ function getArabicOperationType(type: string): string {
 • استخدم /stuck عند الشعور بالتأجيل
 • /battle_mode يحوّل يومك لمعركة ممتعة
 • الكوتش يراقب تلقائياً ويتدخل عند الحاجة
+• /resumelater يحفظ وقتك لو احتجت تتوقف مؤقتاً
+• المهام الموقوفة 4+ ساعات تتوقف تلقائياً
     `.trim();
 
     await ctx.reply(helpMessage);
@@ -1712,9 +1726,56 @@ bot.command(['starttask', 'start_task'], async (ctx) => {
       const taskData = existing.data || {};
       await ctx.reply(
         `⚠️ لديك مهمة نشطة بالفعل:\n📌 ${taskData.taskName}\n\n` +
-        `استخدم /completetask لإكمالها أو /canceltask لإلغائها`
+        `استخدم /completetask لإكمالها أو /canceltask لإلغائها أو /resumelater لإيقافها مؤقتاً`
       );
       return;
+    }
+
+    // Check for paused session matching the task name (if provided)
+    const { createTaskSessionManager } = await import('../services/task-session-manager');
+    const sessionMgr = createTaskSessionManager(ctx.db);
+
+    if (args.trim()) {
+      // Check if there's a paused session for this task
+      const pausedSession = await sessionMgr.hasPausedSession(chatId, args.trim());
+      if (pausedSession) {
+        // Format time nicely
+        const formatTime = (mins: number): string => {
+          if (mins < 60) return `${mins}د`;
+          const h = Math.floor(mins / 60);
+          const m = mins % 60;
+          if (m === 0) return `${h}س`;
+          return `${h}س ${m}د`;
+        };
+
+        await ctx.reply(
+          `⏸️ *لديك جلسة موقوفة لهذه المهمة!*\n\n` +
+          `📌 ${pausedSession.taskContent}\n` +
+          `⏱️ الوقت المسجل: ${formatTime(pausedSession.totalTimeWorked)}\n` +
+          `🔄 الجلسات: ${pausedSession.sessionCount}\n\n` +
+          `━━━━━━━━━━━━━━━━━━\n` +
+          `هل تريد:\n` +
+          `1️⃣ استئناف الجلسة السابقة\n` +
+          `2️⃣ بدء جلسة جديدة (سيتم إلغاء الوقت السابق)\n\n` +
+          `أرسل 1 أو 2:`,
+          { parse_mode: 'Markdown' }
+        );
+
+        // Store pending decision
+        const resumeDecisionKey = `resume_decision_${chatId}`;
+        await ctx.db.insert('conversation_state', {
+          chat_id: resumeDecisionKey,
+          conversation_type: 'resume_decision',
+          data: {
+            sessionId: pausedSession.id,
+            taskName: args.trim(),
+            taskContent: pausedSession.taskContent,
+            taskId: pausedSession.taskId,
+          },
+          expires_at: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
+        });
+        return;
+      }
     }
 
     // Get Todoist token
@@ -2111,6 +2172,7 @@ bot.command(['completetask', 'complete_task'], async (ctx) => {
     const manualDuration = taskData.manualDuration; // From /addduration
     const manualQuantity = taskData.manualQuantity; // From /addquantity
     const manualQuantityUnit = taskData.manualQuantityUnit;
+    const previousTimeWorked = taskData.previousTimeWorked || 0; // From resumed session
 
     if (!startTime || !taskName) {
       await ctx.reply('❌ بيانات المهمة غير صحيحة');
@@ -2118,14 +2180,37 @@ bot.command(['completetask', 'complete_task'], async (ctx) => {
       return;
     }
 
-        // Calculate duration (use manual if set, otherwise calculate)
+    // Calculate duration (use manual if set, otherwise calculate with cumulative time)
     let durationMinutes: number;
+    let sessionCount = 1;
+    let cumulativeTime = 0;
+
     if (manualDuration) {
       durationMinutes = manualDuration;
     } else {
       const endTime = Date.now();
       const durationMs = endTime - startTime;
-      durationMinutes = Math.round(durationMs / 60000);
+      const thisSessionMinutes = Math.round(durationMs / 60000);
+
+      // Add cumulative time from previous sessions
+      cumulativeTime = previousTimeWorked + thisSessionMinutes;
+      durationMinutes = cumulativeTime;
+    }
+
+    // Complete session in TaskSessionManager if it exists
+    const { createTaskSessionManager } = await import('../services/task-session-manager');
+    const sessionMgr = createTaskSessionManager(ctx.db);
+
+    try {
+      const activeSession = await sessionMgr.getActiveSession(chatId);
+      if (activeSession) {
+        const result = await sessionMgr.completeSession(chatId);
+        durationMinutes = result.totalTime;
+        sessionCount = result.session.sessionCount;
+      }
+    } catch (sessionError) {
+      console.log('Session completion note:', sessionError);
+      // Continue with calculated duration if session manager fails
     }
 
     // Import utilities
@@ -2169,6 +2254,10 @@ bot.command(['completetask', 'complete_task'], async (ctx) => {
         } else {
           durationStr = hours === 1 ? 'ساعة' : `${hours} ساعات`;
         }
+      }
+      // Add session count if more than 1
+      if (sessionCount > 1) {
+        durationStr += ` (${sessionCount} جلسات)`;
       }
     }
 
@@ -2235,7 +2324,7 @@ bot.command(['completetask', 'complete_task'], async (ctx) => {
            await ctx.reply(
     `✅ **تم إكمال المهمة!**\n\n` +
     `📌 ${updatedTaskName}\n` +
-    `⏱️ المدة: ${durationMinutes} دقيقة\n` +
+    `⏱️ المدة: ${durationMinutes} دقيقة${sessionCount > 1 ? ` (${sessionCount} جلسات)` : ''}\n` +
     `${manualQuantity ? `📊 الكمية: ${manualQuantity} ${manualQuantityUnit}\n` : ''}` +
     `✓ تم التحديث في Todoist\n\n` +
     `━━━━━━━━━━━━━━━━━━\n` +
@@ -2349,6 +2438,212 @@ bot.command(['completetask', 'complete_task'], async (ctx) => {
       await ctx.reply(`🚫 تم إلغاء المهمة:\n📌 ${taskData.taskName}\n\nيمكنك المحاولة مرة أخرى لاحقاً`);
     } catch (error) {
       console.error('Cancel task error:', error);
+      await ctx.reply('❌ حدث خطأ: ' + (error instanceof Error ? error.message : 'Unknown'));
+    }
+    await sendAutoStatus(ctx);
+  });
+
+  // ============================================
+  // Task Session Commands (Pause/Resume)
+  // ============================================
+
+  // Pause current task and save progress
+  bot.command(['resumelater', 'resume_later', 'pausetask'], async (ctx) => {
+    try {
+      const chatId = ctx.chat?.id.toString() || '';
+      const taskKey = `active_task_${chatId}`;
+
+      // Get active task from conversation_state
+      const existingTask = await ctx.db.select('conversation_state', {
+        filter: { chat_id: op.eq(taskKey) },
+      });
+
+      if (existingTask.length === 0) {
+        await ctx.reply('❌ لا توجد مهمة نشطة لإيقافها مؤقتاً.\nاستخدم /starttask لبدء مهمة جديدة');
+        return;
+      }
+
+      const taskData = (existingTask[0] as any).data || {};
+      const taskName = taskData.taskName;
+      const todoistTaskId = taskData.todoistTaskId;
+
+      // Import session manager
+      const { createTaskSessionManager } = await import('../services/task-session-manager');
+      const sessionMgr = createTaskSessionManager(ctx.db);
+
+      // Check if session already exists (started via previous /starttask)
+      let session = await sessionMgr.getActiveSession(chatId);
+
+      if (!session) {
+        // Create new session first, then pause it
+        session = await sessionMgr.startSession(chatId, todoistTaskId || null, taskName);
+      }
+
+      // Now pause the session
+      const pauseResult = await sessionMgr.pauseSession(chatId);
+
+      // Clear the active task from conversation_state
+      await ctx.db.delete('conversation_state', { chat_id: op.eq(taskKey) });
+
+      // Format time nicely
+      const formatTime = (mins: number): string => {
+        if (mins < 60) return `${mins} دقيقة`;
+        const h = Math.floor(mins / 60);
+        const m = mins % 60;
+        if (m === 0) return h === 1 ? 'ساعة' : `${h} ساعات`;
+        return `${h} ساعة ${m} دقيقة`;
+      };
+
+      await ctx.reply(
+        `⏸️ *تم الإيقاف المؤقت!*\n\n` +
+        `📌 ${taskName}\n` +
+        `⏱️ الوقت هذه الجلسة: ${formatTime(pauseResult.timeWorkedThisSession)}\n` +
+        `📊 الوقت الإجمالي: ${formatTime(pauseResult.session.totalTimeWorked)}\n` +
+        `🔄 عدد الجلسات: ${pauseResult.session.sessionCount}\n\n` +
+        `━━━━━━━━━━━━━━━━━━\n` +
+        `استخدم /resumetask لاستئناف العمل لاحقاً`,
+        { parse_mode: 'Markdown' }
+      );
+
+    } catch (error) {
+      console.error('Resume later error:', error);
+      await ctx.reply('❌ حدث خطأ: ' + (error instanceof Error ? error.message : 'Unknown'));
+    }
+    await sendAutoStatus(ctx);
+  });
+
+  // Resume a paused task
+  bot.command(['resumetask', 'resume_task'], async (ctx) => {
+    try {
+      const chatId = ctx.chat?.id.toString() || '';
+      const taskKey = `active_task_${chatId}`;
+
+      // Check if there's already an active task
+      const existingActive = await ctx.db.select('conversation_state', {
+        filter: { chat_id: op.eq(taskKey) },
+      });
+
+      if (existingActive.length > 0) {
+        const taskData = (existingActive[0] as any).data || {};
+        await ctx.reply(
+          `⚠️ لديك مهمة نشطة بالفعل:\n📌 ${taskData.taskName}\n\n` +
+          `استخدم /resumelater لإيقافها مؤقتاً أو /completetask لإكمالها`
+        );
+        return;
+      }
+
+      // Get paused sessions
+      const { createTaskSessionManager } = await import('../services/task-session-manager');
+      const sessionMgr = createTaskSessionManager(ctx.db);
+      const pausedSessions = await sessionMgr.getAllPausedSessions(chatId);
+
+      if (pausedSessions.length === 0) {
+        await ctx.reply(
+          '❌ لا توجد مهام موقوفة مؤقتاً.\n\n' +
+          'استخدم /starttask لبدء مهمة جديدة'
+        );
+        return;
+      }
+
+      // Format time nicely
+      const formatTime = (mins: number): string => {
+        if (mins < 60) return `${mins}د`;
+        const h = Math.floor(mins / 60);
+        const m = mins % 60;
+        if (m === 0) return `${h}س`;
+        return `${h}س ${m}د`;
+      };
+
+      if (pausedSessions.length === 1) {
+        // Only one paused session - offer to resume directly
+        const session = pausedSessions[0]!;
+        let message = '⏸️ *مهمة موقوفة:*\n\n';
+        message += `📌 ${session.taskContent}\n`;
+        message += `⏱️ الوقت المسجل: ${formatTime(session.totalTimeWorked)}\n`;
+        message += `🔄 الجلسات: ${session.sessionCount}\n\n`;
+        message += `هل تريد استئناف العمل؟\n`;
+        message += `أرسل "نعم" أو 1 للاستئناف`;
+
+        // Store pending resume
+        const resumeKey = `resume_select_${chatId}`;
+        await ctx.db.insert('conversation_state', {
+          chat_id: resumeKey,
+          conversation_type: 'resume_selection',
+          data: { sessions: [session] },
+          expires_at: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
+        });
+
+        await ctx.reply(message, { parse_mode: 'Markdown' });
+        return;
+      }
+
+      // Multiple paused sessions - show list
+      let message = '⏸️ *المهام الموقوفة:*\n\n';
+      pausedSessions.forEach((s, i) => {
+        message += `${i + 1}. ${s.taskContent}\n`;
+        message += `   ⏱️ ${formatTime(s.totalTimeWorked)} | 🔄 ${s.sessionCount} جلسات\n\n`;
+      });
+      message += `🔢 أرسل رقم المهمة لاستئنافها:`;
+
+      // Store pending selection
+      const resumeKey = `resume_select_${chatId}`;
+      await ctx.db.insert('conversation_state', {
+        chat_id: resumeKey,
+        conversation_type: 'resume_selection',
+        data: { sessions: pausedSessions },
+        expires_at: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
+      });
+
+      await ctx.reply(message, { parse_mode: 'Markdown' });
+
+    } catch (error) {
+      console.error('Resume task error:', error);
+      await ctx.reply('❌ حدث خطأ: ' + (error instanceof Error ? error.message : 'Unknown'));
+    }
+    await sendAutoStatus(ctx);
+  });
+
+  // Abandon session without saving
+  bot.command(['abandonsession', 'abandon_session'], async (ctx) => {
+    try {
+      const chatId = ctx.chat?.id.toString() || '';
+      const taskKey = `active_task_${chatId}`;
+
+      // Get active task
+      const existingTask = await ctx.db.select('conversation_state', {
+        filter: { chat_id: op.eq(taskKey) },
+      });
+
+      if (existingTask.length === 0) {
+        await ctx.reply('❌ لا توجد مهمة نشطة للإلغاء');
+        return;
+      }
+
+      const taskData = (existingTask[0] as any).data || {};
+
+      // Import session manager and abandon
+      const { createTaskSessionManager } = await import('../services/task-session-manager');
+      const sessionMgr = createTaskSessionManager(ctx.db);
+
+      try {
+        await sessionMgr.abandonSession(chatId);
+      } catch {
+        // Session might not exist, that's OK
+      }
+
+      // Delete the active task
+      await ctx.db.delete('conversation_state', { chat_id: op.eq(taskKey) });
+
+      await ctx.reply(
+        `🗑️ *تم إلغاء الجلسة*\n\n` +
+        `📌 ${taskData.taskName}\n\n` +
+        `⚠️ لم يتم حفظ أي وقت لهذه الجلسة.\n` +
+        `استخدم /starttask لبدء مهمة جديدة`,
+        { parse_mode: 'Markdown' }
+      );
+
+    } catch (error) {
+      console.error('Abandon session error:', error);
       await ctx.reply('❌ حدث خطأ: ' + (error instanceof Error ? error.message : 'Unknown'));
     }
     await sendAutoStatus(ctx);
@@ -4143,6 +4438,203 @@ if (pendingConfirm.length > 0) {
   }
   return;
 }
+
+      // Check for pending resume selection (from /resumetask)
+      const resumeKey = `resume_select_${chatId}`;
+      const pendingResume = await ctx.db.select('conversation_state', {
+        filter: { chat_id: op.eq(resumeKey) },
+      });
+
+      if (pendingResume.length > 0) {
+        const resumeData = (pendingResume[0] as any).data || {};
+        const sessions = resumeData.sessions as Array<{ id: string; taskId: string | null; taskContent: string; totalTimeWorked: number; sessionCount: number }> || [];
+
+        // Parse user selection
+        const lowerText = text.trim().toLowerCase();
+        let selectedSession: typeof sessions[0] | undefined;
+
+        // Handle "نعم" or "yes" for single session
+        if (sessions.length === 1 && (lowerText === 'نعم' || lowerText === 'yes' || text.trim() === '1')) {
+          selectedSession = sessions[0];
+        } else {
+          const selection = parseInt(text.trim(), 10);
+          if (!isNaN(selection) && selection >= 1 && selection <= sessions.length) {
+            selectedSession = sessions[selection - 1];
+          }
+        }
+
+        // Delete selection state
+        await ctx.db.delete('conversation_state', { chat_id: op.eq(resumeKey) });
+
+        if (!selectedSession) {
+          await ctx.reply('✅ تم الإلغاء');
+          return;
+        }
+
+        // Resume the session
+        const { createTaskSessionManager } = await import('../services/task-session-manager');
+        const sessionMgr = createTaskSessionManager(ctx.db);
+
+        try {
+          const session = await sessionMgr.resumeSession(selectedSession.id);
+
+          // Create active_task record in conversation_state
+          const taskKey = `active_task_${chatId}`;
+          const startDate = getTodayInEgypt();
+
+          await ctx.db.insert('conversation_state', {
+            chat_id: taskKey,
+            conversation_type: 'active_task',
+            data: {
+              taskName: session.taskContent,
+              todoistTaskId: session.taskId,
+              startTime: Date.now(),
+              startDate: startDate,
+              sessionId: session.id, // Link to session
+              previousTimeWorked: session.totalTimeWorked, // Track cumulative time
+            },
+            expires_at: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
+          });
+
+          const now = new Date();
+          const timeStr = now.toLocaleTimeString('ar-EG', { timeZone: 'Africa/Cairo', hour: '2-digit', minute: '2-digit' });
+
+          // Format time nicely
+          const formatTime = (mins: number): string => {
+            if (mins < 60) return `${mins} دقيقة`;
+            const h = Math.floor(mins / 60);
+            const m = mins % 60;
+            if (m === 0) return h === 1 ? 'ساعة' : `${h} ساعات`;
+            return `${h} ساعة ${m} دقيقة`;
+          };
+
+          await ctx.reply(
+            `▶️ *تم استئناف المهمة!*\n\n` +
+            `📌 ${session.taskContent}\n` +
+            `🕐 استئناف: ${timeStr}\n` +
+            `⏱️ الوقت السابق: ${formatTime(session.totalTimeWorked)}\n` +
+            `🔄 الجلسة رقم: ${session.sessionCount}\n\n` +
+            `━━━━━━━━━━━━━━━━━━\n` +
+            `/completetask - إنهاء المهمة\n` +
+            `/resumelater - إيقاف مؤقت`,
+            { parse_mode: 'Markdown' }
+          );
+        } catch (error) {
+          console.error('Resume session error:', error);
+          await ctx.reply('❌ حدث خطأ أثناء استئناف المهمة');
+        }
+        return;
+      }
+
+      // Check for pending resume decision (from /starttask with paused session)
+      const resumeDecisionKey = `resume_decision_${chatId}`;
+      const pendingDecision = await ctx.db.select('conversation_state', {
+        filter: { chat_id: op.eq(resumeDecisionKey) },
+      });
+
+      if (pendingDecision.length > 0) {
+        const decisionData = (pendingDecision[0] as any).data || {};
+        const selection = text.trim();
+
+        // Delete decision state
+        await ctx.db.delete('conversation_state', { chat_id: op.eq(resumeDecisionKey) });
+
+        const { createTaskSessionManager } = await import('../services/task-session-manager');
+        const sessionMgr = createTaskSessionManager(ctx.db);
+
+        if (selection === '1' || selection === 'نعم' || selection.toLowerCase() === 'yes') {
+          // Resume the paused session
+          try {
+            const session = await sessionMgr.resumeSession(decisionData.sessionId);
+
+            // Create active_task record
+            const taskKey = `active_task_${chatId}`;
+            const startDate = getTodayInEgypt();
+
+            await ctx.db.insert('conversation_state', {
+              chat_id: taskKey,
+              conversation_type: 'active_task',
+              data: {
+                taskName: session.taskContent,
+                todoistTaskId: session.taskId,
+                startTime: Date.now(),
+                startDate: startDate,
+                sessionId: session.id,
+                previousTimeWorked: session.totalTimeWorked,
+              },
+              expires_at: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
+            });
+
+            const now = new Date();
+            const timeStr = now.toLocaleTimeString('ar-EG', { timeZone: 'Africa/Cairo', hour: '2-digit', minute: '2-digit' });
+
+            const formatTime = (mins: number): string => {
+              if (mins < 60) return `${mins} دقيقة`;
+              const h = Math.floor(mins / 60);
+              const m = mins % 60;
+              if (m === 0) return h === 1 ? 'ساعة' : `${h} ساعات`;
+              return `${h} ساعة ${m} دقيقة`;
+            };
+
+            await ctx.reply(
+              `▶️ *تم استئناف المهمة!*\n\n` +
+              `📌 ${session.taskContent}\n` +
+              `🕐 استئناف: ${timeStr}\n` +
+              `⏱️ الوقت السابق: ${formatTime(session.totalTimeWorked)}\n` +
+              `🔄 الجلسة رقم: ${session.sessionCount}\n\n` +
+              `━━━━━━━━━━━━━━━━━━\n` +
+              `/completetask - إنهاء المهمة`,
+              { parse_mode: 'Markdown' }
+            );
+          } catch (error) {
+            console.error('Resume error:', error);
+            await ctx.reply('❌ حدث خطأ أثناء استئناف الجلسة');
+          }
+        } else if (selection === '2' || selection === 'لا' || selection.toLowerCase() === 'no') {
+          // Abandon old session and start fresh
+          try {
+            await sessionMgr.abandonSession(chatId).catch(() => {});
+
+            // Start new session
+            const taskName = decisionData.taskName;
+            const taskKey = `active_task_${chatId}`;
+            const startDate = getTodayInEgypt();
+
+            // Start new tracking session
+            await sessionMgr.startSession(chatId, decisionData.taskId, taskName);
+
+            await ctx.db.insert('conversation_state', {
+              chat_id: taskKey,
+              conversation_type: 'active_task',
+              data: {
+                taskName: taskName,
+                todoistTaskId: decisionData.taskId,
+                startTime: Date.now(),
+                startDate: startDate,
+              },
+              expires_at: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
+            });
+
+            const now = new Date();
+            const timeStr = now.toLocaleTimeString('ar-EG', { timeZone: 'Africa/Cairo', hour: '2-digit', minute: '2-digit' });
+
+            await ctx.reply(
+              `⏱️ *بدأ تتبع المهمة*\n\n` +
+              `📌 ${taskName}\n` +
+              `🕐 البداية: ${timeStr}\n\n` +
+              `_تم إلغاء الجلسة السابقة وبدأنا من الصفر_\n\n` +
+              `/completetask - إنهاء المهمة`,
+              { parse_mode: 'Markdown' }
+            );
+          } catch (error) {
+            console.error('Fresh start error:', error);
+            await ctx.reply('❌ حدث خطأ أثناء بدء الجلسة الجديدة');
+          }
+        } else {
+          await ctx.reply('✅ تم الإلغاء. استخدم /starttask لبدء مهمة جديدة');
+        }
+        return;
+      }
 
       // Check for pending quantity (after /completetask)
       const quantityKey = `task_quantity_${chatId}`;

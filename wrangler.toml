@@ -61,3 +61,8 @@ compatibility_flags = ["nodejs_compat"]
 # Auto-coach check-ins run every 30 minutes
 [triggers]
 crons = ["*/30 * * * *"]
+
+[observability]
+[observability.logs]
+enabled = false
+invocation_logs = true
