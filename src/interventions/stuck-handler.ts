@@ -657,7 +657,7 @@ export class StuckHandler {
 
       // Also get from daily_failures
       const failures = await this.db.select('daily_failures', {
-        order: 'date.desc',
+        order: 'failure_date.desc',
         limit: 7,
       });
 
@@ -699,8 +699,10 @@ export class StuckHandler {
 
       // Process daily_failures
       for (const failure of failures) {
-        const failedTasks = (failure.data as any)?.failed_tasks || [];
-        const failureDate = new Date(failure.date as string);
+        const failuresJson = failure.failures_json;
+        const parsed = typeof failuresJson === 'string' ? JSON.parse(failuresJson) : failuresJson;
+        const failedTasks = parsed?.failed_tasks || [];
+        const failureDate = new Date(failure.failure_date as string);
 
         for (const task of failedTasks) {
           const taskContent = task.content || task.name || 'unknown';

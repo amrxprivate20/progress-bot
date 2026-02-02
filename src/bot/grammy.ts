@@ -27,11 +27,12 @@ import { syncFailuresFromTodoist, completeParentInTodoistIfAllDone } from '../ha
 import type { FailedTask } from '../services/failure-manager';
 import { getDailyFailures, upsertDailyFailures } from '../services/failure-manager';
 
-// Phase 1 Coach Features
+// Coach Features
 import { createStuckHandler } from '../interventions/stuck-handler';
 import { createBattleMode } from '../gamification/battle-mode';
 import { createRoastMode } from '../coach/roast-mode';
-import { createAutoCoach } from '../coach/auto-coach';
+import { createMetaCoach } from '../coach/meta-coach';
+import { createAutofailService, PreparedAutofailData } from '../services/autofail-service';
 
 /**
  * Wrapper for commands that require exclusive lock
@@ -730,7 +731,7 @@ ${memoryContext ? `**معلومات عن المستخدم:**\n${memoryContext}` 
   });
 
   // Helper function to send Telegram messages directly (for background tasks)
-  async function sendTelegramMessageDirect(botToken: string, chatId: string, text: string): Promise<void> {
+  async function sendTelegramMessageDirect(botToken: string, chatId: string, text: string, parseMode?: string): Promise<void> {
     // Split long messages
     const MAX_LENGTH = 4000;
     const chunks: string[] = [];
@@ -755,11 +756,14 @@ ${memoryContext ? `**معلومات عن المستخدم:**\n${memoryContext}` 
     }
 
     for (let i = 0; i < chunks.length; i++) {
-      const chunk = chunks.length > 1 ? `[${i + 1}/${chunks.length}]\n${chunks[i]}` : chunks[i];
+      const chunkText = chunks[i] || '';
+      const chunk = chunks.length > 1 ? `[${i + 1}/${chunks.length}]\n${chunkText}` : chunkText;
+      const body: Record<string, string> = { chat_id: chatId, text: chunk };
+      if (parseMode) body.parse_mode = parseMode;
       await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ chat_id: chatId, text: chunk }),
+        body: JSON.stringify(body),
       });
     }
   }
@@ -3222,6 +3226,10 @@ bot.command('stuck', async (ctx) => {
     // Get low-tier model for coaching
     const aiModel = await getAIModelByTier(ctx.settings, 'low');
 
+    // Get Todoist credentials for task recommendation
+    const todoistToken = await ctx.settings.get('todoist_api_token');
+    const projectId = await ctx.settings.get('todoist_project_id');
+
     // Run in background
     const backgroundTask = (async () => {
       try {
@@ -3230,9 +3238,33 @@ bot.command('stuck', async (ctx) => {
         console.log('✅ AI client created');
         const stuckHandler = createStuckHandler(ctx.db, ctx.settings, (msgs, temp, max) => aiClient.complete(msgs, temp, max));
         console.log('✅ Stuck handler created, starting intervention...');
-        const response = await stuckHandler.startIntervention(chatId);
-        console.log('✅ Intervention response generated:', response.substring(0, 100) + '...');
-        await sendTelegramMessageDirect(botToken, chatId, response);
+
+        // Try task recommendation first if Todoist is configured
+        if (todoistToken) {
+          console.log('🎯 Attempting task recommendation with Todoist...');
+          const result = await stuckHandler.startInterventionWithRecommendation(chatId, todoistToken, projectId || undefined);
+          console.log('✅ Intervention with recommendation generated');
+
+          // If we got a recommendation, set conversation state
+          if (result.recommendation) {
+            await ctx.db.delete('conversation_state', { chat_id: op.eq(chatId) }).catch(() => {});
+            await ctx.db.insert('conversation_state', {
+              chat_id: chatId,
+              conversation_type: 'stuck_recommendation',
+              current_step: 1,
+              data: { recommendation: result.recommendation },
+              expires_at: new Date(Date.now() + 15 * 60 * 1000).toISOString(),
+            });
+          }
+
+          await sendTelegramMessageDirect(botToken, chatId, result.message);
+        } else {
+          // Fall back to regular intervention without recommendation
+          console.log('⚠️ No Todoist token, using regular intervention');
+          const response = await stuckHandler.startIntervention(chatId);
+          console.log('✅ Intervention response generated:', response.substring(0, 100) + '...');
+          await sendTelegramMessageDirect(botToken, chatId, response);
+        }
         console.log('✅ Response sent to user');
       } catch (error) {
         console.error('❌ Stuck background error:', error);
@@ -3492,7 +3524,7 @@ bot.command('weekly_roast', async (ctx) => {
   }
 });
 
-// /coach_check - Manually trigger auto-coach check
+// /coach_check - Manually trigger meta-coach check
 bot.command('coach_check', async (ctx) => {
   try {
     if (!(await checkCoachIdempotency(ctx, 'coach_check'))) return;
@@ -3505,23 +3537,38 @@ bot.command('coach_check', async (ctx) => {
       return;
     }
 
-    await ctx.reply('🔍 جاري فحص الحالة...');
+    await ctx.reply('🔍 جاري تحليل الحالة...');
 
-    // Get low-tier model for auto-coach
+    // Get low-tier model for meta-coach
     const aiModel = await getAIModelByTier(ctx.settings, 'low');
 
     // Run in background
     const backgroundTask = (async () => {
       try {
         const aiClient = createAIClient(apiKey, aiModel);
-        const autoCoach = createAutoCoach(ctx.db, ctx.settings, (msgs, temp, max) => aiClient.complete(msgs, temp, max));
-        const probeResult = await autoCoach.shouldProbe(chatId);
+        const metaCoach = createMetaCoach(ctx.db, ctx.settings, (msgs, temp, max) => aiClient.complete(msgs, temp, max));
 
-        if (probeResult.shouldProbe && probeResult.reason !== 'none') {
-          const message = await autoCoach.generateProbe(chatId, probeResult.reason);
+        // Analyze user state
+        const userState = await metaCoach.analyzeUserState(chatId);
+
+        // Decide intervention
+        const decision = await metaCoach.decideIntervention(userState);
+
+        if (decision.type !== 'none') {
+          const message = await metaCoach.executeIntervention(chatId, decision);
           await sendTelegramMessageDirect(botToken, chatId, message);
         } else {
-          await sendTelegramMessageDirect(botToken, chatId, '✅ لا حاجة للتدخل الآن. كل شيء تمام!');
+          // Show state analysis even if no intervention needed
+          const stateMsg = `✅ *تحليل الحالة*
+
+⏰ ساعات بدون نشاط: ${userState.hoursInactive.toFixed(1)}
+📊 مهام مكتملة اليوم: ${userState.tasksCompletedToday}
+❌ مهام فاشلة: ${userState.tasksFailed}
+🕐 الفترة: ${userState.timeOfDay}
+${userState.activeTaskSession ? '🎯 مهمة نشطة: ' + userState.activeTaskSession.taskContent : ''}
+
+لا حاجة للتدخل الآن.`;
+          await sendTelegramMessageDirect(botToken, chatId, stateMsg, 'Markdown');
         }
       } catch (error) {
         console.error('Coach check background error:', error);
@@ -3541,13 +3588,29 @@ bot.command('coach_check', async (ctx) => {
   }
 });
 
-// /coach_settings - Show current auto-coach settings (no AI needed, so simpler)
+// /coach_settings - Show current coach settings
 bot.command('coach_settings', async (ctx) => {
   try {
     if (!(await checkCoachIdempotency(ctx, 'coach_settings'))) return;
 
-    const autoCoach = createAutoCoach(ctx.db, ctx.settings, async () => '');
-    const config = await autoCoach.getConfig();
+    // Get settings directly
+    const [mode, threshold, sleepStart, sleepEnd, checkins, style] = await Promise.all([
+      ctx.settings.get('coach.auto_mode'),
+      ctx.settings.get('coach.inactivity_threshold_hours'),
+      ctx.settings.get('coach.sleep_start'),
+      ctx.settings.get('coach.sleep_end'),
+      ctx.settings.get('coach.scheduled_checkins'),
+      ctx.settings.get('coach.style'),
+    ]);
+
+    const config = {
+      mode: mode || 'hybrid',
+      inactivityThresholdHours: threshold ? parseFloat(threshold) : 2,
+      sleepStart: sleepStart || '23:00',
+      sleepEnd: sleepEnd || '07:00',
+      scheduledCheckins: checkins ? checkins.split(',').map((t: string) => t.trim()) : ['10:00', '14:00', '18:00'],
+      style: style || 'confrontational',
+    };
 
     const modeEmoji: Record<string, string> = {
       'off': '⏹️',
@@ -3556,17 +3619,25 @@ bot.command('coach_settings', async (ctx) => {
       'hybrid': '🔄',
     };
 
-    const settingsMsg = `⚙️ *إعدادات الكوتش التلقائي*
+    const styleEmoji: Record<string, string> = {
+      'confrontational': '🔥',
+      'supportive': '💚',
+      'balanced': '⚖️',
+    };
+
+    const settingsMsg = `⚙️ *إعدادات الكوتش الذكي*
 
 ${modeEmoji[config.mode] || '❓'} الوضع: *${config.mode}*
+${styleEmoji[config.style] || '❓'} الأسلوب: *${config.style}*
 
 ⏰ عتبة الخمول: *${config.inactivityThresholdHours}* ساعة
 😴 فترة النوم: *${config.sleepStart}* - *${config.sleepEnd}*
 📅 أوقات الفحص: *${config.scheduledCheckins.join(', ')}*
 
 ━━━━━━━━━━━━━━━━
-💡 للتعديل، استخدم API الإعدادات:
-- coach.auto_mode
+💡 للتعديل:
+- coach.auto_mode (off/scheduled/inactivity/hybrid)
+- coach.style (confrontational/supportive/balanced)
 - coach.inactivity_threshold_hours
 - coach.sleep_start / coach.sleep_end
 - coach.scheduled_checkins`;
@@ -3579,39 +3650,60 @@ ${modeEmoji[config.mode] || '❓'} الوضع: *${config.mode}*
   }
 });
 
-// /coach_summary - End of day coaching summary
+// /coach_summary - Show today's coaching interactions summary
 bot.command('coach_summary', async (ctx) => {
   try {
     if (!(await checkCoachIdempotency(ctx, 'coach_summary'))) return;
 
     const chatId = ctx.chat?.id.toString() || '';
-    const botToken = ctx.env.TELEGRAM_BOT_TOKEN;
-    const apiKey = await ctx.settings.get('openrouter_api_key');
-    if (!apiKey) return;
+    const today = getTodayInEgypt();
 
-    await ctx.reply('📊 جاري تحليل تفاعلات اليوم...');
+    // Get today's coaching interactions
+    const interactions = await ctx.db.select('coaching_interactions', {
+      filter: {
+        chat_id: op.eq(chatId),
+        interaction_date: op.eq(today),
+      },
+      order: 'timestamp.desc',
+      limit: 20,
+    });
 
-    // Get low-tier model for auto-coach
-    const aiModel = await getAIModelByTier(ctx.settings, 'low');
-
-    // Run in background
-    const backgroundTask = (async () => {
-      try {
-        const aiClient = createAIClient(apiKey, aiModel);
-        const autoCoach = createAutoCoach(ctx.db, ctx.settings, (msgs, temp, max) => aiClient.complete(msgs, temp, max));
-        const summary = await autoCoach.endOfDaySummary(chatId);
-        await sendTelegramMessageDirect(botToken, chatId, `📈 ملخص الكوتشنج اليومي\n\n${summary}`);
-      } catch (error) {
-        console.error('Coach summary background error:', error);
-        await sendTelegramMessageDirect(botToken, chatId, '❌ حدث خطأ في التحليل');
-      }
-    })();
-
-    if (ctx.executionContext?.waitUntil) {
-      ctx.executionContext.waitUntil(backgroundTask);
-    } else {
-      await backgroundTask;
+    if (interactions.length === 0) {
+      await ctx.reply('📊 لا توجد تفاعلات كوتشنج اليوم.');
+      return;
     }
+
+    // Count by type and outcome
+    const stats = {
+      total: interactions.length,
+      byType: new Map<string, number>(),
+      byOutcome: { positive: 0, negative: 0, pending: 0 },
+    };
+
+    for (const interaction of interactions) {
+      const type = (interaction.interaction_type as string) || 'unknown';
+      stats.byType.set(type, (stats.byType.get(type) || 0) + 1);
+
+      const outcome = (interaction.outcome as string) || 'pending';
+      if (outcome === 'positive') stats.byOutcome.positive++;
+      else if (outcome === 'negative') stats.byOutcome.negative++;
+      else stats.byOutcome.pending++;
+    }
+
+    let summaryMsg = `📈 *ملخص كوتشنج اليوم*\n\n`;
+    summaryMsg += `📊 إجمالي التفاعلات: ${stats.total}\n\n`;
+
+    summaryMsg += `*حسب النوع:*\n`;
+    for (const [type, count] of stats.byType) {
+      summaryMsg += `• ${type}: ${count}\n`;
+    }
+
+    summaryMsg += `\n*حسب النتيجة:*\n`;
+    summaryMsg += `✅ إيجابي: ${stats.byOutcome.positive}\n`;
+    summaryMsg += `❌ سلبي: ${stats.byOutcome.negative}\n`;
+    summaryMsg += `⏳ معلق: ${stats.byOutcome.pending}`;
+
+    await ctx.reply(summaryMsg, { parse_mode: 'Markdown' });
 
   } catch (error) {
     console.error('Coach summary error:', error);
@@ -3627,123 +3719,60 @@ bot.command('autofail', async (ctx) => {
 
     await ctx.reply('🌙 Starting auto-fail...');
 
-    // Get the worker URL from settings or construct from request
-    const autofailSecret = await ctx.settings.get('autofail_secret');
-    
-    if (!autofailSecret) {
-      await ctx.reply('❌ Auto-fail secret not configured in settings');
+    const chatId = ctx.chat?.id.toString() || '';
+    const botToken = ctx.env.TELEGRAM_BOT_TOKEN;
+
+    // Use unified autofail service
+    const autofailService = createAutofailService(ctx.db, ctx.settings);
+
+    // Prepare autofail (forceRun = true to bypass time check)
+    const result = await autofailService.prepareAutofail(botToken, chatId, true);
+
+    // Check if it's an error result
+    if ('triggered' in result) {
+      if (!result.triggered) {
+        await ctx.reply(`⏭️ ${result.reason}`);
+        return;
+      }
+      if (result.taskCount === 0) {
+        await ctx.reply('✅ No tasks to auto-fail!');
+        return;
+      }
+    }
+
+    const data = result as PreparedAutofailData;
+
+    // Get Durable Object stub
+    const jobId = autofailService.getJobId(data.today);
+    const id = ctx.reportProcessorNamespace.idFromName(jobId);
+    const stub = ctx.reportProcessorNamespace.get(id);
+
+    // Check if already running
+    const alreadyRunning = await autofailService.isAlreadyRunning(stub, data.today);
+    if (alreadyRunning) {
+      await ctx.reply('⏭️ Auto-fail already running for today');
       return;
     }
 
-    // Don't call HTTP endpoint - use Durable Object directly
-const today = getTodayInEgypt();
-const todoistToken = await ctx.settings.get('todoist_api_token');
-const todoistProjectId = await ctx.settings.get('todoist_project_id');
-const priorityThresholdStr = await ctx.settings.get('failure_priority_threshold');
-const priorityThreshold = priorityThresholdStr ? parseInt(priorityThresholdStr, 10) : 2;
-const botToken = ctx.env.TELEGRAM_BOT_TOKEN;
+    // Initialize queue
+    await autofailService.initializeQueue(stub, data);
 
-if (!todoistToken) {
-  await ctx.reply('❌ Todoist API token not configured');
-  return;
-}
+    await ctx.reply(
+      `✅ Processing started!\n\n` +
+      `📋 ${data.allTasks.length} tasks (${data.highPriorityTasks.length} tracked)\n\n` +
+      `Progress updates every 20 tasks.`
+    );
 
-// Fetch tasks from Todoist
-let url = 'https://api.todoist.com/rest/v3/tasks';
-if (todoistProjectId) {
-  url += `?project_id=${todoistProjectId.trim()}`;
-}
+    // Process in background
+    const backgroundTask = autofailService.processUntilComplete(stub);
 
-const tasksResponse = await fetch(url, {
-  headers: { 'Authorization': `Bearer ${todoistToken.trim()}` },
-});
-
-if (!tasksResponse.ok) {
-  await ctx.reply(`❌ Failed to fetch tasks from Todoist: ${tasksResponse.status}`);
-  return;
-}
-
-const allTasks = await tasksResponse.json() as Array<{
-  id: string;
-  content: string;
-  priority: number;
-  due?: { date: string; is_recurring?: boolean } | null;
-}>;
-
-// Filter tasks due today
-const tasksDueToday = allTasks.filter(task => {
-  if (!task.due?.date) return false;
-  const dueDate = task.due.date.split('T')[0];
-  return dueDate && dueDate <= today;
-});
-
-// Split by priority
-const highPriorityTasks = tasksDueToday.filter(task => {
-  const ourPriority = 5 - (task.priority || 1);
-  return ourPriority <= priorityThreshold;
-});
-
-const lowPriorityTasks = tasksDueToday.filter(task => {
-  const ourPriority = 5 - (task.priority || 1);
-  return ourPriority > priorityThreshold;
-});
-
-const allTasksToComplete = [...highPriorityTasks, ...lowPriorityTasks];
-
-if (allTasksToComplete.length === 0) {
-  await ctx.reply('✅ No tasks to auto-fail!');
-  return;
-}
-
-// Initialize queue in Durable Object
-const jobId = `autofail_${today}`;
-const id = ctx.reportProcessorNamespace.idFromName(jobId);
-const stub = ctx.reportProcessorNamespace.get(id);
-
-const chatId = ctx.chat?.id.toString() || ''; // ADD THIS LINE
-
-await stub.fetch(new Request('https://fake-host/autofail/init-queue', {
-  method: 'POST',
-  body: JSON.stringify({
-    today,
-    taskIds: allTasksToComplete.map(t => t.id),
-    tasks: allTasksToComplete,
-    metadata: { 
-      chatId, // Now defined above
-      todoistToken: todoistToken.trim(), 
-      botToken, 
-      totalTasks: allTasksToComplete.length,
-      priorityThreshold,
-      highPriorityIds: highPriorityTasks.map(t => t.id),
-    },
-  }),
-}));
-
-await ctx.reply(
-  `✅ Processing started!\n\n` +
-  `📋 ${allTasksToComplete.length} tasks (${highPriorityTasks.length} tracked)\n\n` +
-  `Progress updates every 20 tasks.`
-);
-
-// Process in background
-const backgroundTask = (async () => {
-  while (true) {
-    const result = await stub.fetch(new Request('https://fake-host/autofail/process-batch', {
-      method: 'POST',
-    }));
-    const data = await result.json() as { complete: boolean };
-    if (data.complete) break;
-    await new Promise(r => setTimeout(r, 2000));
-  }
-})();
-
-if (ctx.executionContext?.waitUntil) {
-  ctx.executionContext.waitUntil(backgroundTask);
-}
+    if (ctx.executionContext?.waitUntil) {
+      ctx.executionContext.waitUntil(backgroundTask);
+    }
 
   } catch (error) {
     console.error('Autofail command error:', error);
-    await ctx.reply('❌ حدث خطأ');
+    await ctx.reply('❌ حدث خطأ: ' + (error instanceof Error ? error.message : 'Unknown'));
   }
 });
 
@@ -3764,6 +3793,182 @@ if (ctx.executionContext?.waitUntil) {
 
       // Skip if this is a command
       if (text.startsWith('/')) {
+        return;
+      }
+
+      // Handle stuck recommendation responses (1, 2, or 3)
+      const stuckRecommendSession = await ctx.db.select('conversation_state', {
+        filter: { chat_id: op.eq(chatId), conversation_type: op.eq('stuck_recommendation') },
+        limit: 1,
+      });
+
+      if (stuckRecommendSession.length > 0) {
+        const sessionData = (stuckRecommendSession[0] as any).data || {};
+        const recommendation = sessionData.recommendation;
+        const choice = text.trim();
+
+        // Clear recommendation state
+        await ctx.db.delete('conversation_state', { chat_id: op.eq(chatId), conversation_type: op.eq('stuck_recommendation') });
+
+        const botToken = ctx.env.TELEGRAM_BOT_TOKEN;
+        const apiKey = await ctx.settings.get('openrouter_api_key');
+        const todoistToken = await ctx.settings.get('todoist_api_token');
+        const projectId = await ctx.settings.get('todoist_project_id');
+
+        if (choice === '1' || choice.includes('موافق') || choice.includes('نبدأ')) {
+          // Accept recommendation - start sprint
+          if (recommendation && apiKey) {
+            await ctx.reply('⏳ جاري بدء السبرنت...');
+
+            const backgroundTask = (async () => {
+              try {
+                const aiModel = await getAIModelByTier(ctx.settings, 'low');
+                const aiClient = createAIClient(apiKey, aiModel);
+                const stuckHandler = createStuckHandler(ctx.db, ctx.settings, (msgs, temp, max) => aiClient.complete(msgs, temp, max));
+
+                // Start sprint directly with the recommended task
+                const result = await stuckHandler.processResponse(chatId, recommendation.taskContent);
+                await sendTelegramMessageDirect(botToken, chatId, result.message);
+              } catch (error) {
+                console.error('Stuck recommendation accept error:', error);
+                await sendTelegramMessageDirect(botToken, chatId, '❌ حدث خطأ في بدء السبرنت');
+              }
+            })();
+
+            if (ctx.executionContext?.waitUntil) {
+              ctx.executionContext.waitUntil(backgroundTask);
+            } else {
+              await backgroundTask;
+            }
+          }
+          return;
+        } else if (choice === '2' || choice.includes('تانية') || choice.includes('بدائل')) {
+          // Show alternatives
+          if (todoistToken && recommendation && apiKey) {
+            await ctx.reply('⏳ جاري البحث عن بدائل...');
+
+            const backgroundTask = (async () => {
+              try {
+                const aiModel = await getAIModelByTier(ctx.settings, 'low');
+                const aiClient = createAIClient(apiKey, aiModel);
+                const stuckHandler = createStuckHandler(ctx.db, ctx.settings, (msgs, temp, max) => aiClient.complete(msgs, temp, max));
+
+                const alternatives = await stuckHandler.showAlternatives(chatId, todoistToken, recommendation.taskContent, projectId || undefined);
+                await sendTelegramMessageDirect(botToken, chatId, alternatives);
+
+                // Set state for alternative selection
+                await ctx.db.insert('conversation_state', {
+                  chat_id: chatId,
+                  conversation_type: 'stuck_alternatives',
+                  current_step: 1,
+                  data: { rejectedTask: recommendation.taskContent },
+                  expires_at: new Date(Date.now() + 15 * 60 * 1000).toISOString(),
+                });
+              } catch (error) {
+                console.error('Stuck alternatives error:', error);
+                await sendTelegramMessageDirect(botToken, chatId, '❌ حدث خطأ في عرض البدائل');
+              }
+            })();
+
+            if (ctx.executionContext?.waitUntil) {
+              ctx.executionContext.waitUntil(backgroundTask);
+            } else {
+              await backgroundTask;
+            }
+          }
+          return;
+        } else if (choice === '3' || choice.includes('أختار') || choice.includes('بنفسي')) {
+          // Let user enter their own task
+          await ctx.reply('📝 اكتب اسم المهمة اللي عايز تشتغل عليها:');
+
+          // Set state for custom task entry
+          await ctx.db.insert('conversation_state', {
+            chat_id: chatId,
+            conversation_type: 'stuck_custom_task',
+            current_step: 1,
+            data: {},
+            expires_at: new Date(Date.now() + 15 * 60 * 1000).toISOString(),
+          });
+          return;
+        }
+        // If not a valid choice, continue to regular handling
+      }
+
+      // Handle stuck custom task entry
+      const stuckCustomSession = await ctx.db.select('conversation_state', {
+        filter: { chat_id: op.eq(chatId), conversation_type: op.eq('stuck_custom_task') },
+        limit: 1,
+      });
+
+      if (stuckCustomSession.length > 0) {
+        await ctx.db.delete('conversation_state', { chat_id: op.eq(chatId), conversation_type: op.eq('stuck_custom_task') });
+
+        const apiKey = await ctx.settings.get('openrouter_api_key');
+        const botToken = ctx.env.TELEGRAM_BOT_TOKEN;
+
+        if (apiKey) {
+          await ctx.reply('⏳ جاري بدء السبرنت...');
+
+          const backgroundTask = (async () => {
+            try {
+              const aiModel = await getAIModelByTier(ctx.settings, 'low');
+              const aiClient = createAIClient(apiKey, aiModel);
+              const stuckHandler = createStuckHandler(ctx.db, ctx.settings, (msgs, temp, max) => aiClient.complete(msgs, temp, max));
+
+              // Process with user's custom task
+              const result = await stuckHandler.processResponse(chatId, text);
+              await sendTelegramMessageDirect(botToken, chatId, result.message);
+            } catch (error) {
+              console.error('Stuck custom task error:', error);
+              await sendTelegramMessageDirect(botToken, chatId, '❌ حدث خطأ في بدء السبرنت');
+            }
+          })();
+
+          if (ctx.executionContext?.waitUntil) {
+            ctx.executionContext.waitUntil(backgroundTask);
+          } else {
+            await backgroundTask;
+          }
+        }
+        return;
+      }
+
+      // Handle stuck alternatives selection
+      const stuckAltSession = await ctx.db.select('conversation_state', {
+        filter: { chat_id: op.eq(chatId), conversation_type: op.eq('stuck_alternatives') },
+        limit: 1,
+      });
+
+      if (stuckAltSession.length > 0) {
+        await ctx.db.delete('conversation_state', { chat_id: op.eq(chatId), conversation_type: op.eq('stuck_alternatives') });
+
+        const apiKey = await ctx.settings.get('openrouter_api_key');
+        const botToken = ctx.env.TELEGRAM_BOT_TOKEN;
+
+        if (apiKey) {
+          await ctx.reply('⏳ جاري بدء السبرنت...');
+
+          const backgroundTask = (async () => {
+            try {
+              const aiModel = await getAIModelByTier(ctx.settings, 'low');
+              const aiClient = createAIClient(apiKey, aiModel);
+              const stuckHandler = createStuckHandler(ctx.db, ctx.settings, (msgs, temp, max) => aiClient.complete(msgs, temp, max));
+
+              // Use the selected alternative
+              const result = await stuckHandler.processResponse(chatId, text);
+              await sendTelegramMessageDirect(botToken, chatId, result.message);
+            } catch (error) {
+              console.error('Stuck alternative selection error:', error);
+              await sendTelegramMessageDirect(botToken, chatId, '❌ حدث خطأ في بدء السبرنت');
+            }
+          })();
+
+          if (ctx.executionContext?.waitUntil) {
+            ctx.executionContext.waitUntil(backgroundTask);
+          } else {
+            await backgroundTask;
+          }
+        }
         return;
       }
 

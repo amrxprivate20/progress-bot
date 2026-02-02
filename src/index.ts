@@ -13,6 +13,7 @@ import { asyncHandler, formatErrorResponse, ValidationError } from './utils/erro
 import { ReportProcessor } from './durable-objects/report-processor';
 import { createReportGenerator } from './services/report-generator';
 import { getTodayInEgypt } from './utils/timezone';
+import { createAutofailService, PreparedAutofailData } from './services/autofail-service';
 
 // Extended Env with Durable Object binding
 interface EnvWithDO extends Env {
@@ -26,7 +27,7 @@ export { ReportProcessor }; // Export the Durable Object class
 export default {
   /**
    * Scheduled handler for automatic check-ins (cron-triggered)
-   * Configure in wrangler.toml with crons trigger for auto-coach check-ins
+   * Configure in wrangler.toml with crons trigger for meta-coach interventions
    */
   async scheduled(_event: ScheduledEvent, env: EnvWithDO, _ctx: ExecutionContext): Promise<void> {
     console.log('🕐 Scheduled task triggered at:', new Date().toISOString());
@@ -92,11 +93,11 @@ export default {
     }
 
     // ============================================
-    // AUTO-COACH: Run every 30 minutes
+    // META-COACH: Intelligent intervention system
     // ============================================
     try {
-      // Import auto-coach dependencies
-      const { createAutoCoach } = await import('./coach/auto-coach');
+      // Import meta-coach dependencies
+      const { createMetaCoach } = await import('./coach/meta-coach');
       const { createAIClient } = await import('./services/ai-client');
 
       // Get API key and chat ID
@@ -105,42 +106,83 @@ export default {
       const botToken = env.TELEGRAM_BOT_TOKEN;
 
       if (!apiKey || !chatId) {
-        console.log('⏭️ Auto-coach skipped: missing API key or chat ID');
+        console.log('⏭️ Meta-coach skipped: missing API key or chat ID');
         return;
       }
 
-      // Create auto-coach - use LOW-TIER model for coaching probes
+      // Check if coach is enabled
+      const coachMode = await settings.get('coach.auto_mode');
+      if (coachMode === 'off') {
+        console.log('⏭️ Meta-coach skipped: auto_mode is off');
+        return;
+      }
+
+      // Check sleep period
+      const sleepStart = await settings.get('coach.sleep_start') || '23:00';
+      const sleepEnd = await settings.get('coach.sleep_end') || '07:00';
+
+      const currentMinutes = egyptHour * 60 + egyptMinute;
+      const [startH, startM] = sleepStart.split(':').map(Number);
+      const [endH, endM] = sleepEnd.split(':').map(Number);
+      const sleepStartMinutes = (startH || 0) * 60 + (startM || 0);
+      const sleepEndMinutes = (endH || 0) * 60 + (endM || 0);
+
+      // Handle overnight sleep (e.g., 23:00 to 07:00)
+      const isInSleep = sleepStartMinutes > sleepEndMinutes
+        ? (currentMinutes >= sleepStartMinutes || currentMinutes < sleepEndMinutes)
+        : (currentMinutes >= sleepStartMinutes && currentMinutes < sleepEndMinutes);
+
+      if (isInSleep) {
+        console.log('⏭️ Meta-coach skipped: sleep period');
+        return;
+      }
+
+      // Create meta-coach - use LOW-TIER model for coaching
       const aiModel = await getAIModelByTier(settings, 'low');
       const aiClient = createAIClient(apiKey, aiModel);
-      const autoCoach = createAutoCoach(db, settings, (msgs, temp, max) => aiClient.complete(msgs, temp, max));
+      const metaCoach = createMetaCoach(db, settings, (msgs, temp, max) => aiClient.complete(msgs, temp, max));
 
-      // Check if we should send a probe
-      const probeResult = await autoCoach.shouldProbe(chatId);
+      // Analyze user state
+      const userState = await metaCoach.analyzeUserState(chatId);
+      console.log(`📊 User state: ${userState.hoursInactive.toFixed(1)}h inactive, ${userState.tasksCompletedToday} tasks, ${userState.timeOfDay}, last intervention ${userState.minutesSinceLastIntervention.toFixed(0)}min ago`);
 
-      if (probeResult.shouldProbe && probeResult.reason !== 'none') {
-        console.log(`✅ Auto-coach probe triggered: ${probeResult.reason}`);
+      // Rate limiting: Don't send if last intervention was less than 45 minutes ago
+      // (except for escalation when outcome is pending)
+      const minIntervalMinutes = 45;
+      if (userState.minutesSinceLastIntervention < minIntervalMinutes && userState.lastInterventionOutcome !== 'pending') {
+        console.log(`⏭️ Meta-coach skipped: rate limit (${userState.minutesSinceLastIntervention.toFixed(0)}min < ${minIntervalMinutes}min)`);
+        return;
+      }
 
-        // Generate and send the probe
-        const message = await autoCoach.generateProbe(chatId, probeResult.reason);
+      // Decide which intervention to use
+      const decision = await metaCoach.decideIntervention(userState);
 
-        // Send via Telegram API directly
-        const telegramResponse = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            chat_id: chatId,
-            text: message,
-            parse_mode: 'Markdown',
-          }),
-        });
+      if (decision.type !== 'none') {
+        console.log(`✅ Meta-coach intervention: ${decision.type} (level ${decision.escalationLevel})`);
 
-        if (telegramResponse.ok) {
-          console.log('✅ Auto-coach message sent successfully');
-        } else {
-          console.error('❌ Failed to send auto-coach message:', await telegramResponse.text());
+        // Execute the intervention
+        const message = await metaCoach.executeIntervention(chatId, decision);
+
+        if (message) {
+          // Send via Telegram API directly
+          const telegramResponse = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              chat_id: chatId,
+              text: message,
+              parse_mode: 'Markdown',
+            }),
+          });
+
+          if (telegramResponse.ok) {
+            console.log('✅ Meta-coach message sent successfully');
+          } else {
+            console.error('❌ Failed to send meta-coach message:', await telegramResponse.text());
+          }
         }
       } else {
-        console.log('⏭️ No auto-coach probe needed');
+        console.log(`⏭️ No intervention needed (decision: ${decision.type})`);
       }
     } catch (error) {
       console.error('❌ Scheduled task error:', error);
@@ -781,13 +823,13 @@ function getWeekEndDate(): string {
 // ============================================
 
 /**
- * Initialize auto-fail: fetch tasks from Todoist, filter due today,
- * split by priority, queue them in Durable Object if any exist
+ * Initialize auto-fail: uses unified autofail service
+ * Reads trigger time from settings (autofail_time, format HH:MM, default "23:00" = 11 PM Egypt)
  */
 async function handleAutoFailInit(
   request: Request,
   env: EnvWithDO,
-  _db: any,
+  db: any,
   settings: SettingsManager
 ): Promise<Response> {
   // Authenticate
@@ -796,132 +838,79 @@ async function handleAutoFailInit(
     return new Response('Unauthorized', { status: 401 });
   }
 
-  const today = getTodayInEgypt();
-  const todoistToken = await settings.get('todoist_api_token');
-  const todoistProjectId = await settings.get('todoist_project_id');
-  const priorityThresholdStr = await settings.get('failure_priority_threshold');
-  const priorityThreshold = priorityThresholdStr ? parseInt(priorityThresholdStr, 10) : 2;
   const chatId = env.TELEGRAM_CHAT_ID || await settings.get('telegram_chat_id');
   const botToken = env.TELEGRAM_BOT_TOKEN;
 
-  if (!todoistToken || !chatId) {
+  if (!chatId) {
     return new Response(
-      JSON.stringify({ success: false, error: 'Missing configuration' }),
+      JSON.stringify({ success: false, error: 'Missing chat ID configuration' }),
       { status: 400, headers: { 'Content-Type': 'application/json' } }
     );
   }
 
-  // Check if already processing
-  const jobId = `autofail_${today}`;
+  // Use unified autofail service
+  const autofailService = createAutofailService(db, settings);
+
+  // Prepare autofail (forceRun = true for scheduled trigger to bypass time check)
+  // The scheduled trigger is already time-gated by the GitHub workflow
+  const result = await autofailService.prepareAutofail(botToken, chatId, true);
+
+  // Check if it's an error result
+  if ('triggered' in result) {
+    if (!result.triggered) {
+      return new Response(
+        JSON.stringify({ success: false, error: result.reason }),
+        { status: 400, headers: { 'Content-Type': 'application/json' } }
+      );
+    }
+    if (result.taskCount === 0) {
+      await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          chat_id: chatId,
+          text: '✅ لا توجد مهام للتسجيل كفاشلة',
+        }),
+      });
+
+      return new Response(
+        JSON.stringify({ success: true, totalTasks: 0, message: 'No tasks to process' }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } }
+      );
+    }
+  }
+
+  const data = result as PreparedAutofailData;
+
+  // Get Durable Object stub
+  const jobId = autofailService.getJobId(data.today);
   const id = env.REPORT_PROCESSOR.idFromName(jobId);
   const stub = env.REPORT_PROCESSOR.get(id);
 
-  const existingQueue = await stub.fetch(new Request('https://fake-host/autofail/check-queue', {
-    method: 'POST',
-    body: JSON.stringify({ today }),
-  }));
-  const queueData = await existingQueue.json() as { exists: boolean };
-
-  if (queueData.exists) {
+  // Check if already running
+  const alreadyRunning = await autofailService.isAlreadyRunning(stub, data.today);
+  if (alreadyRunning) {
     return new Response(
       JSON.stringify({ success: false, error: 'Already processing' }),
       { status: 409, headers: { 'Content-Type': 'application/json' } }
     );
   }
 
-  // Fetch tasks from Todoist
-  let url = 'https://api.todoist.com/rest/v3/tasks';
-  if (todoistProjectId) {
-    url += `?project_id=${todoistProjectId.trim()}`;
-  }
+  // Initialize queue
+  await autofailService.initializeQueue(stub, data);
 
-  const tasksResponse = await fetch(url, {
-    headers: { 'Authorization': `Bearer ${todoistToken.trim()}` },
-  });
-
-  if (!tasksResponse.ok) {
-    return new Response(
-      JSON.stringify({ success: false, error: `Todoist API error: ${tasksResponse.status}` }),
-      { status: 500, headers: { 'Content-Type': 'application/json' } }
-    );
-  }
-
-  const allTasks = await tasksResponse.json() as Array<{
-    id: string;
-    content: string;
-    priority: number;
-    due?: { date: string; is_recurring?: boolean } | null;
-  }>;
-
-  // Filter tasks due today or earlier
-  const tasksDueToday = allTasks.filter(task => {
-    if (!task.due?.date) return false;
-    const dueDate = task.due.date.split('T')[0];
-    return dueDate && dueDate <= today;
-  });
-
-  // Split tasks: high-priority (track failures) vs low-priority (just complete)
-  const highPriorityTasks = tasksDueToday.filter(task => {
-    const ourPriority = 5 - (task.priority || 1);
-    return ourPriority <= priorityThreshold;
-  });
-
-  const lowPriorityTasks = tasksDueToday.filter(task => {
-    const ourPriority = 5 - (task.priority || 1);
-    return ourPriority > priorityThreshold;
-  });
-
-  const allTasksToComplete = [...highPriorityTasks, ...lowPriorityTasks];
-
-  // ── Early exit when no tasks to process ───────────────────────────────
-  if (allTasksToComplete.length === 0) {
-    await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        chat_id: chatId,
-        text: '✅ لا توجد مهام للتسجيل كفاشلة',
-      }),
-    });
-
-    return new Response(
-      JSON.stringify({ success: true, totalTasks: 0, message: 'No tasks to process' }),
-      { status: 200, headers: { 'Content-Type': 'application/json' } }
-    );
-  }
-
-  // ── Initialize queue in Durable Object ───────────────────────────────
-  await stub.fetch(new Request('https://fake-host/autofail/init-queue', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      today,
-      taskIds: allTasksToComplete.map(t => t.id),
-      tasks: allTasksToComplete,
-      metadata: {
-        chatId,
-        todoistToken: todoistToken.trim(),
-        botToken,
-        totalTasks: allTasksToComplete.length,
-        priorityThreshold,
-        highPriorityIds: highPriorityTasks.map(t => t.id),
-      },
-    }),
-  }));
-
-  // ── Notify user that auto-fail has started ────────────────────────────
+  // Notify user
   await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       chat_id: chatId,
-      text: `🌙 Auto-fail initialized\n📋 ${allTasksToComplete.length} tasks queued`,
+      text: `🌙 Auto-fail initialized\n📋 ${data.allTasks.length} tasks queued (${data.highPriorityTasks.length} tracked)`,
     }),
   });
 
-  // ── Success response ──────────────────────────────────────────────────
   return new Response(
-    JSON.stringify({ success: true, totalTasks: allTasksToComplete.length, jobId }),
+    JSON.stringify({ success: true, totalTasks: data.allTasks.length, jobId }),
     { status: 200, headers: { 'Content-Type': 'application/json' } }
   );
 }

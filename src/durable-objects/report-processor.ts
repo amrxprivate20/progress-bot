@@ -11,8 +11,8 @@ import { SettingsManager as SettingsMgr } from '../database/settings';
 import { createReportGenerator } from '../services/report-generator';
 import { createUnifiedAIClient } from '../services/ai-client';
 import { createMemoryManager } from '../services/memory-manager';
-import { createDriveService } from '../services/google-drive';
 import { createDebugLogger } from '../utils/debug-logger';
+import { createAutofailService, PreparedAutofailData } from '../services/autofail-service';
 
 // ============================================
 // Extended Env with Durable Object binding
@@ -590,25 +590,6 @@ const aiResponse = await aiClient.generateDailyReport({
         console.log(`ℹ️ [Job ${jobId}] Memory optimization needed - will run on next report`);
       }
 
-      // Save to Google Drive (if configured) - wrapped in try to avoid subrequest limits
-      try {
-        const driveService = createDriveService(db, settings);
-        const driveResult = await driveService.saveReport({
-          report_date: new Date(reportData.date),
-          report_markdown: aiResponse.mainCommentary,
-          success_rate: stats.success_rate,
-          total_tasks: stats.total_tasks,
-          completed_tasks: stats.completed_tasks,
-          failed_tasks: stats.failed_tasks,
-        } as any);
-
-        if (driveResult.success) {
-          console.log(`☁️ [Job ${jobId}] Report saved to Google Drive`);
-        }
-      } catch (driveError) {
-        console.warn(`⚠️ [Job ${jobId}] Google Drive skipped (subrequest limit)`);
-      }
-
       // Mark as completed
       this.status = {
         status: 'completed',
@@ -624,111 +605,61 @@ const aiResponse = await aiClient.generateDailyReport({
       };
 
       console.log(`🎉 [Job ${jobId}] Processing complete!`);
-	// ✅ Auto-trigger autofail if report saved on same day (earlier trigger at 11 PM Egypt time)
-const reportDate = reportData.date;
-const egyptNow = new Date().toLocaleString('en-US', { timeZone: 'Africa/Cairo' });
-const egyptToday = new Date(egyptNow).toISOString().split('T')[0];
-const egyptHour = new Date(egyptNow).getHours();
 
-// Trigger if: same day AND after 11 PM Egypt time (23:00)
-if (reportDate === egyptToday && egyptHour >= 23) {
-  console.log(`✅ Same-day report (${reportDate}) after 11 PM - triggering auto-fail`);
-  
-  // Trigger auto-fail in background (don't await)
-  this.ctx.waitUntil((async () => {
-    try {
-      const todoistToken = await settings.get('todoist_api_token');
-      const todoistProjectId = await settings.get('todoist_project_id');
-      const priorityThresholdStr = await settings.get('failure_priority_threshold');
-      const priorityThreshold = priorityThresholdStr ? parseInt(priorityThresholdStr, 10) : 2;
+      // ✅ Auto-trigger autofail using unified service
+      const reportDate = reportData.date;
+      const egyptNow = new Date().toLocaleString('en-US', { timeZone: 'Africa/Cairo' });
+      const egyptToday = new Date(egyptNow).toISOString().split('T')[0];
 
-      if (!todoistToken) return;
+      // Only trigger for same-day reports
+      if (reportDate === egyptToday) {
+        // Use unified autofail service (respects settings for trigger hour)
+        this.ctx.waitUntil((async () => {
+          try {
+            const autofailService = createAutofailService(db, settings);
 
-      // Fetch tasks
-      let url = 'https://api.todoist.com/rest/v3/tasks';
-      if (todoistProjectId) url += `?project_id=${todoistProjectId.trim()}`;
+            // Prepare autofail (not forced - respects time settings)
+            const result = await autofailService.prepareAutofail(botToken, chatId, false);
 
-      const tasksResponse = await fetch(url, {
-        headers: { 'Authorization': `Bearer ${todoistToken.trim()}` },
-      });
+            // Check if it's an error or no-trigger result
+            if ('triggered' in result) {
+              if (!result.triggered) {
+                console.log(`⏭️ Auto-fail skipped: ${result.reason}`);
+                return;
+              }
+              if (result.taskCount === 0) {
+                console.log('✅ No tasks to auto-fail');
+                return;
+              }
+            }
 
-      if (!tasksResponse.ok) return;
+            const data = result as PreparedAutofailData;
 
-      const allTasks = await tasksResponse.json() as Array<{
-        id: string; content: string; priority: number;
-        due?: { date: string } | null;
-      }>;
+            // Get Durable Object stub for autofail processing
+            const afJobId = autofailService.getJobId(data.today);
+            const id = this.env.REPORT_PROCESSOR.idFromName(afJobId);
+            const stub = this.env.REPORT_PROCESSOR.get(id);
 
-      const tasksDueToday = allTasks.filter(task => {
-        if (!task.due?.date) return false;
-        const dueDate = task.due.date.split('T')[0];
-        return dueDate && dueDate <= reportDate;
-      });
+            // Check if already running
+            const alreadyRunning = await autofailService.isAlreadyRunning(stub, data.today);
+            if (alreadyRunning) {
+              console.log('⏭️ Auto-fail already running for today');
+              return;
+            }
 
-      const highPriorityTasks = tasksDueToday.filter(task => {
-        const ourPriority = 5 - (task.priority || 1);
-        return ourPriority <= priorityThreshold;
-      });
+            // Initialize and process
+            await autofailService.initializeQueue(stub, data);
+            console.log(`🌙 Auto-fail triggered: ${data.allTasks.length} tasks`);
 
-      const lowPriorityTasks = tasksDueToday.filter(task => {
-        const ourPriority = 5 - (task.priority || 1);
-        return ourPriority > priorityThreshold;
-      });
-
-      const allTasksToComplete = [...highPriorityTasks, ...lowPriorityTasks];
-      if (allTasksToComplete.length === 0) return;
-
-      // ✅ FIX: Use this.ctx.env instead of this.env
-      const jobId = `autofail_${reportDate}`;
-      const id = this.env.REPORT_PROCESSOR.idFromName(jobId);
-      const stub = this.env.REPORT_PROCESSOR.get(id);
-
-      // Check if already processing
-      const queueCheck = await stub.fetch(new Request('https://fake-host/autofail/check-queue', {
-        method: 'POST',
-        body: JSON.stringify({ today: reportDate }),
-      }));
-      const queueData = await queueCheck.json() as { exists: boolean };
-      if (queueData.exists) return; // Already processing
-
-      // Initialize queue
-      await stub.fetch(new Request('https://fake-host/autofail/init-queue', {
-        method: 'POST',
-        body: JSON.stringify({
-          today: reportDate,
-          taskIds: allTasksToComplete.map(t => t.id),
-          tasks: allTasksToComplete,
-          metadata: {
-            chatId,
-            todoistToken: todoistToken.trim(),
-            botToken,
-            totalTasks: allTasksToComplete.length,
-            priorityThreshold,
-            highPriorityIds: highPriorityTasks.map(t => t.id),
-          },
-        }),
-      }));
-
-      console.log(`🌙 Auto-fail triggered: ${allTasksToComplete.length} tasks`);
-
-      // Process batches
-      while (true) {
-        const result = await stub.fetch(new Request('https://fake-host/autofail/process-batch', {
-          method: 'POST',
-        }));
-        const data = await result.json() as { complete: boolean };
-        if (data.complete) break;
-        await new Promise(r => setTimeout(r, 2000));
+            await autofailService.processUntilComplete(stub);
+            console.log('✅ Auto-fail completed');
+          } catch (error) {
+            console.error('Auto-fail trigger error:', error);
+          }
+        })());
+      } else {
+        console.log(`⏭️ Different-day report (${reportDate} vs ${egyptToday}) - skipping auto-fail`);
       }
-    } catch (error) {
-      console.error('Auto-fail trigger error:', error);
-    }
-  })());
-} else if (reportDate !== egyptToday) {
-  console.log(`⏭️ Different-day report (${reportDate} vs ${egyptToday}) - skipping auto-fail`);
-} else {
-  console.log(`⏭️ Same-day report but before 6 PM (${egyptHour}:00) - skipping auto-fail`);
-}
     } catch (error) {
       console.error(`💥 [Job ${jobId}] Error:`, error);
 

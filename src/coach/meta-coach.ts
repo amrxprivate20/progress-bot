@@ -153,10 +153,12 @@ export class MetaCoach {
 
     // Get failed tasks count
     const failedTasks = await this.db.select('daily_failures', {
-      filter: { date: op.eq(today) },
+      filter: { failure_date: op.eq(today) },
       limit: 1,
     });
-    const tasksFailed = (failedTasks[0]?.data as any)?.failed_tasks?.length || 0;
+    const failuresJson = failedTasks[0]?.failures_json;
+    const parsedFailures = typeof failuresJson === 'string' ? JSON.parse(failuresJson) : failuresJson;
+    const tasksFailed = parsedFailures?.failed_tasks?.length || 0;
 
     return {
       hoursInactive,
@@ -199,18 +201,16 @@ export class MetaCoach {
     // Decision matrix
     const escalationLevel = this.calculateEscalationLevel(state);
 
-    // Morning with no activity: Gentle check-in
-    if (state.timeOfDay === 'morning' && state.tasksCompletedToday === 0 && state.hoursInactive < 2) {
-      return {
-        type: 'gentle_checkin',
-        message: '',
-        escalationLevel: 1,
-        followUpDelay: 60, // Check again in 1 hour
-      };
-    }
+    // Get inactivity threshold from settings (default 2 hours)
+    const thresholdStr = await this.settings.get('coach.inactivity_threshold_hours');
+    const inactivityThreshold = thresholdStr ? parseFloat(thresholdStr) : 2;
 
-    // High inactivity + ignored last intervention: Escalate
-    if (state.hoursInactive >= 2 && state.lastInterventionOutcome === 'pending' && state.minutesSinceLastIntervention >= 30) {
+    // ============================================
+    // HIGH PRIORITY: Escalation for ignored interventions
+    // ============================================
+    if (state.hoursInactive >= inactivityThreshold &&
+        state.lastInterventionOutcome === 'pending' &&
+        state.minutesSinceLastIntervention >= 30) {
       return {
         type: 'escalation',
         message: '',
@@ -219,7 +219,76 @@ export class MetaCoach {
       };
     }
 
-    // Multiple deferrals + same tasks keep failing: Stuck mode with recommendation
+    // ============================================
+    // Evening + low completion: Urgent combined intervention
+    // ============================================
+    if (state.timeOfDay === 'evening' && state.tasksCompletedToday < 3) {
+      return {
+        type: 'combined',
+        components: ['stuck_mode', 'roast'],
+        message: '',
+        escalationLevel: Math.min(5, escalationLevel + 1),
+        followUpDelay: 30,
+      };
+    }
+
+    // ============================================
+    // Afternoon with high inactivity: Escalation
+    // ============================================
+    if (state.timeOfDay === 'afternoon' && state.hoursInactive >= inactivityThreshold) {
+      // Battle mode active + high boss HP: Battle narrative
+      if (state.currentBattleState) {
+        const bossHP = state.currentBattleState.bossCurrentHP || 0;
+        const maxHP = state.currentBattleState.bossMaxHP || 100;
+        const hpPercent = (bossHP / maxHP) * 100;
+
+        if (hpPercent > 50) {
+          return {
+            type: 'battle_narrative',
+            message: '',
+            escalationLevel,
+            followUpDelay: 60,
+          };
+        }
+      }
+
+      // Regular afternoon escalation
+      return {
+        type: 'escalation',
+        message: '',
+        escalationLevel,
+        followUpDelay: 45,
+      };
+    }
+
+    // ============================================
+    // Morning: Check-in or escalation based on inactivity
+    // ============================================
+    if (state.timeOfDay === 'morning') {
+      // Just started the day, gentle check-in
+      if (state.tasksCompletedToday === 0 && state.hoursInactive < inactivityThreshold) {
+        return {
+          type: 'gentle_checkin',
+          message: '',
+          escalationLevel: 1,
+          followUpDelay: 60,
+        };
+      }
+
+      // Morning but inactive too long - escalate
+      if (state.hoursInactive >= inactivityThreshold) {
+        return {
+          type: 'escalation',
+          message: '',
+          escalationLevel,
+          followUpDelay: 45,
+        };
+      }
+    }
+
+    // ============================================
+    // Multiple deferrals + avoidance patterns: Task recommendation
+    // ============================================
     if (state.deferralsToday >= 2 && state.avoidancePatterns.length > 0) {
       return {
         type: 'task_recommendation',
@@ -230,37 +299,12 @@ export class MetaCoach {
       };
     }
 
-    // Battle mode active + high boss HP + afternoon: Battle narrative urgency
-    if (state.currentBattleState && state.timeOfDay === 'afternoon') {
-      const bossHP = state.currentBattleState.bossCurrentHP || 0;
-      const maxHP = state.currentBattleState.bossMaxHP || 100;
-      const hpPercent = (bossHP / maxHP) * 100;
-
-      if (hpPercent > 80) {
-        return {
-          type: 'battle_narrative',
-          message: '',
-          escalationLevel,
-          followUpDelay: 60,
-        };
-      }
-    }
-
-    // Evening + low completion: Urgent combined intervention
-    if (state.timeOfDay === 'evening' && state.tasksCompletedToday < 3 && state.tasksFailed > 2) {
+    // ============================================
+    // General inactivity fallback: Escalation (not just stuck suggestion)
+    // ============================================
+    if (state.hoursInactive >= inactivityThreshold) {
       return {
-        type: 'combined',
-        components: ['stuck_mode', 'roast'],
-        message: '',
-        escalationLevel: Math.min(5, escalationLevel + 1),
-        followUpDelay: 30,
-      };
-    }
-
-    // General inactivity: Regular stuck mode
-    if (state.hoursInactive >= 2) {
-      return {
-        type: 'stuck_mode',
+        type: 'escalation',
         message: '',
         escalationLevel,
         followUpDelay: 45,

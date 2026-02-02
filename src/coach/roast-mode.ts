@@ -299,14 +299,16 @@ Include:
       startDate.setDate(startDate.getDate() - days);
 
       const dailyFailures = await this.db.select('daily_failures', {
-        filter: { date: op.gte(startDate.toISOString().split('T')[0]) },
+        filter: { failure_date: op.gte(startDate.toISOString().split('T')[0]) },
       });
 
       for (const day of dailyFailures) {
-        const dayFailures = (day.failed_tasks as any[]) || [];
+        const failuresJson = day.failures_json;
+        const parsed = typeof failuresJson === 'string' ? JSON.parse(failuresJson) : failuresJson;
+        const dayFailures = parsed?.failed_tasks || [];
         for (const task of dayFailures) {
           failures.push({
-            date: day.date as string,
+            date: day.failure_date as string,
             task: task.content || task.name || 'unknown',
           });
         }
