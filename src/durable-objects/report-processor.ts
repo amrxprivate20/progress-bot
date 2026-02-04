@@ -79,12 +79,36 @@ export class ReportProcessor extends DurableObject<EnvWithDO> {
       });
     }
 
-	// Auto-fail queue management routes
+    // Auto-fail queue management routes
     if (url.pathname === '/autofail/check-queue' && request.method === 'POST') {
       const body = await request.json() as { today: string };
+
+      // First check: Is there ANY active autofail running (any date)?
+      const activeDate = await this.ctx.storage.get<string>('autofail_active_date');
+      if (activeDate) {
+        const activeQueue = await this.ctx.storage.get<string[]>(`autofail_queue_${activeDate}`);
+        const activeProcessed = await this.ctx.storage.get<string[]>(`autofail_processed_${activeDate}`) || [];
+        const activeRemaining = activeQueue ? activeQueue.filter(id => !activeProcessed.includes(id)).length : 0;
+
+        if (activeRemaining > 0) {
+          console.log(`⚠️ Active autofail for ${activeDate} still has ${activeRemaining} tasks remaining`);
+          return new Response(
+            JSON.stringify({ exists: true, activeDate, remaining: activeRemaining }),
+            { headers: { 'Content-Type': 'application/json' } }
+          );
+        }
+      }
+
+      // Second check: Is the requested day's queue still running?
       const queue = await this.ctx.storage.get<string[]>(`autofail_queue_${body.today}`);
+      const processed = await this.ctx.storage.get<string[]>(`autofail_processed_${body.today}`) || [];
+
+      // Queue exists AND has unprocessed items = still running
+      // Queue doesn't exist OR all items processed = can run again
+      const isRunning = queue && queue.length > 0 && processed.length < queue.length;
+
       return new Response(
-        JSON.stringify({ exists: !!queue }),
+        JSON.stringify({ exists: isRunning }),
         { headers: { 'Content-Type': 'application/json' } }
       );
     }
@@ -128,9 +152,47 @@ export class ReportProcessor extends DurableObject<EnvWithDO> {
       await this.ctx.storage.delete(`autofail_tasks_${body.today}`);
       await this.ctx.storage.delete(`autofail_metadata_${body.today}`);
       await this.ctx.storage.delete(`autofail_processed_${body.today}`);
-      
+      await this.ctx.storage.delete('autofail_active_date');
+
       return new Response(
         JSON.stringify({ success: true }),
+        { headers: { 'Content-Type': 'application/json' } }
+      );
+    }
+
+    // Start alarm-based autofail processing (reliable, no timeout)
+    if (url.pathname === '/autofail/start-alarm' && request.method === 'POST') {
+      const body = await request.json() as { today: string };
+
+      // Guard: Check if autofail is already in progress
+      const existingActiveDate = await this.ctx.storage.get<string>('autofail_active_date');
+      if (existingActiveDate) {
+        const existingQueue = await this.ctx.storage.get<string[]>(`autofail_queue_${existingActiveDate}`);
+        const existingProcessed = await this.ctx.storage.get<string[]>(`autofail_processed_${existingActiveDate}`) || [];
+        const remaining = existingQueue ? existingQueue.filter(id => !existingProcessed.includes(id)).length : 0;
+
+        if (remaining > 0) {
+          console.log(`⚠️ Autofail already in progress for ${existingActiveDate} (${remaining} tasks remaining)`);
+          return new Response(
+            JSON.stringify({
+              success: false,
+              error: `Autofail already in progress for ${existingActiveDate}`,
+              activeDate: existingActiveDate,
+              remaining,
+            }),
+            { status: 409, headers: { 'Content-Type': 'application/json' } }
+          );
+        }
+      }
+
+      // Store the active date so alarm knows what to process
+      await this.ctx.storage.put('autofail_active_date', body.today);
+
+      // Schedule first alarm immediately (100ms delay to return response first)
+      await this.ctx.storage.setAlarm(Date.now() + 100);
+
+      return new Response(
+        JSON.stringify({ success: true, message: 'Alarm-based processing started' }),
         { headers: { 'Content-Type': 'application/json' } }
       );
     }
@@ -171,6 +233,48 @@ export class ReportProcessor extends DurableObject<EnvWithDO> {
     return new Response('Not found', { status: 404 });
   }
 
+  /**
+   * Alarm handler - continues autofail processing reliably
+   * This is called by Cloudflare's alarm system, not subject to request timeouts
+   */
+  override async alarm(): Promise<void> {
+    console.log('⏰ Autofail alarm triggered');
+
+    try {
+      // Get the active date we're processing
+      const activeDate = await this.ctx.storage.get<string>('autofail_active_date');
+
+      if (!activeDate) {
+        console.log('⏰ No active autofail date - alarm cancelled');
+        return;
+      }
+
+      // Process one batch
+      const result = await this.processAutoFailBatch();
+
+      console.log(`⏰ Batch result: processed=${result.processed}, remaining=${result.remaining}, complete=${result.complete}`);
+
+      if (!result.complete) {
+        // Schedule next alarm in 2 seconds
+        await this.ctx.storage.setAlarm(Date.now() + 2000);
+        console.log('⏰ Next alarm scheduled in 2 seconds');
+      } else {
+        // All done - clear active date
+        await this.ctx.storage.delete('autofail_active_date');
+        console.log('⏰ Autofail complete via alarm - active date cleared');
+      }
+    } catch (error) {
+      console.error('⏰ Alarm processing error:', error);
+
+      // On error, try to continue after a longer delay
+      const activeDate = await this.ctx.storage.get<string>('autofail_active_date');
+      if (activeDate) {
+        // Retry in 5 seconds
+        await this.ctx.storage.setAlarm(Date.now() + 5000);
+        console.log('⏰ Error recovery - retry scheduled in 5 seconds');
+      }
+    }
+  }
 
   /**
    * Process the report in background
@@ -618,8 +722,8 @@ const aiResponse = await aiClient.generateDailyReport({
           try {
             const autofailService = createAutofailService(db, settings);
 
-            // Prepare autofail (not forced - respects time settings)
-            const result = await autofailService.prepareAutofail(botToken, chatId, false);
+            // Prepare autofail (forced - run immediately after report)
+            const result = await autofailService.prepareAutofail(botToken, chatId, true);
 
             // Check if it's an error or no-trigger result
             if ('triggered' in result) {
@@ -647,12 +751,13 @@ const aiResponse = await aiClient.generateDailyReport({
               return;
             }
 
-            // Initialize and process
+            // Initialize queue
             await autofailService.initializeQueue(stub, data);
             console.log(`🌙 Auto-fail triggered: ${data.allTasks.length} tasks`);
 
-            await autofailService.processUntilComplete(stub);
-            console.log('✅ Auto-fail completed');
+            // Start alarm-based processing (reliable, no timeout)
+            await autofailService.startAlarmProcessing(stub, data.today);
+            console.log('✅ Auto-fail alarm started');
           } catch (error) {
             console.error('Auto-fail trigger error:', error);
           }
@@ -991,9 +1096,18 @@ const aiResponse = await aiClient.generateDailyReport({
     totalProcessed: number;
     remaining: number;
   }> {
-    // Import getTodayInEgypt
+    // Use stored active date (not dynamic date which can change at midnight)
+    const activeDate = await this.ctx.storage.get<string>('autofail_active_date');
     const { getTodayInEgypt } = await import('../utils/timezone');
-    const today = getTodayInEgypt();
+
+    let today: string;
+    if (activeDate) {
+      today = activeDate;
+      console.log(`⏰ Using stored active date: ${today}`);
+    } else {
+      today = getTodayInEgypt();
+      console.warn(`⚠️ autofail_active_date not set, using dynamic date: ${today}`);
+    }
     const BATCH_SIZE = 4;
 
     // Load state
@@ -1061,25 +1175,49 @@ const highPriorityIds = new Set(metadata.highPriorityIds || []);
 
 // Only add to failures JSON if high priority
 if (highPriorityIds.has(task.id)) {
+  // Determine if subtask (same as syncFailuresForDate)
+  const isSubtask = !!task.parent_id;
+
+  // Get parent info if subtask - search in ALL tasks
+  let parentContent: string | null = null;
+  if (isSubtask && task.parent_id) {
+    const parentTask = tasks.find((t: any) => t.id === task.parent_id);
+    if (parentTask) {
+      parentContent = parentTask.content;
+    }
+  }
+
+  // Create the failed task entry (identical to syncFailuresForDate)
+  const failedTask = {
+    id: task.id,
+    content: task.content,
+    parent_id: task.parent_id || null,
+    parent_content: parentContent,
+    priority: task.priority,
+    is_subtask: isSubtask,
+    description: 'Auto-failed at end of day',
+    is_manual: true, // Preserve during Todoist sync (auto-failed = already closed in Todoist)
+  };
+
+  // Check if task already exists in failures (by clean name) - same as /log_failure
   const existingIndex = dailyFailures.failed_tasks.findIndex(f =>
     extractCleanTaskName(f.content) === cleanName
   );
 
-  if (existingIndex < 0) {
-    dailyFailures.failed_tasks.push({
-      id: task.id,
-      content: task.content,
-      parent_id: null,
-      parent_content: null,
-      priority: task.priority,
-      is_subtask: false,
-      description: 'Auto-failed at end of day',
-    });
+  if (existingIndex >= 0) {
+    // Replace existing (same as /log_failure)
+    dailyFailures.failed_tasks[existingIndex] = failedTask;
+    console.log(`🔄 Updated existing failure: ${task.content}${isSubtask ? ' [subtask]' : ''}`);
+  } else {
+    // Add new
+    dailyFailures.failed_tasks.push(failedTask);
+    console.log(`✅ Added new failure to JSON: ${task.content}${isSubtask ? ' [subtask]' : ''}`);
   }
 }
 
-	// Create failure completion marker (for ALL tasks)
-	const markerKey = `failure_completion_${task.id}`;
+        // Create failure completion marker (for ALL tasks)
+        // This marker prevents the webhook from sending a completion notification
+        const markerKey = `failure_completion_${task.id}`;
         await db.delete('conversation_state', { chat_id: op.eq(markerKey) }).catch(() => {});
         await db.insert('conversation_state', {
           chat_id: markerKey,
@@ -1087,6 +1225,10 @@ if (highPriorityIds.has(task.id)) {
           data: { taskId: task.id, taskName: task.content, autoFail: true },
           expires_at: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
         });
+
+        // Wait for marker to be fully committed before closing task
+        // This prevents race condition where webhook arrives before marker is visible
+        await new Promise(resolve => setTimeout(resolve, 300));
 
         // Complete in Todoist
         const closeResponse = await fetch(
@@ -1125,6 +1267,15 @@ if (highPriorityIds.has(task.id)) {
         botToken,
         `⏳ Auto-fail: ${newProcessed.length}/${queue.length}`
       );
+    }
+
+    // ✅ FIX: If this batch completed everything, send completion and cleanup
+    if (newRemaining === 0) {
+      await this.sendAutoFailCompletion(chatId, botToken, newProcessed.length, today);
+      await this.ctx.storage.delete(`autofail_queue_${today}`);
+      await this.ctx.storage.delete(`autofail_tasks_${today}`);
+      await this.ctx.storage.delete(`autofail_metadata_${today}`);
+      await this.ctx.storage.delete(`autofail_processed_${today}`);
     }
 
     return {

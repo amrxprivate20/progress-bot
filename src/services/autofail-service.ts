@@ -78,7 +78,7 @@ export class AutofailService {
       todoistProjectId,
     ] = await Promise.all([
       this.settings.get('autofail_enabled'),
-      this.settings.get('autofail_time'), // Format: "HH:MM" e.g. "23:30"
+      this.settings.get('autofail_hour'), // Format: "HH:MM" e.g. "23:30"
       this.settings.get('failure_priority_threshold'),
       this.settings.get('todoist_api_token'),
       this.settings.get('todoist_project_id'),
@@ -304,6 +304,7 @@ export class AutofailService {
 
   /**
    * Process auto-fail batches until complete
+   * @deprecated Use startAlarmProcessing instead - this can timeout on large task counts
    */
   async processUntilComplete(
     stub: { fetch: (request: Request) => Promise<Response> }
@@ -316,6 +317,20 @@ export class AutofailService {
       if (data.complete) break;
       await new Promise(r => setTimeout(r, 2000));
     }
+  }
+
+  /**
+   * Start alarm-based processing (recommended)
+   * Uses Durable Object alarms for reliable processing without timeout limits
+   */
+  async startAlarmProcessing(
+    stub: { fetch: (request: Request) => Promise<Response> },
+    today: string
+  ): Promise<void> {
+    await stub.fetch(new Request('https://fake-host/autofail/start-alarm', {
+      method: 'POST',
+      body: JSON.stringify({ today }),
+    }));
   }
 
   /**
