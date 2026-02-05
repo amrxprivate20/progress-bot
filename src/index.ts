@@ -144,17 +144,9 @@ export default {
 
       // Analyze user state
       const userState = await metaCoach.analyzeUserState(chatId);
-      console.log(`📊 User state: ${userState.hoursInactive.toFixed(1)}h inactive, ${userState.tasksCompletedToday} tasks, ${userState.timeOfDay}, last intervention ${userState.minutesSinceLastIntervention.toFixed(0)}min ago`);
+      console.log(`📊 User state: hour=${userState.currentHour}, ${userState.hoursInactive.toFixed(1)}h inactive, ${userState.tasksCompletedToday} tasks, ${userState.timeOfDay}, last intervention ${userState.minutesSinceLastIntervention.toFixed(0)}min ago (hour ${userState.lastInterventionHour})`);
 
-      // Rate limiting: Don't send if last intervention was less than 45 minutes ago
-      // (except for escalation when outcome is pending)
-      const minIntervalMinutes = 45;
-      if (userState.minutesSinceLastIntervention < minIntervalMinutes && userState.lastInterventionOutcome !== 'pending') {
-        console.log(`⏭️ Meta-coach skipped: rate limit (${userState.minutesSinceLastIntervention.toFixed(0)}min < ${minIntervalMinutes}min)`);
-        return;
-      }
-
-      // Decide which intervention to use
+      // Decide which intervention to use (rate limiting is handled inside decideIntervention)
       const decision = await metaCoach.decideIntervention(userState);
 
       if (decision.type !== 'none') {
@@ -851,9 +843,9 @@ async function handleAutoFailInit(
   // Use unified autofail service
   const autofailService = createAutofailService(db, settings);
 
-  // Prepare autofail (forceRun = true for scheduled trigger to bypass time check)
-  // The scheduled trigger is already time-gated by the GitHub workflow
-  const result = await autofailService.prepareAutofail(botToken, chatId, true);
+  // Prepare autofail (forceRun = false to check autofail_hour setting)
+  // GitHub workflow runs frequently, worker decides based on setting
+  const result = await autofailService.prepareAutofail(botToken, chatId, false);
 
   // Check if it's an error result
   if ('triggered' in result) {
@@ -898,6 +890,9 @@ async function handleAutoFailInit(
 
   // Initialize queue
   await autofailService.initializeQueue(stub, data);
+
+  // Start alarm-based processing (backup if external loop fails)
+  await autofailService.startAlarmProcessing(stub, data.today);
 
   // Notify user
   await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {

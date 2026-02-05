@@ -12,7 +12,6 @@ import { createReportGenerator } from '../services/report-generator';
 import { createUnifiedAIClient } from '../services/ai-client';
 import { createMemoryManager } from '../services/memory-manager';
 import { createDebugLogger } from '../utils/debug-logger';
-import { createAutofailService, PreparedAutofailData } from '../services/autofail-service';
 
 // ============================================
 // Extended Env with Durable Object binding
@@ -152,6 +151,7 @@ export class ReportProcessor extends DurableObject<EnvWithDO> {
       await this.ctx.storage.delete(`autofail_tasks_${body.today}`);
       await this.ctx.storage.delete(`autofail_metadata_${body.today}`);
       await this.ctx.storage.delete(`autofail_processed_${body.today}`);
+      await this.ctx.storage.delete(`autofail_failed_batches_${body.today}`);
       await this.ctx.storage.delete('autofail_active_date');
 
       return new Response(
@@ -710,61 +710,6 @@ const aiResponse = await aiClient.generateDailyReport({
 
       console.log(`🎉 [Job ${jobId}] Processing complete!`);
 
-      // ✅ Auto-trigger autofail using unified service
-      const reportDate = reportData.date;
-      const egyptNow = new Date().toLocaleString('en-US', { timeZone: 'Africa/Cairo' });
-      const egyptToday = new Date(egyptNow).toISOString().split('T')[0];
-
-      // Only trigger for same-day reports
-      if (reportDate === egyptToday) {
-        // Use unified autofail service (respects settings for trigger hour)
-        this.ctx.waitUntil((async () => {
-          try {
-            const autofailService = createAutofailService(db, settings);
-
-            // Prepare autofail (forced - run immediately after report)
-            const result = await autofailService.prepareAutofail(botToken, chatId, true);
-
-            // Check if it's an error or no-trigger result
-            if ('triggered' in result) {
-              if (!result.triggered) {
-                console.log(`⏭️ Auto-fail skipped: ${result.reason}`);
-                return;
-              }
-              if (result.taskCount === 0) {
-                console.log('✅ No tasks to auto-fail');
-                return;
-              }
-            }
-
-            const data = result as PreparedAutofailData;
-
-            // Get Durable Object stub for autofail processing
-            const afJobId = autofailService.getJobId(data.today);
-            const id = this.env.REPORT_PROCESSOR.idFromName(afJobId);
-            const stub = this.env.REPORT_PROCESSOR.get(id);
-
-            // Check if already running
-            const alreadyRunning = await autofailService.isAlreadyRunning(stub, data.today);
-            if (alreadyRunning) {
-              console.log('⏭️ Auto-fail already running for today');
-              return;
-            }
-
-            // Initialize queue
-            await autofailService.initializeQueue(stub, data);
-            console.log(`🌙 Auto-fail triggered: ${data.allTasks.length} tasks`);
-
-            // Start alarm-based processing (reliable, no timeout)
-            await autofailService.startAlarmProcessing(stub, data.today);
-            console.log('✅ Auto-fail alarm started');
-          } catch (error) {
-            console.error('Auto-fail trigger error:', error);
-          }
-        })());
-      } else {
-        console.log(`⏭️ Different-day report (${reportDate} vs ${egyptToday}) - skipping auto-fail`);
-      }
     } catch (error) {
       console.error(`💥 [Job ${jobId}] Error:`, error);
 
@@ -1109,6 +1054,7 @@ const aiResponse = await aiClient.generateDailyReport({
       console.warn(`⚠️ autofail_active_date not set, using dynamic date: ${today}`);
     }
     const BATCH_SIZE = 4;
+    const MAX_FAILED_BATCHES = 10; // Abort after 10 consecutive failed batches
 
     // Load state
     const queue = await this.ctx.storage.get<string[]>(`autofail_queue_${today}`);
@@ -1126,6 +1072,9 @@ const aiResponse = await aiClient.generateDailyReport({
 
     const { chatId, todoistToken, botToken } = metadata;
 
+    // Track consecutive failed batches
+    const failedBatchCount = await this.ctx.storage.get<number>(`autofail_failed_batches_${today}`) || 0;
+
     // Get remaining task IDs
     const remaining = queue.filter(id => !processed.includes(id));
     if (remaining.length === 0) {
@@ -1135,7 +1084,8 @@ const aiResponse = await aiClient.generateDailyReport({
       await this.ctx.storage.delete(`autofail_tasks_${today}`);
       await this.ctx.storage.delete(`autofail_metadata_${today}`);
       await this.ctx.storage.delete(`autofail_processed_${today}`);
-      
+      await this.ctx.storage.delete(`autofail_failed_batches_${today}`);
+
       return { complete: true, processed: 0, totalProcessed: processed.length, remaining: 0 };
     }
 
@@ -1243,10 +1193,18 @@ if (highPriorityIds.has(task.id)) {
           batchProcessed.push(taskId);
           console.log(`✓ Auto-failed: ${cleanName}`);
         } else {
-          console.error(`Failed to close task ${task.id}: ${closeResponse.status}`);
+          const errorText = await closeResponse.text().catch(() => 'unknown');
+          console.error(`Failed to close task ${task.id}: ${closeResponse.status} - ${errorText}`);
+          // Still mark as processed to avoid infinite retry on permanent errors
+          if (closeResponse.status === 404 || closeResponse.status === 400) {
+            console.log(`⏭️ Skipping task ${task.id} (${closeResponse.status})`);
+            batchProcessed.push(taskId);
+          }
         }
       } catch (error) {
         console.error(`Error processing task ${taskId}:`, error);
+        // Mark as processed to avoid infinite loop on persistent errors
+        batchProcessed.push(taskId);
       }
     }
 
@@ -1260,8 +1218,36 @@ if (highPriorityIds.has(task.id)) {
 
     const newRemaining = queue.length - newProcessed.length;
 
-    // Send progress update every 20 tasks
-    if (newProcessed.length % 20 === 0 && newRemaining > 0) {
+    // Track failed batches (when no progress is made)
+    if (batchProcessed.length === 0 && batch.length > 0) {
+      const newFailedCount = failedBatchCount + 1;
+      await this.ctx.storage.put(`autofail_failed_batches_${today}`, newFailedCount);
+      console.warn(`⚠️ Batch failed (${newFailedCount}/${MAX_FAILED_BATCHES})`);
+
+      if (newFailedCount >= MAX_FAILED_BATCHES) {
+        console.error(`❌ Aborting autofail after ${MAX_FAILED_BATCHES} consecutive failed batches`);
+        await this.sendTelegramMessage(
+          chatId,
+          botToken,
+          `❌ Auto-fail aborted after ${MAX_FAILED_BATCHES} failed batches.\n` +
+          `${newProcessed.length}/${queue.length} tasks processed.\n` +
+          `Check Cloudflare logs for errors.`
+        );
+        // Cleanup
+        await this.ctx.storage.delete(`autofail_queue_${today}`);
+        await this.ctx.storage.delete(`autofail_tasks_${today}`);
+        await this.ctx.storage.delete(`autofail_metadata_${today}`);
+        await this.ctx.storage.delete(`autofail_processed_${today}`);
+        await this.ctx.storage.delete(`autofail_failed_batches_${today}`);
+        return { complete: true, processed: 0, totalProcessed: newProcessed.length, remaining: newRemaining };
+      }
+    } else if (batchProcessed.length > 0) {
+      // Reset failed batch counter on successful batch
+      await this.ctx.storage.put(`autofail_failed_batches_${today}`, 0);
+    }
+
+    // Send progress update every 20 tasks (but not when 0 processed)
+    if (newProcessed.length > 0 && newProcessed.length % 20 === 0 && newRemaining > 0) {
       await this.sendTelegramMessage(
         chatId,
         botToken,
@@ -1276,6 +1262,7 @@ if (highPriorityIds.has(task.id)) {
       await this.ctx.storage.delete(`autofail_tasks_${today}`);
       await this.ctx.storage.delete(`autofail_metadata_${today}`);
       await this.ctx.storage.delete(`autofail_processed_${today}`);
+      await this.ctx.storage.delete(`autofail_failed_batches_${today}`);
     }
 
     return {
