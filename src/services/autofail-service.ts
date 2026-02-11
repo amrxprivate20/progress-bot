@@ -135,14 +135,12 @@ export class AutofailService {
     const currentTime = formatTime(egyptHour, egyptMinute);
     const triggerTime = formatTime(config.triggerHour, config.triggerMinute);
 
-    // Handle midnight rollover: if current time is early AM (00:00-03:00) and trigger is late PM (>= 20:00),
-    // then we're in the grace period after the trigger (e.g., 00:24 is after 23:30)
-    const isAfterMidnight = egyptHour >= 0 && egyptHour < 3;  // 00:00-02:59
-    const isLatePM = config.triggerHour >= 20;  // Trigger at 20:00 or later (8 PM+)
-
-    if (isAfterMidnight && isLatePM) {
-      // We're after midnight and trigger was late PM yesterday - this is the grace period
-      return { should: true, reason: `Current time (${currentTime}) is after midnight, past trigger time (${triggerTime})` };
+    // IMPORTANT: Do NOT trigger after midnight! That would fail tasks from the NEW day.
+    // Only trigger on the same day as the scheduled time.
+    if (egyptHour >= 0 && egyptHour < config.triggerHour && config.triggerHour >= 20) {
+      // We're past midnight but before trigger hour (e.g., 00:24 when trigger is 23:30)
+      // This means we're on the NEXT day - do not trigger!
+      return { should: false, reason: `Current time (${currentTime}) is on next day, skipping to avoid failing new day's tasks` };
     }
 
     // Pre-trigger window: Allow triggering up to 30 minutes BEFORE the trigger time
