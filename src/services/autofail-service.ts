@@ -145,7 +145,16 @@ export class AutofailService {
       return { should: true, reason: `Current time (${currentTime}) is after midnight, past trigger time (${triggerTime})` };
     }
 
-    // Normal comparison (same day)
+    // Pre-trigger window: Allow triggering up to 30 minutes BEFORE the trigger time
+    // This handles cron schedule variations (e.g., 23:24 is close enough to 23:30)
+    const PRE_TRIGGER_WINDOW_MINUTES = 30;
+    const timeDifference = triggerTimeMinutes - currentTimeMinutes;
+
+    if (timeDifference > 0 && timeDifference <= PRE_TRIGGER_WINDOW_MINUTES) {
+      return { should: true, reason: `Current time (${currentTime}) within ${timeDifference}min of trigger time (${triggerTime})` };
+    }
+
+    // Normal comparison (at or after trigger time)
     if (currentTimeMinutes >= triggerTimeMinutes) {
       return { should: true, reason: `Current time (${currentTime}) >= trigger time (${triggerTime})` };
     }
