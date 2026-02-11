@@ -18,7 +18,16 @@
       "Bash(grep:*)",
       "Bash(tail:*)",
       "Bash(pkill:*)",
-      "Bash(git push:*)"
+      "Bash(git push:*)",
+      "Bash(else echo \"❌ .dev.vars file not found\")",
+      "Bash(fi)",
+      "Bash(python3:*)",
+      "Bash(TZ='Africa/Cairo' date:*)",
+      "Bash(gh secret:*)",
+      "Bash(gh workflow:*)",
+      "Bash(node:*)",
+      "Bash(chmod:*)",
+      "Bash(./check-autofail.sh:*)"
     ]
   }
 }
