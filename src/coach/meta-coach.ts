@@ -1,14 +1,18 @@
 /**
- * Meta-Coach Orchestrator - Intelligent Intervention Decision-Making
+ * Meta-Coach Orchestrator - "Always Present Coach"
  *
- * Purpose: Analyzes user state and decides which intervention to use.
- * Replaces static probes with intelligent, context-aware interventions.
+ * Purpose: Proactive engagement throughout the day, not just when failing.
+ * The coach should feel present, interactive, and engaged all day long.
  *
- * Features:
- * - State analysis (inactivity, failures, battle state, etc.)
- * - Decision matrix for choosing intervention type
- * - Escalation flow (gentle → pointed → stuck → roast → confrontation)
- * - Learning from outcomes
+ * Intervention Types:
+ * - morning_kickoff: Start day with energy (first check after sleep_end)
+ * - midday_push: Afternoon energy boost (12-14)
+ * - evening_check: Day progress review (18-21)
+ * - momentum_check: Regular "still with you" presence
+ * - night_wrapup: End of day reflection (21-22)
+ * - celebration: After task completion
+ * - inactivity_nudge: When inactive too long (escalating)
+ * - escalation: When ignoring interventions
  */
 
 import { SupabaseClient, op } from '../database/client';
@@ -17,6 +21,13 @@ import { AIMessage } from '../services/ai-client';
 import { getTodayInEgypt } from '../utils/timezone';
 import { createCoachingContextBuilder } from './coaching-context';
 import { createTaskSessionManager, TaskSession } from '../services/task-session-manager';
+import { getCoachCommandFooter } from '../utils/keyboards';
+
+// ============================================
+// Constants
+// ============================================
+
+const COMMAND_FOOTER = getCoachCommandFooter();
 
 // ============================================
 // Types
@@ -28,6 +39,7 @@ export interface UserState {
   tasksFailed: number;
   currentBattleState: any | null;
   timeOfDay: 'morning' | 'afternoon' | 'evening' | 'night';
+  currentHour: number;
   lastInterventionType: string | null;
   lastInterventionOutcome: 'positive' | 'negative' | 'pending' | null;
   minutesSinceLastIntervention: number;
@@ -35,53 +47,392 @@ export interface UserState {
   deferralsToday: number;
   avoidancePatterns: string[];
   activeTaskSession: TaskSession | null;
+  interventionsToday: number;
+  lastInterventionHour: number | null;
 }
+
+export type InterventionType =
+  | 'morning_kickoff'
+  | 'midday_push'
+  | 'evening_check'
+  | 'momentum_check'
+  | 'night_wrapup'
+  | 'celebration'
+  | 'inactivity_nudge'
+  | 'escalation'
+  | 'battle_narrative'
+  | 'none';
 
 export interface InterventionDecision {
-  type: 'gentle_checkin' | 'stuck_mode' | 'roast' | 'battle_narrative' | 'task_recommendation' | 'escalation' | 'combined' | 'none';
-  components?: string[];
+  type: InterventionType;
   message: string;
-  targetTask?: string;
   escalationLevel: number; // 1-5
-  followUpDelay?: number; // Minutes until escalation if ignored
+  followUpDelay?: number; // Minutes until next check
 }
 
 // ============================================
-// AI Prompts
+// AI Prompts (All in Egyptian Arabic)
 // ============================================
 
-const ESCALATION_PROMPT = `أنت كوتش إنتاجية مواجهة. الشخص تجاهل التنبيهات السابقة.
+const PROMPTS = {
+  morning_kickoff: {
+    confrontational: `أنت كوتش إنتاجية مواجه. الصبح بدأ والمعركة لسه قدامنا.
 
-⚠️ مهم جداً: لازم الرد يكون بالعامية المصرية فقط! مفيش إنجليزي خالص.
+⚠️ مهم جداً: الرد بالعامية المصرية فقط!
 
-حالة المستخدم:
-- ساعات بدون إنجاز: {HOURS_INACTIVE}
-- المهام المكتملة اليوم: {TASKS_COMPLETED}
-- المهام الفاشلة: {TASKS_FAILED}
-- آخر تدخل: {LAST_INTERVENTION}
-- نتيجة آخر تدخل: {LAST_OUTCOME}
-- مستوى التصعيد الحالي: {ESCALATION_LEVEL}/5
+المهام المكتملة امبارح: {YESTERDAY_TASKS}
+المهام المتاحة اليوم: {AVAILABLE_TASKS}
 
-اكتب رسالة تصعيدية (2-3 جمل):
-- مستوى 1-2: سؤال مباشر عن السبب
-- مستوى 3: ذكّره بأنماط التأجيل المتكررة
-- مستوى 4: تحدي قوي مع ذكر العواقب
-- مستوى 5: مواجهة حادة (بدون قسوة)
+اكتب رسالة صباحية قوية (2-3 جمل):
+- حفزه يبدأ فوراً
+- ذكّره إن الوقت بيجري
+- اسأله: "إيه أول مهمة هتضربها؟"
 
-اختم دايماً بطلب رد أو فعل محدد.`;
+ممنوع تكون لطيف. خليك مباشر ومحفز.`,
 
-const GENTLE_CHECKIN_PROMPT = `أنت كوتش إنتاجية ودود. الشخص لسه بادي يومه.
+    supportive: `أنت كوتش إنتاجية داعم. صباح جديد وفرصة جديدة.
 
-⚠️ مهم جداً: لازم الرد يكون بالعامية المصرية فقط! مفيش إنجليزي خالص.
+⚠️ مهم جداً: الرد بالعامية المصرية فقط!
 
-الوقت: {TIME_OF_DAY}
+المهام المكتملة امبارح: {YESTERDAY_TASKS}
+المهام المتاحة اليوم: {AVAILABLE_TASKS}
+
+اكتب رسالة صباحية إيجابية (2-3 جمل):
+- ابدأ بتحية دافئة
+- شجعه على يوم منتج
+- اسأله عن خطته
+
+خليها خفيفة ومحفزة.`,
+
+    balanced: `أنت كوتش إنتاجية متوازن. يوم جديد يبدأ.
+
+⚠️ مهم جداً: الرد بالعامية المصرية فقط!
+
+المهام المكتملة امبارح: {YESTERDAY_TASKS}
+المهام المتاحة اليوم: {AVAILABLE_TASKS}
+
+اكتب رسالة صباحية (2-3 جمل):
+- حفزه بدون ضغط زيادة
+- اسأله عن أول مهمة
+
+متوسط بين الحماس والهدوء.`,
+  },
+
+  midday_push: {
+    confrontational: `أنت كوتش إنتاجية مواجه. نص اليوم ولسه فيه وقت.
+
+⚠️ مهم جداً: الرد بالعامية المصرية فقط!
+
+المهام المكتملة اليوم: {TASKS_COMPLETED}
+ساعات بدون إنجاز: {HOURS_INACTIVE}
+البوس الحالي: {BOSS_STATUS}
+
+اكتب رسالة نص اليوم (2-3 جمل):
+- راجع الإنجاز لحد دلوقتي
+- لو قليل: واجهه بالحقيقة
+- لو كويس: ادفعه يكمل
+- اسأل: "إيه التالي؟"
+
+كن مباشر وصريح.`,
+
+    supportive: `أنت كوتش إنتاجية داعم. check-in نص اليوم.
+
+⚠️ مهم جداً: الرد بالعامية المصرية فقط!
+
+المهام المكتملة اليوم: {TASKS_COMPLETED}
+
+اكتب رسالة نص اليوم (2-3 جمل):
+- احتفل بأي إنجاز
+- شجعه يكمل
+- اسأل لو محتاج مساعدة`,
+
+    balanced: `أنت كوتش إنتاجية متوازن. وقت check-in.
+
+⚠️ مهم جداً: الرد بالعامية المصرية فقط!
+
+المهام المكتملة اليوم: {TASKS_COMPLETED}
+ساعات بدون إنجاز: {HOURS_INACTIVE}
+
+اكتب رسالة نص اليوم (2-3 جمل):
+- راجع الإنجاز
+- شجع أو ادفع حسب الحالة`,
+  },
+
+  evening_check: {
+    confrontational: `أنت كوتش إنتاجية مواجه. المساء بدأ واليوم قرب يخلص.
+
+⚠️ مهم جداً: الرد بالعامية المصرية فقط!
+
+المهام المكتملة: {TASKS_COMPLETED}
+المهام الفاشلة: {TASKS_FAILED}
+البوس HP: {BOSS_HP}%
+
+اكتب رسالة مسائية (2-3 جمل):
+- لو الإنجاز قليل: مواجهة حادة
+- لو كويس: اعترف بس اطلب المزيد
+- ذكّره إن الوقت بيخلص
+
+لازم يحس بالضغط.`,
+
+    supportive: `أنت كوتش إنتاجية داعم. مراجعة المساء.
+
+⚠️ مهم جداً: الرد بالعامية المصرية فقط!
+
 المهام المكتملة: {TASKS_COMPLETED}
 
-اكتب رسالة صباحية قصيرة (1-2 جمل):
-- لو مفيش مهام: اسأل عن خطة اليوم
-- لو فيه مهام: احتفل بسرعة واسأل عن التالي
+اكتب رسالة مسائية (2-3 جمل):
+- احتفل بالإنجازات
+- شجعه يختم يومه صح
+- كن إيجابي`,
 
-خليها خفيفة ومحفزة.`;
+    balanced: `أنت كوتش إنتاجية متوازن. مراجعة المساء.
+
+⚠️ مهم جداً: الرد بالعامية المصرية فقط!
+
+المهام المكتملة: {TASKS_COMPLETED}
+المهام الفاشلة: {TASKS_FAILED}
+
+اكتب رسالة مسائية (2-3 جمل):
+- راجع اليوم
+- شجع أو ادفع حسب الحالة`,
+  },
+
+  momentum_check: {
+    confrontational: `أنت كوتش إنتاجية مواجه. بتتابع التقدم.
+
+⚠️ مهم جداً: الرد بالعامية المصرية فقط!
+
+المهام المكتملة: {TASKS_COMPLETED}
+آخر إنجاز: {HOURS_INACTIVE} ساعة
+الوقت: {TIME_OF_DAY}
+
+اكتب رسالة متابعة قصيرة (1-2 جمل):
+- لو شغال: "كمّل، ماتوقفش"
+- لو واقف: "هو انت فين؟"
+
+خليها قصيرة ومباشرة.`,
+
+    supportive: `أنت كوتش إنتاجية داعم. متابعة سريعة.
+
+⚠️ مهم جداً: الرد بالعامية المصرية فقط!
+
+المهام المكتملة: {TASKS_COMPLETED}
+
+اكتب رسالة متابعة قصيرة (1-2 جمل):
+- check-in ودود
+- شجعه يكمل`,
+
+    balanced: `أنت كوتش إنتاجية متوازن. متابعة.
+
+⚠️ مهم جداً: الرد بالعامية المصرية فقط!
+
+المهام المكتملة: {TASKS_COMPLETED}
+آخر إنجاز: {HOURS_INACTIVE} ساعة
+
+اكتب رسالة متابعة قصيرة (1-2 جمل).`,
+  },
+
+  night_wrapup: {
+    confrontational: `أنت كوتش إنتاجية مواجه. اليوم خلص.
+
+⚠️ مهم جداً: الرد بالعامية المصرية فقط!
+
+المهام المكتملة: {TASKS_COMPLETED}
+المهام الفاشلة: {TASKS_FAILED}
+
+اكتب رسالة ختام اليوم (2-3 جمل):
+- راجع الإنجاز بصراحة
+- لو قليل: "بكرة لازم أحسن"
+- لو كويس: اعترف بس اطلب استمرارية
+
+خليها صادقة ومباشرة.`,
+
+    supportive: `أنت كوتش إنتاجية داعم. نهاية اليوم.
+
+⚠️ مهم جداً: الرد بالعامية المصرية فقط!
+
+المهام المكتملة: {TASKS_COMPLETED}
+
+اكتب رسالة ختام اليوم (2-3 جمل):
+- احتفل بالإنجازات
+- شجعه على الراحة
+- تمنّى له يوم أحسن بكرة`,
+
+    balanced: `أنت كوتش إنتاجية متوازن. نهاية اليوم.
+
+⚠️ مهم جداً: الرد بالعامية المصرية فقط!
+
+المهام المكتملة: {TASKS_COMPLETED}
+المهام الفاشلة: {TASKS_FAILED}
+
+اكتب رسالة ختام اليوم (2-3 جمل):
+- ملخص متوازن
+- تشجيع لبكرة`,
+  },
+
+  celebration: {
+    confrontational: `أنت كوتش إنتاجية مواجه. تم إكمال مهمة.
+
+⚠️ مهم جداً: الرد بالعامية المصرية فقط!
+
+المهمة المكتملة: {TASK_NAME}
+المدة: {DURATION} دقيقة
+إجمالي اليوم: {TASKS_COMPLETED}
+
+اكتب رسالة احتفال قصيرة (1-2 جمل):
+- اعترف بالإنجاز بسرعة
+- بس اطلب المزيد فوراً
+- "حلو، إيه التالي؟"
+
+مفيش مدح زيادة. خليها قصيرة.`,
+
+    supportive: `أنت كوتش إنتاجية داعم. مبروك على الإنجاز!
+
+⚠️ مهم جداً: الرد بالعامية المصرية فقط!
+
+المهمة المكتملة: {TASK_NAME}
+المدة: {DURATION} دقيقة
+إجمالي اليوم: {TASKS_COMPLETED}
+
+اكتب رسالة احتفال (1-2 جمل):
+- احتفل بحماس
+- شجعه يكمل`,
+
+    balanced: `أنت كوتش إنتاجية متوازن. تم إكمال مهمة.
+
+⚠️ مهم جداً: الرد بالعامية المصرية فقط!
+
+المهمة المكتملة: {TASK_NAME}
+المدة: {DURATION} دقيقة
+إجمالي اليوم: {TASKS_COMPLETED}
+
+اكتب رسالة احتفال قصيرة (1-2 جمل):
+- اعترف بالإنجاز
+- شجع على التالي`,
+  },
+
+  inactivity_nudge: {
+    confrontational: `أنت كوتش إنتاجية مواجه. الشخص مش بيشتغل.
+
+⚠️ مهم جداً: الرد بالعامية المصرية فقط!
+
+ساعات بدون إنجاز: {HOURS_INACTIVE}
+المهام المكتملة اليوم: {TASKS_COMPLETED}
+الوقت: {TIME_OF_DAY}
+مستوى التصعيد: {ESCALATION_LEVEL}/5
+
+اكتب رسالة تنبيه (2-3 جمل):
+- مستوى 1-2: سؤال مباشر "هو انت فين؟"
+- مستوى 3: تحدي "الوقت بيجري وانت واقف"
+- مستوى 4-5: مواجهة حادة "كفاية تأجيل"
+
+اختم بطلب فعل: "قولي إيه المهمة الجاية"`,
+
+    supportive: `أنت كوتش إنتاجية داعم. الشخص محتاج دفعة.
+
+⚠️ مهم جداً: الرد بالعامية المصرية فقط!
+
+ساعات بدون إنجاز: {HOURS_INACTIVE}
+المهام المكتملة اليوم: {TASKS_COMPLETED}
+
+اكتب رسالة تشجيعية (2-3 جمل):
+- check-in لطيف
+- اسأل لو محتاج مساعدة
+- اقترح يبدأ بحاجة صغيرة`,
+
+    balanced: `أنت كوتش إنتاجية متوازن. وقت التنبيه.
+
+⚠️ مهم جداً: الرد بالعامية المصرية فقط!
+
+ساعات بدون إنجاز: {HOURS_INACTIVE}
+المهام المكتملة اليوم: {TASKS_COMPLETED}
+مستوى التصعيد: {ESCALATION_LEVEL}/5
+
+اكتب رسالة تنبيه (2-3 جمل):
+- حسب المستوى: من لطيف لمباشر
+- اطلب فعل`,
+  },
+
+  escalation: {
+    confrontational: `أنت كوتش إنتاجية مواجه. الشخص تجاهل التنبيهات.
+
+⚠️ مهم جداً: الرد بالعامية المصرية فقط!
+
+ساعات بدون إنجاز: {HOURS_INACTIVE}
+المهام المكتملة اليوم: {TASKS_COMPLETED}
+آخر تدخل: {LAST_INTERVENTION}
+مستوى التصعيد: {ESCALATION_LEVEL}/5
+
+اكتب رسالة تصعيدية قوية (2-3 جمل):
+- مستوى 3: "انت بتتجاهلني ليه؟"
+- مستوى 4: "كفاية كلام، فين الفعل؟"
+- مستوى 5: "آخر تحذير. اشتغل أو اعترف إنك مش عايز"
+
+لازم يحس إنك جاد.`,
+
+    supportive: `أنت كوتش إنتاجية داعم. الشخص محتاج دعم أكتر.
+
+⚠️ مهم جداً: الرد بالعامية المصرية فقط!
+
+ساعات بدون إنجاز: {HOURS_INACTIVE}
+المهام المكتملة اليوم: {TASKS_COMPLETED}
+
+اكتب رسالة دعم (2-3 جمل):
+- اسأل لو فيه مشكلة
+- اقترح مساعدة
+- شجعه يبدأ بأي حاجة`,
+
+    balanced: `أنت كوتش إنتاجية متوازن. محتاج متابعة أقوى.
+
+⚠️ مهم جداً: الرد بالعامية المصرية فقط!
+
+ساعات بدون إنجاز: {HOURS_INACTIVE}
+المهام المكتملة اليوم: {TASKS_COMPLETED}
+مستوى التصعيد: {ESCALATION_LEVEL}/5
+
+اكتب رسالة متابعة (2-3 جمل):
+- راجع الموقف
+- اطلب فعل`,
+  },
+
+  battle_narrative: {
+    confrontational: `أنت كوتش إنتاجية مواجه. فيه معركة شغالة والبوس لسه قوي.
+
+⚠️ مهم جداً: الرد بالعامية المصرية فقط!
+
+اسم البوس: {BOSS_NAME}
+HP البوس: {BOSS_HP}%
+المهام المكتملة: {TASKS_COMPLETED}
+
+اكتب رسالة حماسية قتالية (2-3 جمل):
+- استخدم لغة المعركة
+- "البوس بيضحك عليك"
+- "هتسيبه يكسب؟"
+
+خليها حماسية وتحفيزية.`,
+
+    supportive: `أنت كوتش إنتاجية داعم. معركة شغالة!
+
+⚠️ مهم جداً: الرد بالعامية المصرية فقط!
+
+اسم البوس: {BOSS_NAME}
+HP البوس: {BOSS_HP}%
+
+اكتب رسالة تشجيعية (2-3 جمل):
+- شجعه على المعركة
+- "انت قدها!"`,
+
+    balanced: `أنت كوتش إنتاجية متوازن. تحديث المعركة.
+
+⚠️ مهم جداً: الرد بالعامية المصرية فقط!
+
+اسم البوس: {BOSS_NAME}
+HP البوس: {BOSS_HP}%
+المهام المكتملة: {TASKS_COMPLETED}
+
+اكتب رسالة عن المعركة (2-3 جمل).`,
+  },
+};
 
 // ============================================
 // Meta Coach Class
@@ -117,26 +468,41 @@ export class MetaCoach {
     // Calculate hours inactive
     const hoursInactive = await this.getHoursInactive();
 
-    // Get time of day
+    // Get current hour in Egypt
     const egyptHour = new Date().toLocaleString('en-US', {
       timeZone: 'Africa/Cairo',
       hour: 'numeric',
       hour12: false,
     });
-    const hour = parseInt(egyptHour, 10);
+    const currentHour = parseInt(egyptHour, 10);
+
+    // Determine time of day
     let timeOfDay: UserState['timeOfDay'] = 'morning';
-    if (hour >= 6 && hour < 12) timeOfDay = 'morning';
-    else if (hour >= 12 && hour < 17) timeOfDay = 'afternoon';
-    else if (hour >= 17 && hour < 21) timeOfDay = 'evening';
+    if (currentHour >= 6 && currentHour < 12) timeOfDay = 'morning';
+    else if (currentHour >= 12 && currentHour < 17) timeOfDay = 'afternoon';
+    else if (currentHour >= 17 && currentHour < 21) timeOfDay = 'evening';
     else timeOfDay = 'night';
 
     // Get last intervention
     const lastInteraction = await this.getLastIntervention(chatId);
-    const lastInterventionType = lastInteraction?.interaction_type || null;
+    const lastInterventionType = lastInteraction?.metadata?.interventionType || lastInteraction?.interaction_type || null;
     const lastInterventionOutcome = lastInteraction?.outcome as UserState['lastInterventionOutcome'] || null;
     const minutesSinceLastIntervention = lastInteraction
       ? (Date.now() - new Date(lastInteraction.timestamp).getTime()) / 60000
       : 9999;
+
+    // Get last intervention hour
+    let lastInterventionHour: number | null = null;
+    if (lastInteraction?.timestamp) {
+      const lastTime = new Date(lastInteraction.timestamp);
+      lastInterventionHour = parseInt(
+        lastTime.toLocaleString('en-US', { timeZone: 'Africa/Cairo', hour: 'numeric', hour12: false }),
+        10
+      );
+    }
+
+    // Count interventions today
+    const interventionsToday = await this.getInterventionsToday(chatId);
 
     // Get deferrals today
     const deferralsToday = await this.getDeferralsToday(chatId);
@@ -166,6 +532,7 @@ export class MetaCoach {
       tasksFailed,
       currentBattleState: context.battleState,
       timeOfDay,
+      currentHour,
       lastInterventionType,
       lastInterventionOutcome,
       minutesSinceLastIntervention,
@@ -173,44 +540,50 @@ export class MetaCoach {
       deferralsToday,
       avoidancePatterns,
       activeTaskSession: activeSession,
+      interventionsToday,
+      lastInterventionHour,
     };
   }
 
   /**
    * Decide which intervention to use based on state
+   * NEW FLOW: Proactive engagement throughout the day
    */
   async decideIntervention(state: UserState): Promise<InterventionDecision> {
-    // If night time (23:00 - 07:00), don't intervene
-    if (state.timeOfDay === 'night') {
-      return {
-        type: 'none',
-        message: '',
-        escalationLevel: 0,
-      };
+    // Get settings
+    const thresholdStr = await this.settings.get('coach.inactivity_threshold_hours');
+    const inactivityThreshold = thresholdStr ? parseFloat(thresholdStr) : 1.5;
+
+    const sleepStartStr = await this.settings.get('coach.sleep_start') || '23:00';
+    const sleepEndStr = await this.settings.get('coach.sleep_end') || '07:00';
+
+    const sleepStartH = parseInt(sleepStartStr.split(':')[0] || '23', 10);
+    const sleepEndH = parseInt(sleepEndStr.split(':')[0] || '7', 10);
+
+    // ============================================
+    // 1. Sleep time? → No intervention
+    // ============================================
+    if (this.isInSleepPeriod(state.currentHour, sleepStartH, sleepEndH)) {
+      return { type: 'none', message: '', escalationLevel: 0 };
     }
 
-    // If there's an active task session, don't intervene
+    // ============================================
+    // 2. Active task session? → No intervention
+    // ============================================
     if (state.activeTaskSession) {
-      return {
-        type: 'none',
-        message: '',
-        escalationLevel: 0,
-      };
+      return { type: 'none', message: '', escalationLevel: 0 };
     }
 
-    // Decision matrix
     const escalationLevel = this.calculateEscalationLevel(state);
 
-    // Get inactivity threshold from settings (default 2 hours)
-    const thresholdStr = await this.settings.get('coach.inactivity_threshold_hours');
-    const inactivityThreshold = thresholdStr ? parseFloat(thresholdStr) : 2;
-
     // ============================================
-    // HIGH PRIORITY: Escalation for ignored interventions
+    // 3. Ignored previous intervention? → ESCALATION
     // ============================================
-    if (state.hoursInactive >= inactivityThreshold &&
-        state.lastInterventionOutcome === 'pending' &&
-        state.minutesSinceLastIntervention >= 30) {
+    if (
+      state.lastInterventionOutcome === 'pending' &&
+      state.minutesSinceLastIntervention >= 30 &&
+      state.hoursInactive >= inactivityThreshold
+    ) {
       return {
         type: 'escalation',
         message: '',
@@ -220,130 +593,149 @@ export class MetaCoach {
     }
 
     // ============================================
-    // Evening + low completion: Urgent combined intervention
+    // 4. Morning first check? → MORNING KICKOFF
     // ============================================
-    if (state.timeOfDay === 'evening' && state.tasksCompletedToday < 3) {
+    if (
+      state.currentHour >= sleepEndH &&
+      state.currentHour < 10 &&
+      !this.hadInterventionInHourRange(state.lastInterventionHour, sleepEndH, 10)
+    ) {
       return {
-        type: 'combined',
-        components: ['stuck_mode', 'roast'],
+        type: 'morning_kickoff',
         message: '',
-        escalationLevel: Math.min(5, escalationLevel + 1),
-        followUpDelay: 30,
+        escalationLevel: 1,
+        followUpDelay: 90,
       };
     }
 
     // ============================================
-    // Afternoon with high inactivity: Escalation
+    // 5. Midday (12-14)? → MIDDAY PUSH
     // ============================================
-    if (state.timeOfDay === 'afternoon' && state.hoursInactive >= inactivityThreshold) {
-      // Battle mode active + high boss HP: Battle narrative
-      if (state.currentBattleState) {
-        const bossHP = state.currentBattleState.bossCurrentHP || 0;
-        const maxHP = state.currentBattleState.bossMaxHP || 100;
-        const hpPercent = (bossHP / maxHP) * 100;
-
-        if (hpPercent > 50) {
-          return {
-            type: 'battle_narrative',
-            message: '',
-            escalationLevel,
-            followUpDelay: 60,
-          };
-        }
-      }
-
-      // Regular afternoon escalation
+    if (
+      state.currentHour >= 12 &&
+      state.currentHour < 14 &&
+      !this.hadInterventionInHourRange(state.lastInterventionHour, 12, 14)
+    ) {
       return {
-        type: 'escalation',
+        type: 'midday_push',
         message: '',
-        escalationLevel,
-        followUpDelay: 45,
+        escalationLevel: state.tasksCompletedToday < 3 ? 2 : 1,
+        followUpDelay: 90,
       };
     }
 
     // ============================================
-    // Morning: Check-in or escalation based on inactivity
+    // 6. Evening (18-20)? → EVENING CHECK
     // ============================================
-    if (state.timeOfDay === 'morning') {
-      // Just started the day, gentle check-in
-      if (state.tasksCompletedToday === 0 && state.hoursInactive < inactivityThreshold) {
+    if (
+      state.currentHour >= 18 &&
+      state.currentHour < 20 &&
+      !this.hadInterventionInHourRange(state.lastInterventionHour, 18, 20)
+    ) {
+      return {
+        type: 'evening_check',
+        message: '',
+        escalationLevel: state.tasksCompletedToday < 5 ? 3 : 1,
+        followUpDelay: 60,
+      };
+    }
+
+    // ============================================
+    // 7. Night wrap-up (21-22)? → NIGHT WRAPUP
+    // ============================================
+    if (
+      state.currentHour >= 21 &&
+      state.currentHour < sleepStartH &&
+      !this.hadInterventionInHourRange(state.lastInterventionHour, 21, sleepStartH)
+    ) {
+      return {
+        type: 'night_wrapup',
+        message: '',
+        escalationLevel: 1,
+        followUpDelay: 120,
+      };
+    }
+
+    // ============================================
+    // 8. Battle active with high boss HP? → BATTLE NARRATIVE
+    // ============================================
+    if (state.currentBattleState) {
+      const bossHP = state.currentBattleState.bossCurrentHP || 0;
+      const maxHP = state.currentBattleState.bossMaxHP || 100;
+      const hpPercent = (bossHP / maxHP) * 100;
+
+      if (hpPercent > 60 && state.hoursInactive >= inactivityThreshold) {
         return {
-          type: 'gentle_checkin',
+          type: 'battle_narrative',
           message: '',
-          escalationLevel: 1,
+          escalationLevel,
           followUpDelay: 60,
         };
       }
-
-      // Morning but inactive too long - escalate
-      if (state.hoursInactive >= inactivityThreshold) {
-        return {
-          type: 'escalation',
-          message: '',
-          escalationLevel,
-          followUpDelay: 45,
-        };
-      }
     }
 
     // ============================================
-    // Multiple deferrals + avoidance patterns: Task recommendation
-    // ============================================
-    if (state.deferralsToday >= 2 && state.avoidancePatterns.length > 0) {
-      return {
-        type: 'task_recommendation',
-        message: '',
-        targetTask: state.avoidancePatterns[0],
-        escalationLevel,
-        followUpDelay: 45,
-      };
-    }
-
-    // ============================================
-    // General inactivity fallback: Escalation (not just stuck suggestion)
+    // 9. Inactive >= threshold? → INACTIVITY NUDGE
     // ============================================
     if (state.hoursInactive >= inactivityThreshold) {
       return {
-        type: 'escalation',
+        type: 'inactivity_nudge',
         message: '',
         escalationLevel,
         followUpDelay: 45,
       };
     }
 
+    // ============================================
+    // 10. Active but threshold passed since last check? → MOMENTUM CHECK
+    // ============================================
+    const checkIntervalMinutes = inactivityThreshold * 60;
+    if (state.minutesSinceLastIntervention >= checkIntervalMinutes) {
+      return {
+        type: 'momentum_check',
+        message: '',
+        escalationLevel: 1,
+        followUpDelay: 90,
+      };
+    }
+
+    // ============================================
     // No intervention needed
-    return {
-      type: 'none',
-      message: '',
-      escalationLevel: 0,
-    };
+    // ============================================
+    return { type: 'none', message: '', escalationLevel: 0 };
   }
 
   /**
    * Execute the decided intervention
    */
   async executeIntervention(chatId: string, decision: InterventionDecision): Promise<string> {
+    const state = await this.analyzeUserState(chatId);
+    const style = state.coachingStyle;
+
     switch (decision.type) {
-      case 'gentle_checkin':
-        return this.generateGentleCheckin(chatId);
+      case 'morning_kickoff':
+        return this.generateMessage(chatId, 'morning_kickoff', style, state, decision.escalationLevel);
+
+      case 'midday_push':
+        return this.generateMessage(chatId, 'midday_push', style, state, decision.escalationLevel);
+
+      case 'evening_check':
+        return this.generateMessage(chatId, 'evening_check', style, state, decision.escalationLevel);
+
+      case 'momentum_check':
+        return this.generateMessage(chatId, 'momentum_check', style, state, decision.escalationLevel);
+
+      case 'night_wrapup':
+        return this.generateMessage(chatId, 'night_wrapup', style, state, decision.escalationLevel);
+
+      case 'inactivity_nudge':
+        return this.generateMessage(chatId, 'inactivity_nudge', style, state, decision.escalationLevel);
 
       case 'escalation':
-        return this.generateEscalation(chatId, decision.escalationLevel);
-
-      case 'stuck_mode':
-        return '💡 يبدو إنك محتاج دفعة. جرب /stuck لسبرنت سريع!';
-
-      case 'task_recommendation':
-        return `📌 لاحظت إنك بتأجل "${decision.targetTask}" كتير.\nجرب /stuck عشان نشتغل عليها دلوقتي!`;
+        return this.generateMessage(chatId, 'escalation', style, state, decision.escalationLevel);
 
       case 'battle_narrative':
-        return this.generateBattleUrgency(chatId);
-
-      case 'roast':
-        return '🔥 جرب /roast_me لو عايز تعرف رأيي الصريح!';
-
-      case 'combined':
-        return this.generateCombinedIntervention(chatId, decision.escalationLevel);
+        return this.generateMessage(chatId, 'battle_narrative', style, state, decision.escalationLevel);
 
       default:
         return '';
@@ -351,45 +743,55 @@ export class MetaCoach {
   }
 
   /**
-   * Handle ignored intervention (called after followUpDelay)
+   * Generate celebration message (called from task completion)
    */
-  async handleIgnored(chatId: string): Promise<InterventionDecision | null> {
+  async generateCelebration(chatId: string, taskName: string, durationMinutes: number): Promise<string> {
     const state = await this.analyzeUserState(chatId);
+    const style = state.coachingStyle;
 
-    // If last intervention was pending and time has passed, escalate
-    if (state.lastInterventionOutcome === 'pending' && state.minutesSinceLastIntervention >= 30) {
-      const currentLevel = this.calculateEscalationLevel(state);
-      const newLevel = Math.min(5, currentLevel + 1);
+    const promptTemplate = PROMPTS.celebration[style];
+    const prompt = promptTemplate
+      .replace('{TASK_NAME}', taskName)
+      .replace('{DURATION}', durationMinutes.toString())
+      .replace('{TASKS_COMPLETED}', (state.tasksCompletedToday + 1).toString());
 
-      return {
-        type: 'escalation',
-        message: '',
-        escalationLevel: newLevel,
-        followUpDelay: newLevel >= 4 ? 60 : 30, // Longer delay at high escalation
-      };
-    }
+    const message = await this.aiComplete(
+      [{ role: 'user', content: prompt }],
+      0.85,
+      100
+    );
 
-    return null;
-  }
+    // Log interaction
+    await this.logInteraction(chatId, 'celebration', message);
 
-  /**
-   * Record intervention outcome
-   */
-  async recordOutcome(chatId: string, outcome: 'positive' | 'negative'): Promise<void> {
-    const contextBuilder = createCoachingContextBuilder(this.db, this.settings);
-    await contextBuilder.updateInteractionOutcome(chatId, 'meta_coach', outcome);
+    const emoji = style === 'confrontational' ? '💪' : style === 'supportive' ? '🎉' : '✅';
+    return `${emoji} ${message.trim()}`;
   }
 
   // ============================================
   // Private Helper Methods
   // ============================================
 
+  private isInSleepPeriod(currentHour: number, sleepStartH: number, sleepEndH: number): boolean {
+    // Handle overnight sleep (e.g., 23:00 to 07:00)
+    if (sleepStartH > sleepEndH) {
+      return currentHour >= sleepStartH || currentHour < sleepEndH;
+    }
+    return currentHour >= sleepStartH && currentHour < sleepEndH;
+  }
+
+  private hadInterventionInHourRange(lastHour: number | null, startH: number, endH: number): boolean {
+    if (lastHour === null) return false;
+    return lastHour >= startH && lastHour < endH;
+  }
+
   private calculateEscalationLevel(state: UserState): number {
     let level = 1;
 
     // Increase based on inactivity
-    if (state.hoursInactive >= 2) level++;
-    if (state.hoursInactive >= 4) level++;
+    if (state.hoursInactive >= 1.5) level++;
+    if (state.hoursInactive >= 3) level++;
+    if (state.hoursInactive >= 5) level++;
 
     // Increase based on failed tasks
     if (state.tasksFailed >= 3) level++;
@@ -401,6 +803,98 @@ export class MetaCoach {
 
     // Cap at 5
     return Math.min(5, level);
+  }
+
+  private async generateMessage(
+    chatId: string,
+    type: keyof typeof PROMPTS,
+    style: 'confrontational' | 'supportive' | 'balanced',
+    state: UserState,
+    escalationLevel: number
+  ): Promise<string> {
+    const promptTemplate = PROMPTS[type][style];
+
+    // Get yesterday's tasks
+    const yesterdayTasks = await this.getYesterdayTasksCount();
+
+    // Get available tasks today
+    const availableTasks = await this.getAvailableTasksCount();
+
+    // Get boss info
+    let bossName = 'لا يوجد';
+    let bossHP = 0;
+    if (state.currentBattleState) {
+      bossName = state.currentBattleState.boss?.name || 'العدو';
+      bossHP = Math.round(
+        (state.currentBattleState.bossCurrentHP / state.currentBattleState.bossMaxHP) * 100
+      );
+    }
+
+    // Replace placeholders
+    const prompt = promptTemplate
+      .replace('{HOURS_INACTIVE}', state.hoursInactive.toFixed(1))
+      .replace('{TASKS_COMPLETED}', state.tasksCompletedToday.toString())
+      .replace('{TASKS_FAILED}', state.tasksFailed.toString())
+      .replace('{TIME_OF_DAY}', this.getArabicTimeOfDay(state.timeOfDay))
+      .replace('{ESCALATION_LEVEL}', escalationLevel.toString())
+      .replace('{LAST_INTERVENTION}', state.lastInterventionType || 'لا يوجد')
+      .replace('{YESTERDAY_TASKS}', yesterdayTasks.toString())
+      .replace('{AVAILABLE_TASKS}', availableTasks.toString())
+      .replace('{BOSS_NAME}', bossName)
+      .replace('{BOSS_HP}', bossHP.toString())
+      .replace('{BOSS_STATUS}', state.currentBattleState ? `${bossName} - ${bossHP}% HP` : 'لا توجد معركة');
+
+    const message = await this.aiComplete(
+      [{ role: 'user', content: prompt }],
+      0.9,
+      150
+    );
+
+    // Log interaction
+    await this.logInteraction(chatId, type, message, escalationLevel);
+
+    // Add emoji based on type
+    const emojis: Record<string, string> = {
+      morning_kickoff: '☀️',
+      midday_push: '⚡',
+      evening_check: '🌆',
+      momentum_check: '👀',
+      night_wrapup: '🌙',
+      inactivity_nudge: escalationLevel >= 3 ? '🚨' : '📢',
+      escalation: '🔥',
+      battle_narrative: '⚔️',
+    };
+
+    // Include command footer for all coach messages
+    return `${emojis[type] || '📌'} ${message.trim()}${COMMAND_FOOTER}`;
+  }
+
+  private getArabicTimeOfDay(timeOfDay: string): string {
+    const map: Record<string, string> = {
+      morning: 'الصبح',
+      afternoon: 'الضهر',
+      evening: 'المساء',
+      night: 'الليل',
+    };
+    return map[timeOfDay] || timeOfDay;
+  }
+
+  private async logInteraction(
+    chatId: string,
+    type: string,
+    message: string,
+    escalationLevel?: number
+  ): Promise<void> {
+    const contextBuilder = createCoachingContextBuilder(this.db, this.settings);
+    await contextBuilder.logInteraction({
+      chat_id: chatId,
+      interaction_date: getTodayInEgypt(),
+      timestamp: new Date().toISOString(),
+      interaction_type: 'meta_coach',
+      bot_response: message.slice(0, 500),
+      outcome: 'pending',
+      metadata: { interventionType: type, escalationLevel },
+    });
   }
 
   private async getHoursInactive(): Promise<number> {
@@ -438,13 +932,54 @@ export class MetaCoach {
     }
   }
 
+  private async getInterventionsToday(chatId: string): Promise<number> {
+    try {
+      const today = getTodayInEgypt();
+      const result = await this.db.select('coaching_interactions', {
+        filter: {
+          chat_id: op.eq(chatId),
+          interaction_date: op.eq(today),
+        },
+      });
+      return result.length;
+    } catch {
+      return 0;
+    }
+  }
+
+  private async getYesterdayTasksCount(): Promise<number> {
+    try {
+      const yesterday = new Date();
+      yesterday.setDate(yesterday.getDate() - 1);
+      const yesterdayStr = yesterday.toISOString().split('T')[0];
+
+      const tasks = await this.db.select('tasks', {
+        filter: { status: op.eq('done') },
+      });
+
+      return tasks.filter((t: any) => {
+        const completedAt = t.completed_at?.split('T')[0];
+        return completedAt === yesterdayStr;
+      }).length;
+    } catch {
+      return 0;
+    }
+  }
+
+  private async getAvailableTasksCount(): Promise<number> {
+    try {
+      // This would ideally fetch from Todoist, but for now return a placeholder
+      return 10;
+    } catch {
+      return 0;
+    }
+  }
+
   private async getDeferralsToday(chatId: string): Promise<number> {
     try {
       const today = getTodayInEgypt();
       const logs = await this.db.select('intervention_logs', {
-        filter: {
-          chat_id: op.eq(chatId),
-        },
+        filter: { chat_id: op.eq(chatId) },
         order: 'created_at.desc',
         limit: 20,
       });
@@ -470,7 +1005,6 @@ export class MetaCoach {
         limit: 30,
       });
 
-      // Count task deferrals
       const taskCounts = new Map<string, number>();
       for (const log of logs) {
         const data = log.data as any;
@@ -482,7 +1016,6 @@ export class MetaCoach {
         }
       }
 
-      // Return tasks deferred 2+ times
       return Array.from(taskCounts.entries())
         .filter(([_, count]) => count >= 2)
         .sort((a, b) => b[1] - a[1])
@@ -492,128 +1025,97 @@ export class MetaCoach {
     }
   }
 
-  private async generateGentleCheckin(chatId: string): Promise<string> {
+  // ============================================
+  // Interactive Conversation Methods
+  // ============================================
+
+  /**
+   * Generate a conversational response when user replies to check-in
+   * Goal: Motivate user to start a task
+   */
+  async generateConversationResponse(
+    chatId: string,
+    userMessage: string,
+    conversationTurn: number,
+    userMood?: 'high' | 'normal' | 'low'
+  ): Promise<string> {
     const state = await this.analyzeUserState(chatId);
+    const style = state.coachingStyle;
 
-    const prompt = GENTLE_CHECKIN_PROMPT
-      .replace('{TIME_OF_DAY}', state.timeOfDay)
-      .replace('{TASKS_COMPLETED}', state.tasksCompletedToday.toString());
+    const moodContext = userMood
+      ? `المستخدم حالته النفسية: ${userMood === 'high' ? 'طاقة عالية' : userMood === 'low' ? 'تعبان' : 'عادي'}`
+      : '';
 
-    const message = await this.aiComplete(
-      [{ role: 'user', content: prompt }],
-      0.85,
-      150
-    );
+    const turnContext = conversationTurn === 1
+      ? 'أول رد من المستخدم'
+      : conversationTurn === 2
+      ? 'ثاني رد - حاول تقنعه يبدأ شغل'
+      : 'آخر رد - اقترح مهمة محددة وشجعه يبدأ';
 
-    // Log interaction
-    const contextBuilder = createCoachingContextBuilder(this.db, this.settings);
-    await contextBuilder.logInteraction({
-      chat_id: chatId,
-      interaction_date: getTodayInEgypt(),
-      timestamp: new Date().toISOString(),
-      interaction_type: 'meta_coach',
-      bot_response: message,
-      outcome: 'pending',
-      metadata: { interventionType: 'gentle_checkin' },
-    });
+    const prompt = `أنت كوتش إنتاجية ${style === 'confrontational' ? 'مواجه' : style === 'supportive' ? 'داعم' : 'متوازن'}.
 
-    return `☀️ ${message.trim()}`;
-  }
+⚠️ مهم جداً: الرد بالعامية المصرية فقط!
 
-  private async generateEscalation(chatId: string, level: number): Promise<string> {
-    const state = await this.analyzeUserState(chatId);
+${moodContext}
+${turnContext}
 
-    const prompt = ESCALATION_PROMPT
-      .replace('{HOURS_INACTIVE}', state.hoursInactive.toFixed(1))
-      .replace('{TASKS_COMPLETED}', state.tasksCompletedToday.toString())
-      .replace('{TASKS_FAILED}', state.tasksFailed.toString())
-      .replace('{LAST_INTERVENTION}', state.lastInterventionType || 'none')
-      .replace('{LAST_OUTCOME}', state.lastInterventionOutcome || 'none')
-      .replace('{ESCALATION_LEVEL}', level.toString());
+رسالة المستخدم: "${userMessage}"
 
-    const message = await this.aiComplete(
+المهام المكتملة اليوم: ${state.tasksCompletedToday}
+ساعات بدون إنجاز: ${state.hoursInactive.toFixed(1)}
+
+اكتب رد قصير (1-2 جمل):
+- تفاعل مع كلامه
+- حفزه يبدأ مهمة
+- ${conversationTurn >= 2 ? 'اقترح يستخدم /starttask' : 'اسأله عن أول مهمة'}
+
+خليها طبيعية ومحفزة.`;
+
+    const response = await this.aiComplete(
       [{ role: 'user', content: prompt }],
       0.9,
-      200
+      100
     );
 
-    // Log interaction
-    const contextBuilder = createCoachingContextBuilder(this.db, this.settings);
-    await contextBuilder.logInteraction({
-      chat_id: chatId,
-      interaction_date: getTodayInEgypt(),
-      timestamp: new Date().toISOString(),
-      interaction_type: 'meta_coach',
-      bot_response: message,
-      outcome: 'pending',
-      metadata: { interventionType: 'escalation', level },
-    });
-
-    const urgencyEmoji = level >= 4 ? '🚨' : level >= 3 ? '⚡' : '📢';
-    return `${urgencyEmoji} ${message.trim()}`;
-  }
-
-  private async generateBattleUrgency(chatId: string): Promise<string> {
-    const state = await this.analyzeUserState(chatId);
-
-    if (!state.currentBattleState) {
-      return '⚔️ معركتك تنتظرك! استخدم /battle_status لمعرفة حالة البوس';
+    // On last turn, add command suggestions
+    if (conversationTurn >= 3) {
+      return `💬 ${response.trim()}${COMMAND_FOOTER}`;
     }
 
-    const bossName = state.currentBattleState.boss?.name || 'العدو';
-    const hpPercent = Math.round(
-      (state.currentBattleState.bossCurrentHP / state.currentBattleState.bossMaxHP) * 100
-    );
-
-    // Log interaction
-    const contextBuilder = createCoachingContextBuilder(this.db, this.settings);
-    await contextBuilder.logInteraction({
-      chat_id: chatId,
-      interaction_date: getTodayInEgypt(),
-      timestamp: new Date().toISOString(),
-      interaction_type: 'meta_coach',
-      bot_response: `Battle urgency: ${bossName} at ${hpPercent}%`,
-      outcome: 'pending',
-      metadata: { interventionType: 'battle_narrative' },
-    });
-
-    return `⚔️ *${bossName}* لسه عند ${hpPercent}% HP!\n\nاليوم بيجري والبوس بيزداد قوة. وقت الهجوم! 🎯`;
+    return `💬 ${response.trim()}`;
   }
 
-  private async generateCombinedIntervention(chatId: string, level: number): Promise<string> {
+  /**
+   * Generate response when user doesn't reply within window
+   */
+  async generateNoResponseFollowUp(chatId: string): Promise<string> {
     const state = await this.analyzeUserState(chatId);
+    const style = state.coachingStyle;
 
-    let message = `🔥 *تنبيه متعدد المستويات*\n\n`;
-    message += `الوقت: ${state.timeOfDay === 'evening' ? 'المساء' : state.timeOfDay}\n`;
-    message += `المهام المكتملة: ${state.tasksCompletedToday}\n`;
-    message += `المهام الفاشلة: ${state.tasksFailed}\n\n`;
-
-    if (state.avoidancePatterns.length > 0) {
-      message += `⚠️ مهام بتتأجل كتير:\n`;
-      state.avoidancePatterns.slice(0, 3).forEach(task => {
-        message += `• ${task}\n`;
-      });
-      message += '\n';
+    let message = '';
+    if (style === 'confrontational') {
+      message = '👀 طيب... مفيش رد. لما تكون جاهز، أنا هنا.';
+    } else if (style === 'supportive') {
+      message = '💙 مفيش مشكلة لو مشغول. فكرني لما تكون جاهز!';
+    } else {
+      message = '📌 تمام، لما تكون جاهز تبدأ، قولي.';
     }
 
-    message += `━━━━━━━━━━━━━━━━━━\n`;
-    message += `🎯 /stuck - سبرنت سريع\n`;
-    message += `🔥 /roast_me - كلام صريح\n`;
-    message += `⚔️ /battle_status - المعركة`;
+    return `${message}${COMMAND_FOOTER}`;
+  }
 
-    // Log interaction
-    const contextBuilder = createCoachingContextBuilder(this.db, this.settings);
-    await contextBuilder.logInteraction({
-      chat_id: chatId,
-      interaction_date: getTodayInEgypt(),
-      timestamp: new Date().toISOString(),
-      interaction_type: 'meta_coach',
-      bot_response: 'Combined intervention',
-      outcome: 'pending',
-      metadata: { interventionType: 'combined', level },
-    });
+  /**
+   * Generate response when user takes action after check-in
+   */
+  async generateActionAcknowledgment(_chatId: string, action: string): Promise<string> {
+    const actionMessages: Record<string, string> = {
+      starttask: '🎯 كده الكلام! يلا بينا!',
+      stuck: '🆘 تمام، هنحلها سوا!',
+      roast: '😏 أوكي، جاي أحرقك!',
+      battle: '⚔️ يلا نحارب!',
+    };
 
-    return message;
+    return actionMessages[action] || '👍 تمام!';
   }
 }
 

@@ -509,9 +509,6 @@ CONTENT: Struggles with focus when notifications are enabled. Needs quiet enviro
 CATEGORY: Personal Information & Facts
 CONTENT: Mentioned working on a startup project. Has 2 years experience in programming. Prefers coffee in the morning. Lives in Cairo.
 
-## [MEMORY_OPTIMIZATION]
-(إذا كانت الذاكرة بحاجة لتحسين وإعادة تنظيم (كبيرة جداً أو غير منظمة)، اكتب "OPTIMIZE_NEEDED"، وإلا اكتب "NOT_NEEDED")
-
 ---
 
 تذكر: كن صادقاً ومحفزاً، واستخدم اللهجة المصرية بطبيعية، وركز على التطوير المستمر.
@@ -1317,9 +1314,6 @@ CONTENT: Struggles with focus when notifications are enabled. Needs quiet enviro
 
 CATEGORY: Personal Information & Facts
 CONTENT: Mentioned working on a startup project. Has 2 years experience in programming. Prefers coffee in the morning. Lives in Cairo.
-
-## [MEMORY_OPTIMIZATION]
-(إذا كانت الذاكرة بحاجة لتحسين وإعادة تنظيم (كبيرة جداً أو غير منظمة)، اكتب "OPTIMIZE_NEEDED"، وإلا اكتب "NOT_NEEDED")
 
 ---
 

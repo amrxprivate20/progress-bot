@@ -480,9 +480,6 @@ Q: [سؤالك هنا]
 - Recurring Themes & Lessons
 - Personal Information & Facts
 
-## [MEMORY_OPTIMIZATION]
-(إذا كانت الذاكرة بحاجة لتحسين وإعادة تنظيم، اكتب "OPTIMIZE_NEEDED"، وإلا اكتب "NOT_NEEDED")
-
 ---
 `;
   
@@ -689,9 +686,32 @@ const aiResponse = await aiClient.generateDailyReport({
         }
       }
 
-      // Skip memory optimization to reduce subrequests
-      if (aiResponse.memoryOptimization === 'OPTIMIZE_NEEDED') {
-        console.log(`ℹ️ [Job ${jobId}] Memory optimization needed - will run on next report`);
+      // Run memory optimization check after updates
+      try {
+        await this.delay(1000);
+        console.log(`🔍 [Job ${jobId}] Checking if memory optimization needed...`);
+        const optimizationCheck = await memoryMgr.checkOptimizationNeeded();
+        console.log(`🔍 [Job ${jobId}] Optimization check: needed=${optimizationCheck.needed}, categories=${optimizationCheck.categories.length}, reasons=${optimizationCheck.reasons.join('; ') || 'none'}`);
+
+        if (optimizationCheck.needed) {
+          // Use the existing unified AI client (supports both Anthropic and OpenRouter)
+          const optimizationResult = await memoryMgr.runOptimization(aiClient as any);
+
+          if (optimizationResult.categoriesOptimized.length > 0) {
+            console.log(`✅ [Job ${jobId}] Memory optimized: ${optimizationResult.totalSizeBefore} → ${optimizationResult.totalSizeAfter} chars`);
+            await this.sendTelegramMessage(chatId, botToken,
+              `🧠 تم تحسين الذاكرة تلقائياً\n` +
+              `📊 ${optimizationResult.totalSizeBefore} → ${optimizationResult.totalSizeAfter} حرف\n` +
+              `📂 ${optimizationResult.categoriesOptimized.length} فئات`
+            );
+          } else {
+            console.log(`ℹ️ [Job ${jobId}] Optimization ran but no categories were actually optimized`);
+          }
+        } else {
+          console.log(`✅ [Job ${jobId}] Memory optimization not needed`);
+        }
+      } catch (optError) {
+        console.error(`⚠️ [Job ${jobId}] Memory optimization failed (non-critical):`, optError);
       }
 
       // Mark as completed

@@ -156,7 +156,20 @@ export default {
         const message = await metaCoach.executeIntervention(chatId, decision);
 
         if (message) {
-          // Send via Telegram API directly
+          // Send via Telegram API with interactive keyboard
+          const coachKeyboard = {
+            inline_keyboard: [
+              [
+                { text: '▶️ ابدأ مهمة', callback_data: 'coach:start_task' },
+                { text: '⏸️ مشغول', callback_data: 'coach:busy' },
+              ],
+              [
+                { text: '💬 احكيلي', callback_data: 'coach:talk' },
+                { text: '😴 تعبان', callback_data: 'coach:tired' },
+              ],
+            ],
+          };
+
           const telegramResponse = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -164,11 +177,22 @@ export default {
               chat_id: chatId,
               text: message,
               parse_mode: 'Markdown',
+              reply_markup: coachKeyboard,
             }),
           });
 
           if (telegramResponse.ok) {
             console.log('✅ Meta-coach message sent successfully');
+
+            // Create pending check-in so user text responses are handled interactively
+            try {
+              const { createCoachingAnalytics } = await import('./coach/coaching-analytics');
+              const coachingAnalytics = createCoachingAnalytics(db);
+              await coachingAnalytics.createPendingCheckin(chatId, decision.type, 10);
+              console.log('✅ Pending check-in created');
+            } catch (checkinError) {
+              console.error('⚠️ Failed to create pending check-in:', checkinError);
+            }
           } else {
             console.error('❌ Failed to send meta-coach message:', await telegramResponse.text());
           }

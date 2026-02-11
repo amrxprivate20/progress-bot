@@ -17,7 +17,8 @@
       "Bash(xargs cat:*)",
       "Bash(grep:*)",
       "Bash(tail:*)",
-      "Bash(pkill:*)"
+      "Bash(pkill:*)",
+      "Bash(git push:*)"
     ]
   }
 }

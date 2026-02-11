@@ -33,8 +33,21 @@ const MEMORY_CATEGORIES = [
 ] as const;
 
 const DEDUPLICATION_THRESHOLD = 0.7; // 70% word overlap
-const MAX_MEMORY_SIZE = 10000; // characters
+const CATEGORY_SIZE_THRESHOLD = 3000; // chars - optimize category if over this
+const TOTAL_MEMORY_THRESHOLD = 10000; // chars - optimize all if total over this
 const OPTIMIZATION_INTERVAL_DAYS = 7;
+
+// ============================================
+// Types
+// ============================================
+
+export interface MemoryOptimizationResult {
+  needed: boolean;
+  categoriesOptimized: string[];
+  totalSizeBefore: number;
+  totalSizeAfter: number;
+  reasons: string[];
+}
 
 // ============================================
 // Memory Manager
@@ -156,34 +169,165 @@ export class MemoryManager {
   }
 
   /**
-   * Check if optimization is needed and trigger if necessary
+   * Check if optimization is needed (lightweight check, no AI calls)
    */
-  async checkOptimizationTriggers(): Promise<boolean> {
+  async checkOptimizationNeeded(): Promise<{ needed: boolean; reasons: string[]; categories: string[] }> {
     const memories = await this.db.select<Memory>('memory', {});
+    const reasons: string[] = [];
+    const categories: string[] = [];
 
+    let totalSize = 0;
     for (const mem of memories) {
+      const content = mem.content || '';
+      totalSize += content.length;
+
+      if (content.length < 200) continue; // Skip near-empty categories
+
       const lastOptimized = mem.last_optimized
         ? (typeof mem.last_optimized === 'string' ? mem.last_optimized : mem.last_optimized.toISOString())
         : null;
 
-      const needsOptimization =
-        this.isTooLarge(mem.content || '') ||
-        this.needsScheduledOptimization(lastOptimized);
-
-      if (needsOptimization) {
-        console.log(`Optimization needed for: ${mem.category}`);
-        await this.optimizeCategory(mem.category);
-        return true;
+      // Category too large
+      if (content.length > CATEGORY_SIZE_THRESHOLD) {
+        reasons.push(`${mem.category}: ${content.length} chars (>${CATEGORY_SIZE_THRESHOLD})`);
+        categories.push(mem.category);
+      }
+      // Never optimized but has substantial content
+      else if (!lastOptimized && content.length > 1000) {
+        reasons.push(`${mem.category}: never optimized, ${content.length} chars`);
+        categories.push(mem.category);
+      }
+      // Scheduled optimization (7+ days since last)
+      else if (lastOptimized && this.needsScheduledOptimization(lastOptimized) && content.length > 500) {
+        const days = Math.floor((Date.now() - new Date(lastOptimized).getTime()) / (1000 * 60 * 60 * 24));
+        reasons.push(`${mem.category}: ${days} days since last optimization`);
+        categories.push(mem.category);
       }
     }
 
-    return false;
+    // Total memory too large
+    if (totalSize > TOTAL_MEMORY_THRESHOLD && categories.length === 0) {
+      reasons.push(`Total memory size: ${totalSize} chars (>${TOTAL_MEMORY_THRESHOLD})`);
+      // Add all non-empty categories
+      for (const mem of memories) {
+        if ((mem.content || '').length > 200) {
+          categories.push(mem.category);
+        }
+      }
+    }
+
+    return { needed: categories.length > 0, reasons, categories };
+  }
+
+  /**
+   * Run memory optimization - standalone function
+   * Checks current memory state and optimizes categories that need it.
+   * Uses the provided AI client (should be high-tier for best results).
+   *
+   * @param highTierAiClient - AI client to use (high-tier recommended)
+   * @param force - Force optimization of all categories regardless of criteria
+   * @returns Optimization result with details
+   */
+  async runOptimization(
+    highTierAiClient?: AIClient,
+    force: boolean = false
+  ): Promise<MemoryOptimizationResult> {
+    const client = highTierAiClient || this.aiClient;
+    const result: MemoryOptimizationResult = {
+      needed: false,
+      categoriesOptimized: [],
+      totalSizeBefore: 0,
+      totalSizeAfter: 0,
+      reasons: [],
+    };
+
+    // Step 1: Check what needs optimization
+    const check = await this.checkOptimizationNeeded();
+    const categoriesToOptimize = force
+      ? MEMORY_CATEGORIES.filter(async () => true) as unknown as string[] // all categories
+      : check.categories;
+
+    if (!force && !check.needed) {
+      console.log('✅ Memory optimization check: not needed');
+      result.reasons = ['All categories within limits'];
+      return result;
+    }
+
+    result.needed = true;
+    result.reasons = force ? ['Force optimization requested'] : check.reasons;
+
+    // Get all categories to optimize (force = all with content > 200 chars)
+    let targetCategories: string[];
+    if (force) {
+      const allMemory = await this.getAllMemory();
+      targetCategories = MEMORY_CATEGORIES.filter(cat => (allMemory[cat] || '').length > 200);
+    } else {
+      targetCategories = categoriesToOptimize;
+    }
+
+    console.log(`🔄 Memory optimization starting: ${targetCategories.length} categories`);
+
+    // Step 2: Calculate total size before
+    const allMemoryBefore = await this.getAllMemory();
+    result.totalSizeBefore = Object.values(allMemoryBefore).reduce((sum, c) => sum + c.length, 0);
+
+    // Step 3: Optimize each category
+    for (const category of targetCategories) {
+      const currentContent = allMemoryBefore[category] || '';
+      if (currentContent.length < 200) {
+        console.log(`⏭️ Skipping ${category}: too small (${currentContent.length} chars)`);
+        continue;
+      }
+
+      console.log(`🔄 Optimizing: ${category} (${currentContent.length} chars)`);
+
+      try {
+        const recentInsights = await this.getRecentInsights(category);
+        const optimizedContent = await client.optimizeMemory(
+          category,
+          currentContent,
+          recentInsights
+        );
+
+        // Sanity check: don't save if optimization returned empty or much smaller
+        if (optimizedContent && optimizedContent.length > 50) {
+          await this.upsertCategory(category, optimizedContent, true);
+          result.categoriesOptimized.push(category);
+          console.log(`✅ ${category}: ${currentContent.length} → ${optimizedContent.length} chars`);
+        } else {
+          console.warn(`⚠️ ${category}: optimization returned suspicious result, keeping original`);
+        }
+      } catch (error) {
+        console.error(`❌ Failed to optimize ${category}:`, error);
+      }
+    }
+
+    // Step 4: Calculate total size after
+    const allMemoryAfter = await this.getAllMemory();
+    result.totalSizeAfter = Object.values(allMemoryAfter).reduce((sum, c) => sum + c.length, 0);
+
+    console.log(`🎉 Memory optimization complete: ${result.totalSizeBefore} → ${result.totalSizeAfter} chars (${result.categoriesOptimized.length} categories)`);
+
+    return result;
+  }
+
+  /**
+   * Legacy: Check if optimization is needed and trigger if necessary
+   * (called from updateMemory - just logs, actual optimization is now via runOptimization)
+   */
+  async checkOptimizationTriggers(): Promise<boolean> {
+    const check = await this.checkOptimizationNeeded();
+    if (check.needed) {
+      console.log(`📢 Memory optimization recommended: ${check.reasons.join(', ')}`);
+    }
+    return check.needed;
   }
 
   /**
    * Optimize a specific memory category
    */
-  async optimizeCategory(category: string): Promise<void> {
+  async optimizeCategory(category: string, overrideClient?: AIClient): Promise<void> {
+    const client = overrideClient || this.aiClient;
     const currentContent = await this.getCategory(category);
 
     if (!currentContent || currentContent.length < 100) {
@@ -193,20 +337,17 @@ export class MemoryManager {
 
     console.log(`Optimizing memory category: ${category}`);
 
-    // Get recent insights from last 7 daily reports
     const recentInsights = await this.getRecentInsights(category);
-
-    // Use AI to optimize
-    const optimizedContent = await this.aiClient.optimizeMemory(
+    const optimizedContent = await client.optimizeMemory(
       category,
       currentContent,
       recentInsights
     );
 
-    // Update with optimized content
-    await this.upsertCategory(category, optimizedContent, true);
-
-    console.log(`Optimization complete for: ${category}`);
+    if (optimizedContent && optimizedContent.length > 50) {
+      await this.upsertCategory(category, optimizedContent, true);
+      console.log(`Optimization complete for: ${category}`);
+    }
   }
 
   /**
@@ -287,13 +428,6 @@ export class MemoryManager {
     }
 
     return `${existing}\n\n${datedContent}`;
-  }
-
-  /**
-   * Check if memory is too large
-   */
-  private isTooLarge(content: string): boolean {
-    return content.length > MAX_MEMORY_SIZE;
   }
 
   /**
