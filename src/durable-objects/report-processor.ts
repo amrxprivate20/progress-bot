@@ -82,7 +82,17 @@ export class ReportProcessor extends DurableObject<EnvWithDO> {
     if (url.pathname === '/autofail/check-queue' && request.method === 'POST') {
       const body = await request.json() as { today: string };
 
-      // First check: Is there ANY active autofail running (any date)?
+      // First check: Has autofail ALREADY COMPLETED today? (persists after cleanup)
+      const completedDate = await this.ctx.storage.get<string>(`autofail_completed_${body.today}`);
+      if (completedDate) {
+        console.log(`✅ Autofail already completed for ${body.today} - skipping`);
+        return new Response(
+          JSON.stringify({ exists: true, completed: true }),
+          { headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+
+      // Second check: Is there ANY active autofail running (any date)?
       const activeDate = await this.ctx.storage.get<string>('autofail_active_date');
       if (activeDate) {
         const activeQueue = await this.ctx.storage.get<string[]>(`autofail_queue_${activeDate}`);
@@ -98,7 +108,7 @@ export class ReportProcessor extends DurableObject<EnvWithDO> {
         }
       }
 
-      // Second check: Is the requested day's queue still running?
+      // Third check: Is the requested day's queue still running?
       const queue = await this.ctx.storage.get<string[]>(`autofail_queue_${body.today}`);
       const processed = await this.ctx.storage.get<string[]>(`autofail_processed_${body.today}`) || [];
 
@@ -1098,7 +1108,10 @@ const aiResponse = await aiClient.generateDailyReport({
     // Get remaining task IDs
     const remaining = queue.filter(id => !processed.includes(id));
     if (remaining.length === 0) {
-      // All done - cleanup and notify
+      // All done - mark as completed BEFORE cleanup (prevents duplicate runs)
+      await this.ctx.storage.put(`autofail_completed_${today}`, new Date().toISOString());
+
+      // Cleanup and notify
       await this.sendAutoFailCompletion(chatId, botToken, processed.length, today);
       await this.ctx.storage.delete(`autofail_queue_${today}`);
       await this.ctx.storage.delete(`autofail_tasks_${today}`);
@@ -1246,6 +1259,8 @@ if (highPriorityIds.has(task.id)) {
 
       if (newFailedCount >= MAX_FAILED_BATCHES) {
         console.error(`❌ Aborting autofail after ${MAX_FAILED_BATCHES} consecutive failed batches`);
+        // Mark as completed to prevent retries
+        await this.ctx.storage.put(`autofail_completed_${today}`, new Date().toISOString());
         await this.sendTelegramMessage(
           chatId,
           botToken,

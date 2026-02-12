@@ -143,9 +143,9 @@ export class AutofailService {
       return { should: false, reason: `Current time (${currentTime}) is on next day, skipping to avoid failing new day's tasks` };
     }
 
-    // Pre-trigger window: Allow triggering up to 30 minutes BEFORE the trigger time
-    // This handles cron schedule variations (e.g., 23:24 is close enough to 23:30)
-    const PRE_TRIGGER_WINDOW_MINUTES = 30;
+    // Pre-trigger window: Allow triggering up to 15 minutes BEFORE the trigger time
+    // GitHub Actions cron can have ~10min delays, so 15min handles worst case
+    const PRE_TRIGGER_WINDOW_MINUTES = 15;
     const timeDifference = triggerTimeMinutes - currentTimeMinutes;
 
     if (timeDifference > 0 && timeDifference <= PRE_TRIGGER_WINDOW_MINUTES) {

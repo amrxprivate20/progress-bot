@@ -915,8 +915,10 @@ async function handleAutoFailInit(
   // Initialize queue
   await autofailService.initializeQueue(stub, data);
 
-  // Start alarm-based processing (backup if external loop fails)
-  await autofailService.startAlarmProcessing(stub, data.today);
+  // NOTE: Do NOT start alarm-based processing here.
+  // GitHub Actions workflow handles polling via /api/autofail/process.
+  // Running both alarm + polling simultaneously causes race conditions
+  // on failure_completion markers, leading to unwanted completion notifications.
 
   // Notify user
   await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
