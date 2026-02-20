@@ -61,6 +61,7 @@ export interface ReportStatistics {
   completed_tasks: number;
   failed_tasks: number;
   partial_tasks: number;
+  pending_tasks: number;
   success_rate: number;
   total_time_minutes: number;
   total_quantity: Record<string, number>;
@@ -159,8 +160,12 @@ const challengeStatus = data.dailyChallenge
   ? await this.checkChallengeCompletion(data.dailyChallenge, data.tasks, data.date)
   : 'لا يوجد تحدي';
 
+    // Check debug mode
+    const debugMode = await this.settings.get('debug_mode');
+    const isDebug = debugMode === 'true';
+
     // Format preview with hierarchy
-    const formattedText = this.formatPreviewText(data, stats, topCategories, challengeStatus);
+    const formattedText = this.formatPreviewText(data, stats, topCategories, challengeStatus, isDebug);
 
     return {
       date: data.date,
@@ -198,8 +203,10 @@ calculateStatistics(tasks: Task[], failedTasksJson: DailyFailures | null): Repor
   const mainTaskMap = new Map<string, {
     name: string;
     isCompleted: boolean;
+    isPending: boolean; // true = not yet failed, still open
     completedSubtasks: number;
     failedSubtasks: number;
+    pendingSubtasks: number;
     totalSubtasks: number;
     category?: string;
     duration?: number;
@@ -211,23 +218,27 @@ calculateStatistics(tasks: Task[], failedTasksJson: DailyFailures | null): Repor
     mainTaskMap.set(cleanName, {
       name: cleanName,
       isCompleted: true,
+      isPending: false,
       completedSubtasks: 0,
       failedSubtasks: 0,
+      pendingSubtasks: 0,
       totalSubtasks: 0,
       category: task.category,
       duration: task.duration_minutes,
     });
   }
 
-  // ✅ NEW: Add failed main tasks from database
+  // Add failed main tasks from database
   for (const task of allMainTasks.filter(t => t.status === 'failed')) {
     const cleanName = extractCleanTaskName(task.content);
     if (!mainTaskMap.has(cleanName)) {
       mainTaskMap.set(cleanName, {
         name: cleanName,
         isCompleted: false,
+        isPending: false, // DB status 'failed' = confirmed failed
         completedSubtasks: 0,
         failedSubtasks: 0,
+        pendingSubtasks: 0,
         totalSubtasks: 0,
         category: task.category,
         duration: task.duration_minutes,
@@ -235,15 +246,17 @@ calculateStatistics(tasks: Task[], failedTasksJson: DailyFailures | null): Repor
     }
   }
 
-  // Add failed main tasks from JSON (if not already in map)
+  // Add failed/pending main tasks from JSON (if not already in map)
   for (const task of jsonFailedMainTasks) {
     const cleanName = extractCleanTaskName(task.content);
     if (!mainTaskMap.has(cleanName)) {
       mainTaskMap.set(cleanName, {
         name: cleanName,
         isCompleted: false,
+        isPending: task.is_pending !== false, // true or undefined = pending
         completedSubtasks: 0,
         failedSubtasks: 0,
+        pendingSubtasks: 0,
         totalSubtasks: 0,
         category: task.category,
         duration: task.duration_minutes,
@@ -313,13 +326,49 @@ calculateStatistics(tasks: Task[], failedTasksJson: DailyFailures | null): Repor
     }
   }
 
-  // Count failed subtasks from JSON by parent name
+  // Count failed/pending subtasks from JSON by parent name
+  // Build lookup for parent resolution
+  const allFailedById = new Map<string, typeof jsonFailedSubtasks[0]>();
+  for (const f of failedTasksJson?.failed_tasks || []) {
+    allFailedById.set(f.id, f);
+  }
+
   for (const sub of jsonFailedSubtasks) {
+    let parentName: string | null = null;
+
+    // Method 1: Use parent_content
     if (sub.parent_content) {
-      const parentName = extractCleanTaskName(sub.parent_content);
+      parentName = extractCleanTaskName(sub.parent_content);
+    }
+
+    // Method 2: Look up parent by parent_id in failed tasks
+    if (!parentName && sub.parent_id) {
+      const parentFailed = allFailedById.get(sub.parent_id);
+      if (parentFailed && !parentFailed.is_subtask) {
+        parentName = extractCleanTaskName(parentFailed.content);
+      }
+    }
+
+    // Method 3: Look up parent by parent_id in completed tasks
+    if (!parentName && sub.parent_id) {
+      const parentBaseId = sub.parent_id.split('_')[0];
+      const parentTask = allMainTasks.find(t => {
+        const taskBaseId = t.task_id?.split('_')[0];
+        return taskBaseId === parentBaseId || t.task_id === sub.parent_id;
+      });
+      if (parentTask) {
+        parentName = extractCleanTaskName(parentTask.content);
+      }
+    }
+
+    if (parentName) {
       const entry = mainTaskMap.get(parentName);
       if (entry) {
-        entry.failedSubtasks++;
+        if (sub.is_pending !== false) {
+          entry.pendingSubtasks++;
+        } else {
+          entry.failedSubtasks++;
+        }
         entry.totalSubtasks++;
       }
     }
@@ -330,6 +379,7 @@ calculateStatistics(tasks: Task[], failedTasksJson: DailyFailures | null): Repor
   let fullyCompleted = 0;
   let partiallyCompleted = 0;
   let fullyFailed = 0;
+  let pendingCount = 0;
 
   for (const [, entry] of mainTaskMap) {
     let successPercent: number;
@@ -347,6 +397,8 @@ calculateStatistics(tasks: Task[], failedTasksJson: DailyFailures | null): Repor
     // Categorize
     if (successPercent === 100) {
       fullyCompleted++;
+    } else if (entry.isPending && successPercent === 0) {
+      pendingCount++; // Still pending, not failed yet
     } else if (successPercent === 0) {
       fullyFailed++;
     } else {
@@ -393,6 +445,7 @@ calculateStatistics(tasks: Task[], failedTasksJson: DailyFailures | null): Repor
     completed_tasks: fullyCompleted,
     failed_tasks: fullyFailed,
     partial_tasks: partiallyCompleted,
+    pending_tasks: pendingCount,
     success_rate: overallSuccessRate,
     total_time_minutes: totalTime,
     total_quantity: quantities,
@@ -420,8 +473,8 @@ async getFormattedReportForAI(date?: string): Promise<string> {
     ? await this.checkChallengeCompletion(data.dailyChallenge, data.tasks, data.date)
     : 'لا يوجد تحدي';
 
-  // Use the SAME formatting function as preview
-  return this.formatPreviewText(data, stats, topCategories, challengeStatus);
+  // Use the SAME formatting function as preview (no debug for AI)
+  return this.formatPreviewText(data, stats, topCategories, challengeStatus, false);
 }
 
   /**
@@ -493,16 +546,26 @@ async getFormattedReportForAI(date?: string): Promise<string> {
     console.log(`   UTC start: ${start.toISOString()}`);
     console.log(`   UTC end: ${end.toISOString()}`);
 
-    const allTasks = await this.db.select<Task>('tasks', {});
-
-    const tasksForDate = allTasks.filter(task => {
-      const completedAt = new Date(task.completed_at);
-      return completedAt >= start && completedAt <= end;
+    // Use server-side filtering to get all tasks for this date range
+    const tasksForDate = await this.db.select<Task>('tasks', {
+      filter: {
+        completed_at: `gte.${start.toISOString()}`,
+      },
+      limit: 5000, // Ensure we get all tasks (default PostgREST limit is 1000)
     });
 
-    console.log(`   Found ${tasksForDate.length} tasks`);
+    // Filter out tasks after end boundary (PostgREST doesn't support multiple filters on same column easily)
+    const filtered = tasksForDate.filter(task => {
+      const completedAt = new Date(task.completed_at);
+      return completedAt <= end;
+    });
 
-    return tasksForDate;
+    console.log(`   Found ${filtered.length} tasks for date ${date}`);
+    for (const t of filtered) {
+      console.log(`   - [${t.status || 'done'}] ${extractCleanTaskName(t.content)} (origin: ${t.origin_task || 'none'}, priority: ${t.priority || '?'})`);
+    }
+
+    return filtered;
   }
 
   /**
@@ -678,7 +741,8 @@ private async checkChallengeCompletion(
     data: ReportData,
     stats: ReportStatistics,
     _topCategories: Array<{ name: string; count: number }>,
-    challengeStatus: string
+    challengeStatus: string,
+    debugMode: boolean = false
   ): string {
     const date = new Date(data.date);
     const arabicDate = formatArabicDate(date);
@@ -691,6 +755,9 @@ text += `- إجمالي المهام الرئيسية: ${stats.total_tasks}\n`;
 text += `- مكتملة بالكامل: ${stats.completed_tasks}\n`;
 if (stats.partial_tasks > 0) {
   text += `- مكتملة جزئياً: ${stats.partial_tasks} ⚠️\n`;
+}
+if (stats.pending_tasks > 0) {
+  text += `- قيد التنفيذ: ${stats.pending_tasks} ⏳\n`;
 }
 text += `- فاشلة: ${stats.failed_tasks}\n`;
 text += `- معدل النجاح: ${stats.success_rate.toFixed(1)}%\n`;
@@ -724,20 +791,56 @@ text += `- معدل النجاح: ${stats.success_rate.toFixed(1)}%\n`;
     
     if (data.failedTasksJson) {
       console.log(`📊 Processing ${data.failedTasksJson.failed_tasks.length} failed tasks from JSON`);
-      
+
+      // Build a lookup of all failed tasks by ID for parent resolution
+      const failedTasksById = new Map<string, FailedTask>();
+      for (const f of data.failedTasksJson.failed_tasks) {
+        failedTasksById.set(f.id, f);
+      }
+
       for (const failed of data.failedTasksJson.failed_tasks) {
         const cleanName = extractCleanTaskName(failed.content);
-        
-        if (failed.is_subtask && failed.parent_content) {
-          // ✅ Group by parent's CLEAN NAME (from parent_content field)
-          const parentCleanName = extractCleanTaskName(failed.parent_content);
-          
-          if (!failedSubtasksByParentName.has(parentCleanName)) {
-            failedSubtasksByParentName.set(parentCleanName, []);
+
+        if (failed.is_subtask) {
+          let parentCleanName: string | null = null;
+
+          // Method 1: Use parent_content if available
+          if (failed.parent_content) {
+            parentCleanName = extractCleanTaskName(failed.parent_content);
           }
-          failedSubtasksByParentName.get(parentCleanName)!.push(failed);
-          
-          console.log(`  ✕ Failed subtask: "${cleanName}" → parent: "${parentCleanName}"`);
+
+          // Method 2: Look up parent by parent_id in other failed tasks
+          if (!parentCleanName && failed.parent_id) {
+            const parentFailed = failedTasksById.get(failed.parent_id);
+            if (parentFailed && !parentFailed.is_subtask) {
+              parentCleanName = extractCleanTaskName(parentFailed.content);
+            }
+          }
+
+          // Method 3: Look up parent by parent_id in completed tasks
+          if (!parentCleanName && failed.parent_id) {
+            const parentBaseId = failed.parent_id.split('_')[0];
+            for (const task of data.tasks) {
+              if (task.origin_task) continue; // Skip subtasks
+              const taskBaseId = task.task_id?.split('_')[0];
+              if (taskBaseId === parentBaseId || task.task_id === failed.parent_id) {
+                parentCleanName = extractCleanTaskName(task.content);
+                break;
+              }
+            }
+          }
+
+          if (parentCleanName) {
+            if (!failedSubtasksByParentName.has(parentCleanName)) {
+              failedSubtasksByParentName.set(parentCleanName, []);
+            }
+            failedSubtasksByParentName.get(parentCleanName)!.push(failed);
+            console.log(`  ✕ Failed subtask: "${cleanName}" → parent: "${parentCleanName}"`);
+          } else {
+            // Could not find parent - treat as standalone
+            failedTasksByName.set(cleanName, failed);
+            console.log(`  ⚠️ Failed subtask (no parent found): "${cleanName}" → standalone`);
+          }
         } else {
           // Main task (not a subtask)
           failedTasksByName.set(cleanName, failed);
@@ -943,23 +1046,37 @@ for (const task of data.tasks) {
       const totalSubs = completedSubs.length + failedSubs.length;
 
       // Determine status symbol
+      // ✅ = fully completed | ⚠️ = partial (some subs failed/pending) | ❌ = confirmed failed | ⏳ = pending/in-progress
       let symbol: string;
       const mainCompleted = task.status === 'done';
+      const mainFailed = failedTasksByName.get(cleanName);
+      const mainIsPending = mainFailed?.is_pending !== false; // true or undefined = pending
 
       if (totalSubs === 0) {
         // No subtasks - use task status
-        symbol = mainCompleted ? '✅' : '❌';
-      } else {
-        // Has subtasks - determine by subtask completion
-        const allSubsComplete = failedSubs.length === 0;
-        const allSubsFailed = completedSubs.length === 0;
-
-        if (allSubsComplete) {
+        if (mainCompleted) {
           symbol = '✅';
-        } else if (allSubsFailed) {
-          symbol = '❌';
+        } else if (mainFailed && !mainIsPending) {
+          symbol = '❌'; // Confirmed failed (autofail or manual)
         } else {
-          symbol = '⚠️';
+          symbol = '⏳'; // Not yet completed, still pending
+        }
+      } else {
+        // Has subtasks
+        const allSubsComplete = failedSubs.length === 0;
+        const confirmedFailedSubs = failedSubs.filter(s => s.is_pending === false);
+
+        if (mainCompleted && allSubsComplete) {
+          symbol = '✅'; // Parent done + all subs done
+        } else if (!mainCompleted && mainIsPending) {
+          // Parent NOT completed yet — still pending regardless of subtask progress
+          symbol = '⏳';
+        } else if (confirmedFailedSubs.length > 0 && completedSubs.length > 0) {
+          symbol = '⚠️'; // Mix of completed and confirmed failed subs
+        } else if (confirmedFailedSubs.length > 0 && completedSubs.length === 0) {
+          symbol = '❌'; // All subs confirmed failed
+        } else {
+          symbol = mainCompleted ? '✅' : '⏳';
         }
       }
       
@@ -999,10 +1116,11 @@ for (const task of data.tasks) {
         text += '\n';
       }
       
-      // Add failed subtasks
+      // Add failed/pending subtasks
       for (const sub of failedSubs) {
         const subCleanName = extractCleanTaskName(sub.content);
-        text += `   ✕ ${subCleanName}\n`;
+        const subSymbol = sub.is_pending !== false ? '…' : '✕'; // … = pending, ✕ = confirmed failed
+        text += `   ${subSymbol} ${subCleanName}\n`;
       }
       
       processedParentNames.add(parentName);
@@ -1048,6 +1166,29 @@ for (const task of data.tasks) {
     // Journal entries
     if (data.journal) {
       text += `\n\n${data.journal}`;
+    }
+
+    // DEBUG: Show raw data sources (only when debug_mode setting is 'true')
+    if (debugMode) {
+      text += `\n\n🔍 DEBUG - بيانات التشخيص:\n`;
+      text += `ـــــــــــــــــــــــ\n`;
+      text += `📦 مهام من قاعدة البيانات (tasks table): ${data.tasks.length}\n`;
+      for (const t of data.tasks) {
+        const cn = extractCleanTaskName(t.content);
+        const isSub = t.origin_task ? '  ↳ فرعية' : '📌 رئيسية';
+        const displayPriority = t.priority ? `P${5 - t.priority}` : 'P?';
+        text += `${isSub} | ${t.status || '?'} | ${displayPriority} | ${cn}\n`;
+      }
+      text += `\n📦 مهام فاشلة (failures JSON): ${data.failedTasksJson?.failed_tasks?.length || 0}\n`;
+      if (data.failedTasksJson) {
+        for (const f of data.failedTasksJson.failed_tasks) {
+          const cn = extractCleanTaskName(f.content);
+          const isSub = f.is_subtask ? '  ↳ فرعية' : '📌 رئيسية';
+          const displayPriority = f.priority ? `P${5 - f.priority}` : 'P?';
+          text += `${isSub} | failed | ${displayPriority} | ${cn}\n`;
+        }
+      }
+      text += `\n📊 ملخص: ${processedParentNames.size} رئيسية معروضة, ${processedSubtasks.size} فرعية معروضة`;
     }
 
     return text;

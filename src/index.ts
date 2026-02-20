@@ -140,7 +140,7 @@ export default {
       // Create meta-coach - use LOW-TIER model for coaching
       const aiModel = await getAIModelByTier(settings, 'low');
       const aiClient = createAIClient(apiKey, aiModel);
-      const metaCoach = createMetaCoach(db, settings, (msgs, temp, max) => aiClient.complete(msgs, temp, max));
+      const metaCoach = createMetaCoach(db, settings, (msgs, temp, max) => aiClient.complete(msgs, temp, max), botToken);
 
       // Analyze user state
       const userState = await metaCoach.analyzeUserState(chatId);
@@ -161,11 +161,16 @@ export default {
             inline_keyboard: [
               [
                 { text: '▶️ ابدأ مهمة', callback_data: 'coach:start_task' },
-                { text: '⏸️ مشغول', callback_data: 'coach:busy' },
+                { text: '📅 خطة اليوم', callback_data: 'cmd:plan' },
               ],
               [
                 { text: '💬 احكيلي', callback_data: 'coach:talk' },
                 { text: '😴 تعبان', callback_data: 'coach:tired' },
+                { text: '⏸️ مشغول', callback_data: 'coach:busy' },
+              ],
+              [
+                { text: '🔥 احرقني', callback_data: 'cmd:roast' },
+                { text: '⚔️ معركة', callback_data: 'cmd:battle' },
               ],
             ],
           };
@@ -181,7 +186,24 @@ export default {
             }),
           });
 
-          if (telegramResponse.ok) {
+          let sendOk = telegramResponse.ok;
+
+          // Retry without Markdown if it failed (AI text may have unmatched Markdown chars)
+          if (!sendOk && telegramResponse.status === 400) {
+            console.error('⚠️ Markdown send failed, retrying without parse_mode:', await telegramResponse.text());
+            const retryResponse = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                chat_id: chatId,
+                text: message,
+                reply_markup: coachKeyboard,
+              }),
+            });
+            sendOk = retryResponse.ok;
+          }
+
+          if (sendOk) {
             console.log('✅ Meta-coach message sent successfully');
 
             // Create pending check-in so user text responses are handled interactively

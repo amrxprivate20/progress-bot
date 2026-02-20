@@ -26,10 +26,14 @@ export interface TaskInfo {
 export function createCoachCheckInKeyboard(): InlineKeyboard {
   return new InlineKeyboard()
     .text('▶️ ابدأ مهمة', 'coach:start_task')
-    .text('⏸️ مشغول', 'coach:busy')
+    .text('📅 خطة اليوم', 'cmd:plan')
     .row()
     .text('💬 احكيلي', 'coach:talk')
-    .text('😴 تعبان', 'coach:tired');
+    .text('😴 تعبان', 'coach:tired')
+    .text('⏸️ مشغول', 'coach:busy')
+    .row()
+    .text('🔥 احرقني', 'cmd:roast')
+    .text('⚔️ معركة', 'cmd:battle');
 }
 
 /**
@@ -135,9 +139,9 @@ export function createResumeDecisionKeyboard(sessionId: string): InlineKeyboard 
 export function createCoachConversationKeyboard(): InlineKeyboard {
   return new InlineKeyboard()
     .text('🎯 ابدأ الشغل', 'coach:start_task')
-    .text('💪 حفزني أكتر', 'coach:motivate')
+    .text('📅 خطة اليوم', 'cmd:plan')
     .row()
-    .text('📋 اقترح مهمة', 'coach:suggest')
+    .text('💪 حفزني أكتر', 'coach:motivate')
     .text('🔚 كفاية', 'coach:end');
 }
 
@@ -232,12 +236,6 @@ export function formatCommandMenu(commands: string[]): string {
   return `\n\n━━━━━━━━━━━━━━━━━━\n🎮 ${commands.join(' • ')}`;
 }
 
-/**
- * Standard command footer for coach messages
- */
-export function getCoachCommandFooter(): string {
-  return '\n\n━━━━━━━━━━━━━━━━━━\n🎮 /starttask • /stuck • /roast_me • /battle_mode • /plan • /tasks';
-}
 
 // ============================================
 // Task Selection Keyboards
@@ -342,6 +340,30 @@ export function createResumeChoiceKeyboard(sessionId: string): InlineKeyboard {
     .text('1️⃣ استئناف السابقة', `resumechoice:yes:${sessionId}`)
     .row()
     .text('2️⃣ جلسة جديدة', `resumechoice:new:${sessionId}`);
+}
+
+// ============================================
+// Talk Session Keyboards
+// ============================================
+
+/**
+ * Keyboard for choosing talk session duration
+ */
+export function createTalkDurationKeyboard(): InlineKeyboard {
+  return new InlineKeyboard()
+    .text('5 دقايق', 'talk_dur:5')
+    .text('10 دقايق', 'talk_dur:10')
+    .row()
+    .text('15 دقيقة', 'talk_dur:15')
+    .text('20 دقيقة', 'talk_dur:20');
+}
+
+/**
+ * Keyboard shown during an active talk session — only end button
+ */
+export function createTalkConversationKeyboard(): InlineKeyboard {
+  return new InlineKeyboard()
+    .text('🔚 إنهاء المحادثة', 'coach:end');
 }
 
 /**

@@ -36,7 +36,8 @@ export interface TodoistTaskResponse {
   priority: number;
   due?: {
     date: string;
-    is_recurring: boolean;
+    is_recurring?: boolean;  // Webhook/Sync API format
+    recurring?: boolean;     // REST API v1 format
     string: string;
   };
   project_id: string;
@@ -62,7 +63,7 @@ export interface GeneratedTask {
 // ============================================
 
 export class TodoistClient {
-  private baseUrl = 'https://api.todoist.com/rest/v3';
+  private baseUrl = 'https://api.todoist.com/api/v1';
   private rateLimitRemaining = 450;
   private rateLimitReset: Date | null = null;
 

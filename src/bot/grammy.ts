@@ -136,7 +136,7 @@ export function createBot(
 async function sendAutoStatus(ctx: BotContext) {
   try {
     // ✅ FIXED: Only show auto-status when debug mode is enabled
-    const debugMode = await ctx.settings.get('debugger_mode');
+    const debugMode = await ctx.settings.get('debug_mode');
     if (debugMode !== 'true') {
       return; // Skip auto-status when not in debug mode
     }
@@ -521,38 +521,50 @@ function getArabicOperationType(type: string): string {
       due?: { date: string; datetime?: string };
     }> = [];
 
+    let allTasks: typeof tasksData = [];
     if (todoistToken) {
       try {
-        const response = await fetch('https://api.todoist.com/rest/v3/tasks', {
+        const response = await fetch('https://api.todoist.com/api/v1/tasks', {
           headers: { 'Authorization': `Bearer ${todoistToken.trim()}` },
         });
         if (response.ok) {
-          const allTasks = await response.json() as typeof tasksData;
-          tasksData = allTasks.filter(t => {
-            const taskDate = t.due?.date?.split('T')[0];
-            return taskDate === targetDate;
-          });
+          const json = await response.json() as any;
+          allTasks = Array.isArray(json) ? json : (json.results || []);
         }
       } catch (e) {
         console.error('Todoist fetch error:', e);
       }
     }
 
-    if (tasksData.length === 0) {
+    if (allTasks.length === 0) {
       return `📅 **خطة ${titleWord} (${dayName} ${targetDate})**\n\n` +
-        `📋 لا توجد مهام مجدولة لهذا التاريخ.\n\n` +
+        `📋 لا توجد مهام في المشروع.\n\n` +
         `💡 استخدم /createtasks لإنشاء مهام جديدة.`;
     }
 
+    // Split tasks into today's dated tasks and available tasks
+    const todayTasks = allTasks.filter(t => {
+      const taskDate = t.due?.date?.split('T')[0];
+      return taskDate === targetDate;
+    });
+    const availableTasks = allTasks.filter(t => {
+      const taskDate = t.due?.date?.split('T')[0];
+      return !taskDate || taskDate !== targetDate;
+    });
+
     // Format tasks for AI
-    const tasksForAI = tasksData.map(t => {
+    const formatTask = (t: typeof tasksData[0]) => {
       const priorityLabel = t.priority === 4 ? 'عاجل' :
                            t.priority === 3 ? 'مهم' :
                            t.priority === 2 ? 'عادي' : 'منخفض';
       const timeInfo = t.due?.datetime ?
         ` (موعد: ${new Date(t.due.datetime).toLocaleTimeString('ar-EG', { hour: '2-digit', minute: '2-digit' })})` : '';
-      return `- ${t.content} [أولوية: ${priorityLabel}]${timeInfo}`;
-    }).join('\n');
+      const dateInfo = t.due?.date && t.due.date.split('T')[0] !== targetDate ? ` [تاريخ: ${t.due.date.split('T')[0]}]` : '';
+      return `- ${t.content} [أولوية: ${priorityLabel}]${timeInfo}${dateInfo}`;
+    };
+
+    const todayTasksForAI = todayTasks.map(formatTask).join('\n') || 'لا توجد مهام مجدولة لهذا التاريخ';
+    const availableTasksForAI = availableTasks.slice(0, 20).map(formatTask).join('\n') || 'لا توجد';
 
     // Build AI prompt
     const prompt = `
@@ -562,8 +574,11 @@ function getArabicOperationType(type: string): string {
 
 **التاريخ:** ${dayName} ${targetDate} (${titleWord})
 
-**المهام المجدولة (${tasksData.length}):**
-${tasksForAI}
+**مهام اليوم المجدولة (${todayTasks.length}):**
+${todayTasksForAI}
+
+**مهام متاحة أخرى (${availableTasks.length}):**
+${availableTasksForAI}
 
 ${dailyChallenge ? `**تحدي اليوم:** ${dailyChallenge}` : ''}
 
@@ -582,8 +597,9 @@ ${memoryContext ? `**معلومات عن المستخدم:**\n${memoryContext}` 
    - الوقت المقترح لكل مهمة
    - المدة المتوقعة (إذا يمكن تقديرها)
    - تجميع المهام المتشابهة
+   - أولوية لمهام اليوم المجدولة، ثم المهام المتاحة
 3. **🎯 الالتزامات** - المهام السلبية (عدم فعل شيء) في قسم منفصل
-4. **📌 إذا سمح الوقت** - المهام الأقل أولوية
+4. **📌 إذا سمح الوقت** - المهام الأقل أولوية من القائمة المتاحة
 5. **💡 نصائح** - 2-3 نصائح مخصصة للنجاح في هذا اليوم
 
 اكتب باللهجة المصرية بشكل ودود ومحفز. لا تكتب مقدمات طويلة، ابدأ مباشرة بالخطة.
@@ -614,7 +630,7 @@ ${memoryContext ? `**معلومات عن المستخدم:**\n${memoryContext}` 
       return `📅 **خطة ${titleWord} (${dayName} ${targetDate})**\n\n` +
         `⚠️ حدث خطأ أثناء إنشاء الخطة الذكية.\n` +
         `${aiError instanceof Error ? aiError.message : 'خطأ غير معروف'}\n\n` +
-        `**المهام المجدولة:**\n${tasksForAI}`;
+        `**المهام المجدولة:**\n${todayTasksForAI}`;
     }
   }
 
@@ -776,11 +792,25 @@ ${memoryContext ? `**معلومات عن المستخدم:**\n${memoryContext}` 
       if (parseMode) body.parse_mode = parseMode;
       // Only add keyboard to the last chunk
       if (replyMarkup && i === chunks.length - 1) body.reply_markup = replyMarkup;
-      await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
+      const resp = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
       });
+      if (!resp.ok) {
+        const errText = await resp.text();
+        console.error(`❌ sendTelegramMessageDirect failed: ${resp.status} ${errText}`);
+        // Retry without parse_mode if Markdown failed
+        if (parseMode && resp.status === 400) {
+          const retryBody = { ...body };
+          delete retryBody.parse_mode;
+          await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(retryBody),
+          });
+        }
+      }
     }
   }
 
@@ -896,6 +926,70 @@ async function sendLongMessage(ctx: Context, message: string) {
     await new Promise(resolve => setTimeout(resolve, 100));
   }
 }
+
+  /**
+   * Helper: Show task selection keyboard (shared by coach:start_task, coach:suggest, cmd:starttask)
+   */
+  // Helper: fetch ALL tasks from Todoist with pagination
+  async function fetchAllTodoistTasks(token: string, projectId: string): Promise<any[]> {
+    const allTasks: any[] = [];
+    let cursor: string | null = null;
+
+    do {
+      let url = `https://api.todoist.com/api/v1/tasks?project_id=${projectId}`;
+      if (cursor) url += `&cursor=${cursor}`;
+
+      const resp = await fetch(url, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!resp.ok) throw new Error(`Todoist API error: ${resp.status}`);
+
+      const json = await resp.json() as any;
+      const pageTasks = Array.isArray(json) ? json : (json.results || []);
+      allTasks.push(...pageTasks);
+      cursor = json.next_cursor || null;
+    } while (cursor);
+
+    return allTasks;
+  }
+
+  async function showTaskSelection(ctx: BotContext): Promise<boolean> {
+    const chatId = ctx.chat?.id.toString() || '';
+    const todoistToken = await ctx.settings.get('todoist_api_token');
+    const todoistProjectId = await ctx.settings.get('todoist_project_id');
+
+    if (todoistToken && todoistProjectId) {
+      try {
+        const tasks = await fetchAllTodoistTasks(todoistToken, todoistProjectId);
+        if (tasks.length > 0) {
+          const today = getTodayInEgypt();
+          // Filter to tasks due today or earlier, or without due date
+          const availableTasks = tasks.filter((t: any) => {
+            if (t.is_completed) return false;
+            if (!t.due?.date) return true;
+            const dueDate = t.due.date.split('T')[0];
+            return dueDate && dueDate <= today;
+          });
+
+          if (availableTasks.length === 0) return false;
+
+          const selectKey = `task_select_${chatId}`;
+          const taskList = availableTasks.map((t: any) => ({ id: t.id, content: t.content }));
+          await ctx.db.delete('conversation_state', { chat_id: op.eq(selectKey) }).catch(() => {});
+          await ctx.db.insert('conversation_state', {
+            chat_id: selectKey,
+            conversation_type: 'task_selection',
+            data: { availableTasks: taskList },
+            expires_at: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
+          });
+          const keyboard = createTaskSelectionKeyboard(taskList, 'start', 0);
+          await ctx.reply('📋 **اختر مهمة للبدء:**', { parse_mode: 'Markdown', reply_markup: keyboard });
+          return true;
+        }
+      } catch (_e) { /* fall through */ }
+    }
+    return false;
+  }
 
   // Confirm command
   bot.command('confirm', async (ctx) => {
@@ -1098,41 +1192,22 @@ bot.command('log_failure', async (ctx) => {
 
       // Get today's date in Egypt
       const today = getTodayInEgypt();
-      const todayDate = new Date(today + 'T00:00:00Z');
 
-      // Fetch all tasks from Todoist project
-      const response = await fetch(
-        `https://api.todoist.com/rest/v3/tasks?project_id=${todoistProjectId.trim()}`,
-        {
-          headers: {
-            'Authorization': `Bearer ${todoistToken.trim()}`,
-          },
-        }
-      );
-
-      if (!response.ok) {
-        const error = await response.text();
-        await ctx.reply(`❌ فشل الاتصال بـ Todoist: ${response.status}\n${error.substring(0, 100)}`);
+      // Fetch all tasks from Todoist project (with pagination)
+      let allTasks: Array<{ id: string; content: string; due?: { date: string }; is_completed?: boolean }>;
+      try {
+        allTasks = await fetchAllTodoistTasks(todoistToken.trim(), todoistProjectId.trim());
+      } catch (err) {
+        await ctx.reply(`❌ فشل الاتصال بـ Todoist: ${err instanceof Error ? err.message : 'Unknown'}`);
         return;
       }
-
-      const allTasks = await response.json() as Array<{
-        id: string;
-        content: string;
-        due?: { date: string; is_recurring: boolean };
-        is_completed?: boolean;
-      }>;
 
       // Filter to tasks available today (due today or overdue, not completed)
       const availableToday = allTasks.filter(t => {
         if (t.is_completed) return false;
         if (!t.due?.date) return true; // Tasks without due date
-
-        const dueDateStr = t.due.date.split('T')[0];
-        if (!dueDateStr) return false;
-
-        const taskDueDate = new Date(dueDateStr + 'T00:00:00Z');
-        return taskDueDate <= todayDate;
+        const dueDate = t.due.date.split('T')[0];
+        return dueDate && dueDate <= today;
       });
 
       // Store key for selection
@@ -1178,7 +1253,7 @@ bot.command('log_failure', async (ctx) => {
         return;
       }
 
-      // WITH PARAMETERS - Search for matching tasks
+      // WITH PARAMETERS - Search for matching tasks and show inline keyboard
       const searchTerm = args.trim().toLowerCase();
       const matchedTasks = availableToday.filter(t =>
         t.content.toLowerCase().includes(searchTerm) ||
@@ -1188,6 +1263,7 @@ bot.command('log_failure', async (ctx) => {
       if (matchedTasks.length === 0) {
         // No matches - store for new task entry
         const newTaskKey = `failure_new_task_${chatId}`;
+        await ctx.db.delete('conversation_state', { chat_id: op.eq(newTaskKey) }).catch(() => {});
         await ctx.db.insert('conversation_state', {
           chat_id: newTaskKey,
           conversation_type: 'failure_new_task_input',
@@ -1203,50 +1279,26 @@ bot.command('log_failure', async (ctx) => {
         return;
       }
 
-      if (matchedTasks.length === 1) {
-        // Exactly one match - show confirmation
-        const task = matchedTasks[0]!;
-        let message = '📋 **هل تريد تسجيل فشل لهذه المهمة؟**\n\n';
-        message += `1. ${task.content}\n`;
-        message += `0. ➕ إضافة مهمة جديدة: "${args.trim()}"\n\n`;
-        message += `🔢 أرسل 1 لتسجيل الفشل أو 0 لإنشاء مهمة جديدة:`;
-
-        await ctx.db.insert('conversation_state', {
-          chat_id: selectKey,
-          conversation_type: 'failure_selection',
-          data: {
-            availableTasks: [task],
-            newTaskName: args.trim(),
-            allowNewTask: true,
-          },
-          expires_at: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
-        });
-
-        await ctx.reply(message, { parse_mode: 'Markdown' });
-        return;
-      }
-
-      // Multiple matches - show list
-      let message = '📋 **تم العثور على عدة مهام مطابقة:**\n\n';
-      matchedTasks.forEach((t, i) => {
-        message += `${i + 1}. ${t.content}\n`;
-      });
-
-      message += `\n0. ➕ إضافة مهمة جديدة: "${args.trim()}"\n\n`;
-      message += `🔢 أرسل رقم المهمة المطلوبة أو 0 لإنشاء مهمة جديدة:`;
-
+      // Show matched tasks with inline keyboard (same UX as no-args)
       await ctx.db.insert('conversation_state', {
         chat_id: selectKey,
         conversation_type: 'failure_selection',
         data: {
           availableTasks: matchedTasks,
-          newTaskName: args.trim(),
           allowNewTask: true,
         },
         expires_at: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
       });
 
-      await ctx.reply(message, { parse_mode: 'Markdown' });
+      const taskKeyboard = createTaskSelectionKeyboard(
+        matchedTasks.map(t => ({ id: t.id, content: t.content })),
+        'failure'
+      );
+
+      await ctx.reply(
+        `📋 **تم العثور على ${matchedTasks.length} مهمة مطابقة - اختر:**`,
+        { parse_mode: 'Markdown', reply_markup: taskKeyboard }
+      );
 
     } catch (error) {
       console.error('Log failure error:', error);
@@ -1417,12 +1469,12 @@ bot.command('clearmemory', async (ctx) => {
   // Toggle debug mode
   bot.command('debug', async (ctx) => {
     try {
-      const currentMode = await ctx.settings.get('debugger_mode');
+      const currentMode = await ctx.settings.get('debug_mode');
       const isEnabled = currentMode === 'true';
 
       // Toggle the mode
       const newMode = isEnabled ? 'false' : 'true';
-      await ctx.settings.set('debugger_mode', newMode);
+      await ctx.settings.set('debug_mode', newMode);
 
       if (newMode === 'true') {
         await ctx.reply(
@@ -1899,53 +1951,24 @@ bot.command(['starttask', 'start_task'], async (ctx) => {
       return;
     }
 
-    // Get available tasks (due today or overdue)
+    // Get available tasks (due today or overdue) with pagination
     const { getTodayInEgypt } = await import('../utils/timezone');
     const today = getTodayInEgypt();
-    const todayDate = new Date(today + 'T00:00:00Z');
 
-    const url = `https://api.todoist.com/rest/v3/tasks?project_id=${todoistProjectId.trim()}`;
-    console.log('🔍 DEBUG - Full URL:', url);
-
-    const response = await fetch(url, {
-      headers: { 
-        'Authorization': `Bearer ${todoistToken.trim()}`,
-        'Content-Type': 'application/json',
-      },
-    });
-
-    console.log('🔍 DEBUG - Response status:', response.status);
-    console.log('🔍 DEBUG - Response headers:', JSON.stringify(Object.fromEntries(response.headers.entries())));
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.error('❌ Todoist API error:', response.status, errorText);
-      await ctx.reply(
-        `❌ فشل الاتصال بـ Todoist (${response.status})\n` +
-        `URL: ${url}\n` +
-        `Token length: ${todoistToken.length}\n` +
-        `Project ID: ${todoistProjectId}\n` +
-        `Error: ${errorText.substring(0, 200)}`
-      );
+    let allTasks: Array<{ id: string; content: string; due?: { date: string }; is_completed?: boolean }>;
+    try {
+      allTasks = await fetchAllTodoistTasks(todoistToken.trim(), todoistProjectId.trim());
+    } catch (err) {
+      await ctx.reply(`❌ فشل الاتصال بـ Todoist: ${err instanceof Error ? err.message : 'Unknown'}`);
       return;
     }
-    const allTasks = await response.json() as Array<{ 
-      id: string; 
-      content: string; 
-      due?: { date: string };
-      is_completed?: boolean;
-    }>;
 
     // Filter to tasks available today (due today or overdue, not completed)
    const availableToday = allTasks.filter(t => {
      if (t.is_completed) return false;
      if (!t.due?.date) return true; // Tasks without due date
-     
-     const dueDateStr = t.due.date.split('T')[0];
-     if (!dueDateStr) return false;
-     
-     const taskDueDate = new Date(dueDateStr + 'T00:00:00Z');
-     return taskDueDate <= todayDate;
+     const dueDate = t.due.date.split('T')[0];
+     return dueDate && dueDate <= today;
    });
 
    // Count tasks by due status for context
@@ -1956,9 +1979,8 @@ bot.command(['starttask', 'start_task'], async (ctx) => {
    });
    const overdueTasks = availableToday.filter(t => {
      if (!t.due?.date) return false;
-     const dueDateStr = t.due.date.split('T')[0];
-     if (!dueDateStr) return false;
-     return new Date(dueDateStr) < todayDate;
+     const dueDate = t.due.date.split('T')[0];
+     return dueDate ? dueDate < today : false;
    });
    const noDueDateTasks = availableToday.filter(t => !t.due?.date);
 
@@ -2398,7 +2420,7 @@ bot.command(['completetask', 'complete_task'], async (ctx) => {
         });
 
         // Update task content
-        const updateResponse = await fetch(`https://api.todoist.com/rest/v3/tasks/${todoistTaskId}`, {
+        const updateResponse = await fetch(`https://api.todoist.com/api/v1/tasks/${todoistTaskId}`, {
           method: 'POST',
           headers: {
             'Authorization': `Bearer ${todoistToken.trim()}`,
@@ -2411,7 +2433,7 @@ bot.command(['completetask', 'complete_task'], async (ctx) => {
           await new Promise(resolve => setTimeout(resolve, 500));
           
           // Complete the task
-          await fetch(`https://api.todoist.com/rest/v3/tasks/${todoistTaskId}/close`, {
+          await fetch(`https://api.todoist.com/api/v1/tasks/${todoistTaskId}/close`, {
             method: 'POST',
             headers: { 'Authorization': `Bearer ${todoistToken.trim()}` },
           });
@@ -2445,7 +2467,7 @@ bot.command(['completetask', 'complete_task'], async (ctx) => {
 
               const aiModel = await getAIModelByTier(ctx.settings, 'low');
               const aiClient = createAIClient(apiKey, aiModel);
-              const metaCoach = createMetaCoach(ctx.db, ctx.settings, (msgs, temp, max) => aiClient.complete(msgs, temp, max));
+              const metaCoach = createMetaCoach(ctx.db, ctx.settings, (msgs, temp, max) => aiClient.complete(msgs, temp, max), ctx.env.TELEGRAM_BOT_TOKEN);
 
               const celebrationMsg = await metaCoach.generateCelebration(chatId, cleanName, durationMinutes);
               if (celebrationMsg) {
@@ -2472,7 +2494,7 @@ bot.command(['completetask', 'complete_task'], async (ctx) => {
       // Create new task
       try {
         const todoistProjectId = await ctx.settings.get('todoist_project_id');
-        const createResponse = await fetch('https://api.todoist.com/rest/v3/tasks', {
+        const createResponse = await fetch('https://api.todoist.com/api/v1/tasks', {
           method: 'POST',
           headers: {
             'Authorization': `Bearer ${todoistToken.trim()}`,
@@ -2486,7 +2508,7 @@ bot.command(['completetask', 'complete_task'], async (ctx) => {
 
         if (createResponse.ok) {
           const newTask = await createResponse.json() as { id: string };
-          await fetch(`https://api.todoist.com/rest/v3/tasks/${newTask.id}/close`, {
+          await fetch(`https://api.todoist.com/api/v1/tasks/${newTask.id}/close`, {
             method: 'POST',
             headers: { 'Authorization': `Bearer ${todoistToken.trim()}` },
           });
@@ -3126,7 +3148,8 @@ async function processTaskFailure(
   ctx: BotContext,
   todoistTaskId: string | null,
   taskName: string,
-  due?: { date: string; is_recurring: boolean } | null
+  due?: { date: string; is_recurring?: boolean; recurring?: boolean } | null,
+  parentInfo?: { parent_id: string | null; parent_content: string | null; is_subtask: boolean; priority?: number }
 ): Promise<void> {
   try {
     const today = getTodayInEgypt();
@@ -3149,12 +3172,13 @@ async function processTaskFailure(
     const failedTask: FailedTask = {
       id: todoistTaskId || `manual_fail_${Date.now()}`,
       content: taskName,
-      parent_id: null,
-      parent_content: null,
-      priority: 1,
-      is_subtask: false,
+      parent_id: parentInfo?.parent_id || null,
+      parent_content: parentInfo?.parent_content || null,
+      priority: parentInfo?.priority || 1,
+      is_subtask: parentInfo?.is_subtask || false,
       description: 'Manual failure logged via /log_failure',
-      is_manual: true, // ✅ Mark as manual to preserve during Todoist sync
+      is_manual: true,
+      is_pending: false, // Manual = confirmed failed
     };
 
     // Check if task already exists in failures (by clean name)
@@ -3177,7 +3201,7 @@ async function processTaskFailure(
     dailyFailures.last_sync = new Date().toISOString();
     await upsertDailyFailures(ctx.db, dailyFailures);
 
-    const isRecurring = due?.is_recurring || false;
+    const isRecurring = due?.is_recurring || due?.recurring || false;
 
     // If we have a Todoist task, complete it (this postpones recurring, removes non-recurring)
     // But first mark it so the webhook ignores this completion
@@ -3210,7 +3234,7 @@ async function processTaskFailure(
 
         // Complete the task in Todoist
         const closeResponse = await fetch(
-          `https://api.todoist.com/rest/v3/tasks/${todoistTaskId}/close`,
+          `https://api.todoist.com/api/v1/tasks/${todoistTaskId}/close`,
           {
             method: 'POST',
             headers: { 'Authorization': `Bearer ${todoistToken.trim()}` },
@@ -3283,13 +3307,14 @@ async function checkCoachIdempotency(ctx: BotContext, commandName: string): Prom
   const now = Date.now();
 
   if (now - lastRun < COACH_COOLDOWN_MS) {
-    console.log(`🚫 Rate limited: ${commandName} for chat ${chatId}`);
+    console.log(`🚫 Rate limited: ${commandName} for chat ${chatId} (${now - lastRun}ms since last)`);
     return false;
   }
   coachCommandCooldowns.set(cooldownKey, now);
 
   // DB idempotency check
   const idempotencyKey = `coach_${commandName}_${updateId}`;
+  console.log(`🔑 Idempotency check: ${idempotencyKey}`);
 
   try {
     const existing = await ctx.db.select('conversation_state', {
@@ -3309,9 +3334,10 @@ async function checkCoachIdempotency(ctx: BotContext, commandName: string): Prom
       expires_at: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
     });
 
+    console.log(`✅ Idempotency passed for ${commandName}`);
     return true;
   } catch (err) {
-    console.log(`⚠️ Idempotency check error for ${commandName}:`, err);
+    console.error(`⚠️ Idempotency check error for ${commandName}:`, err);
     return false; // On error, BLOCK to be safe
   }
 }
@@ -3645,7 +3671,12 @@ bot.command('weekly_roast', async (ctx) => {
 // /coach_check - Manually trigger meta-coach check
 bot.command('coach_check', async (ctx) => {
   try {
-    if (!(await checkCoachIdempotency(ctx, 'coach_check'))) return;
+    console.log('🔍 coach_check command received');
+    if (!(await checkCoachIdempotency(ctx, 'coach_check'))) {
+      console.log('🚫 coach_check blocked by idempotency');
+      return;
+    }
+    console.log('✅ coach_check passed idempotency');
 
     const chatId = ctx.chat?.id.toString() || '';
     const botToken = ctx.env.TELEGRAM_BOT_TOKEN;
@@ -3655,7 +3686,10 @@ bot.command('coach_check', async (ctx) => {
       return;
     }
 
-    await ctx.reply('🔍 جاري تحليل الحالة...');
+    // Check for force mode: /coach_check force
+    const forceMode = ctx.message?.text?.toLowerCase().includes('force');
+
+    await ctx.reply(forceMode ? '🔍 جاري تحليل الحالة (وضع إجباري)...' : '🔍 جاري تحليل الحالة...');
 
     // Get low-tier model for meta-coach
     const aiModel = await getAIModelByTier(ctx.settings, 'low');
@@ -3663,14 +3697,24 @@ bot.command('coach_check', async (ctx) => {
     // Run in background
     const backgroundTask = (async () => {
       try {
+        console.log('🔍 coach_check background task started');
         const aiClient = createAIClient(apiKey, aiModel);
-        const metaCoach = createMetaCoach(ctx.db, ctx.settings, (msgs, temp, max) => aiClient.complete(msgs, temp, max));
+        const metaCoach = createMetaCoach(ctx.db, ctx.settings, (msgs, temp, max) => aiClient.complete(msgs, temp, max), ctx.env.TELEGRAM_BOT_TOKEN);
 
         // Analyze user state
+        console.log('🔍 Analyzing user state...');
         const userState = await metaCoach.analyzeUserState(chatId);
+        console.log(`🔍 User state: hour=${userState.currentHour}, inactive=${userState.hoursInactive.toFixed(1)}h, timeOfDay=${userState.timeOfDay}`);
 
         // Decide intervention
-        const decision = await metaCoach.decideIntervention(userState);
+        let decision = await metaCoach.decideIntervention(userState);
+        console.log(`🔍 Decision: ${decision.type}, escalation=${decision.escalationLevel}`);
+
+        // Force mode: override 'none' with momentum_check
+        if (forceMode && decision.type === 'none') {
+          console.log('🔍 Force mode: overriding none → momentum_check');
+          decision = { type: 'momentum_check', message: '', escalationLevel: 1, followUpDelay: 90 };
+        }
 
         // Map intervention types to Arabic
         const typeNames: Record<string, string> = {
@@ -3705,25 +3749,35 @@ bot.command('coach_check', async (ctx) => {
         }
         stateMsg += `\n━━━━━━━━━━━━━━━━━━\n`;
         stateMsg += `🎯 القرار: ${typeNames[decision.type] || decision.type}`;
+        if (forceMode) stateMsg += ' (إجباري)';
         if (decision.escalationLevel > 0) {
           stateMsg += ` (مستوى ${decision.escalationLevel})`;
         }
 
+        console.log('🔍 Sending state message...');
         await sendTelegramMessageDirect(botToken, chatId, stateMsg);
+        console.log('🔍 State message sent');
 
         if (decision.type !== 'none') {
+          console.log(`🔍 Executing intervention: ${decision.type}`);
           const message = await metaCoach.executeIntervention(chatId, decision);
+          console.log(`🔍 Intervention generated, length=${message.length}`);
 
           // Send with interactive keyboard
           const coachKeyboard = {
             inline_keyboard: [
               [
                 { text: '▶️ ابدأ مهمة', callback_data: 'coach:start_task' },
-                { text: '⏸️ مشغول', callback_data: 'coach:busy' },
+                { text: '📅 خطة اليوم', callback_data: 'cmd:plan' },
               ],
               [
                 { text: '💬 احكيلي', callback_data: 'coach:talk' },
                 { text: '😴 تعبان', callback_data: 'coach:tired' },
+                { text: '⏸️ مشغول', callback_data: 'coach:busy' },
+              ],
+              [
+                { text: '🔥 احرقني', callback_data: 'cmd:roast' },
+                { text: '⚔️ معركة', callback_data: 'cmd:battle' },
               ],
             ],
           };
@@ -4072,35 +4126,10 @@ bot.callbackQuery(/^coach:/, async (ctx) => {
       case 'start_task': {
         await coachingAnalytics.recordActionTaken(chatId, 'starttask');
         await ctx.answerCallbackQuery('🎯 يلا نبدأ!');
-
-        // Actually show task selection (same as /starttask)
-        const todoistToken = await ctx.settings.get('todoist_api_token');
-        const todoistProjectId = await ctx.settings.get('todoist_project_id');
-
-        if (todoistToken && todoistProjectId) {
-          try {
-            const resp = await fetch(`https://api.todoist.com/rest/v2/tasks?project_id=${todoistProjectId}`, {
-              headers: { Authorization: `Bearer ${todoistToken}` },
-            });
-            if (resp.ok) {
-              const tasks = await resp.json() as any[];
-              if (tasks.length > 0) {
-                const selectKey = `task_select_${chatId}`;
-                const taskList = tasks.map((t: any) => ({ id: t.id, content: t.content }));
-                await ctx.db.upsert('conversation_state', {
-                  chat_id: selectKey,
-                  conversation_type: 'task_selection',
-                  data: { availableTasks: taskList },
-                  expires_at: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
-                }, 'chat_id');
-                const keyboard = createTaskSelectionKeyboard(taskList, 'start', 0);
-                await ctx.reply('📋 **اختر مهمة للبدء:**', { parse_mode: 'Markdown', reply_markup: keyboard });
-                break;
-              }
-            }
-          } catch (_e) { /* fall through */ }
+        const shown = await showTaskSelection(ctx as BotContext);
+        if (!shown) {
+          await ctx.reply('📋 استخدم /starttask للبدء');
         }
-        await ctx.reply('📋 استخدم /starttask للبدء');
         break;
       }
 
@@ -4110,12 +4139,13 @@ bot.callbackQuery(/^coach:/, async (ctx) => {
         await ctx.reply('تمام، هفكرك بعد شوية! 💪');
         break;
 
-      case 'talk':
+      case 'talk': {
         await ctx.answerCallbackQuery('💬 احكيلي');
-        // Extend or create pending checkin for conversation
-        await coachingAnalytics.createPendingCheckin(chatId, 'momentum_check', 10);
-        await ctx.reply('💬 احكيلي... إيه اللي مانعك تبدأ؟');
+        // Show duration selection keyboard
+        const { createTalkDurationKeyboard } = await import('../utils/keyboards');
+        await ctx.reply('💬 كام دقيقة عايز نتكلم؟', { reply_markup: createTalkDurationKeyboard() });
         break;
+      }
 
       case 'tired':
         await coachingAnalytics.setUserMood(chatId, 'low');
@@ -4143,13 +4173,20 @@ bot.callbackQuery(/^coach:/, async (ctx) => {
         await ctx.reply('💪 انت قدها وقدود! كل مهمة تخلصها بتقربك لأهدافك. يلا نضرب!');
         break;
 
-      case 'suggest':
+      case 'suggest': {
         await ctx.answerCallbackQuery('📋');
-        await ctx.reply('📋 استخدم /starttask وهعرضلك المهام المتاحة!');
+        const suggestShown = await showTaskSelection(ctx as BotContext);
+        if (!suggestShown) {
+          await ctx.reply('📋 استخدم /starttask للبدء');
+        }
         break;
+      }
 
       case 'end':
         await coachingAnalytics.completeCheckin(chatId, false);
+        // Clean up any active talk session
+        const talkEndKey = `talk_session_${chatId}`;
+        await ctx.db.delete('conversation_state', { chat_id: op.eq(talkEndKey) });
         await ctx.answerCallbackQuery('👍');
         await ctx.reply('تمام! لما تكون جاهز، أنا هنا 💪');
         break;
@@ -4157,6 +4194,128 @@ bot.callbackQuery(/^coach:/, async (ctx) => {
   } catch (error) {
     console.error('Coach callback error:', error);
     await ctx.answerCallbackQuery('❌ حدث خطأ');
+  }
+});
+
+// ============================================
+// Talk Duration Selection Handler
+// ============================================
+bot.callbackQuery(/^talk_dur:/, async (ctx) => {
+  const bctx = ctx as any as BotContext;
+  const chatId = ctx.chat?.id.toString() || '';
+  const duration = parseInt(ctx.callbackQuery.data.replace('talk_dur:', ''), 10);
+  if (isNaN(duration) || duration < 5) {
+    await ctx.answerCallbackQuery('❌ مدة غير صحيحة');
+    return;
+  }
+
+  const botToken = bctx.env.TELEGRAM_BOT_TOKEN;
+  const durationLabel = duration === 1 ? 'دقيقة' : duration <= 10 ? `${duration} دقايق` : `${duration} دقيقة`;
+
+  // Answer callback immediately
+  await ctx.answerCallbackQuery(`💬 ${durationLabel}`);
+
+  // Send start notification
+  try {
+    await sendTelegramMessageDirect(botToken, chatId,
+      `💬 بدأت جلسة محادثة - ${durationLabel}\n⏱️ هتنتهي تلقائياً بعد ${durationLabel}\n\nاستنى الكوتش يبدأ الكلام...`);
+  } catch (err) {
+    console.error('Talk start notification error:', err);
+  }
+
+  try {
+    const coachingAnalytics = createCoachingAnalytics(bctx.db);
+    const maxTurns = duration; // ~1 turn per minute
+
+    // Create pending checkin with the chosen duration
+    await coachingAnalytics.createPendingCheckin(chatId, 'momentum_check', duration);
+
+    // Store talk session state (delete old + insert new, no unique constraint on chat_id)
+    const sessionKey = `talk_session_${chatId}`;
+    await bctx.db.delete('conversation_state', { chat_id: op.eq(sessionKey) }).catch(() => {});
+    await bctx.db.insert('conversation_state', {
+      chat_id: sessionKey,
+      conversation_type: 'coach_talk',
+      data: {
+        duration,
+        maxTurns,
+        currentTurn: 0,
+        history: [],
+        startedAt: new Date().toISOString(),
+      },
+      expires_at: new Date(Date.now() + duration * 60 * 1000).toISOString(),
+    });
+
+    // Generate AI opening message in background to avoid timeout
+    const apiKey = await bctx.settings.get('openrouter_api_key');
+    if (apiKey && botToken) {
+      const backgroundTask = (async () => {
+        try {
+          const aiModel = await getAIModelByTier(bctx.settings, 'low');
+          const aiClient = createAIClient(apiKey, aiModel);
+          const metaCoach = createMetaCoach(bctx.db, bctx.settings, (msgs, temp, max) => aiClient.complete(msgs, temp, max), bctx.env.TELEGRAM_BOT_TOKEN);
+
+          const opener = await metaCoach.generateTalkOpener(chatId, duration);
+          const openerWithTime = `${opener}\n\n⏱️ المدة: ${durationLabel}`;
+          const keyboard = {
+            inline_keyboard: [
+              [{ text: '🔚 إنهاء المحادثة', callback_data: 'coach:end' }],
+            ]
+          };
+          await sendTelegramMessageDirect(botToken, chatId, openerWithTime, undefined, keyboard);
+        } catch (err) {
+          console.error('Talk opener generation error:', err);
+          await sendTelegramMessageDirect(botToken, chatId, '💬 احكيلي... إيه اللي شاغلك؟');
+        }
+      })();
+
+      if (bctx.executionContext?.waitUntil) {
+        bctx.executionContext.waitUntil(backgroundTask);
+      } else {
+        await backgroundTask;
+      }
+
+      // Schedule end-of-session notification
+      const endNotification = (async () => {
+        try {
+          // Wait for the session duration
+          await new Promise(resolve => setTimeout(resolve, duration * 60 * 1000));
+
+          // Check if session is still active
+          const sessions = await bctx.db.select('conversation_state', {
+            filter: { chat_id: op.eq(sessionKey) },
+            limit: 1,
+          });
+
+          if (sessions.length > 0 && (sessions[0] as any).conversation_type === 'coach_talk') {
+            // Session still active — clean up and notify
+            await bctx.db.delete('conversation_state', { chat_id: op.eq(sessionKey) });
+            const ca = createCoachingAnalytics(bctx.db);
+            await ca.completeCheckin(chatId, true);
+
+            const keyboard = {
+              inline_keyboard: [
+                [{ text: '▶️ ابدأ مهمة', callback_data: 'coach:start_task' }, { text: '📅 خطة اليوم', callback_data: 'cmd:plan' }],
+                [{ text: '💬 احكيلي', callback_data: 'coach:talk' }, { text: '😴 تعبان', callback_data: 'coach:tired' }, { text: '⏸️ مشغول', callback_data: 'coach:busy' }],
+                [{ text: '🔥 احرقني', callback_data: 'cmd:roast' }, { text: '⚔️ معركة', callback_data: 'cmd:battle' }],
+              ]
+            };
+            await sendTelegramMessageDirect(botToken, chatId, `⏰ انتهى وقت المحادثة (${durationLabel})!\n\nيلا نبدأ شغل؟ 💪`, undefined, keyboard);
+          }
+        } catch (err) {
+          console.error('Talk end notification error:', err);
+        }
+      })();
+
+      if (bctx.executionContext?.waitUntil) {
+        bctx.executionContext.waitUntil(endNotification);
+      }
+    } else {
+      await ctx.reply('💬 احكيلي... إيه اللي شاغلك؟');
+    }
+  } catch (error) {
+    console.error('Talk duration setup error:', error);
+    await sendTelegramMessageDirect(botToken, chatId, '❌ حصل مشكلة في بدء المحادثة. جرب تاني.');
   }
 });
 
@@ -4223,23 +4382,128 @@ bot.callbackQuery(/^quick:/, async (ctx) => {
 bot.callbackQuery(/^cmd:/, async (ctx) => {
   try {
     const command = ctx.callbackQuery.data.replace('cmd:', '');
-    await ctx.answerCallbackQuery();
+    const chatId = ctx.chat?.id.toString() || '';
+    const botToken = (ctx as any as BotContext).env.TELEGRAM_BOT_TOKEN;
 
-    // Map command shortcuts to actual command messages
-    const commandMap: Record<string, string> = {
-      starttask: '/starttask',
-      stuck: '/stuck',
-      roast: '/roast_me',
-      battle: '/battle_mode',
-      tasks: '/starttask',
-      plan: '/todayplan',
-      progress: '/today',
-      streak: '/streak',
-    };
+    switch (command) {
+      case 'starttask':
+      case 'tasks': {
+        await ctx.answerCallbackQuery('🎯 يلا نبدأ!');
+        const shown = await showTaskSelection(ctx as any as BotContext);
+        if (!shown) {
+          await ctx.reply('📋 استخدم /starttask للبدء');
+        }
+        break;
+      }
 
-    const cmdText = commandMap[command];
-    if (cmdText) {
-      await ctx.reply(`استخدم ${cmdText} للمتابعة`);
+      case 'roast': {
+        await ctx.answerCallbackQuery('🔥 جاري التحليل...');
+        await ctx.reply('🔥 جاري تحليل أنماط التسويف...');
+
+        const backgroundRoast = (async () => {
+          try {
+            const apiKey = await (ctx as any as BotContext).settings.get('openrouter_api_key');
+            if (!apiKey) { await sendTelegramMessageDirect(botToken, chatId, '❌ لم يتم تكوين مفتاح AI.'); return; }
+            const aiModel = await getAIModelByTier((ctx as any as BotContext).settings, 'low');
+            const aiClient = createAIClient(apiKey, aiModel);
+            const roastMode = createRoastMode((ctx as any as BotContext).db, (ctx as any as BotContext).settings, (msgs, temp, max) => aiClient.complete(msgs, temp, max));
+            const result = await roastMode.generateRoast(chatId);
+            await sendTelegramMessageDirect(botToken, chatId, `${result.roast}${result.encouragement}`);
+          } catch (error) {
+            console.error('Roast callback error:', error);
+            await sendTelegramMessageDirect(botToken, chatId, '❌ حدث خطأ في التحليل');
+          }
+        })();
+
+        if ((ctx as any as BotContext).executionContext?.waitUntil) {
+          (ctx as any as BotContext).executionContext!.waitUntil(backgroundRoast);
+        } else {
+          await backgroundRoast;
+        }
+        break;
+      }
+
+      case 'battle': {
+        await ctx.answerCallbackQuery('⚔️ جاري التحضير...');
+        await ctx.reply('⚔️ جاري تحضير المعركة...');
+
+        const backgroundBattle = (async () => {
+          try {
+            const apiKey = await (ctx as any as BotContext).settings.get('openrouter_api_key');
+            if (!apiKey) { await sendTelegramMessageDirect(botToken, chatId, '❌ لم يتم تكوين مفتاح AI.'); return; }
+            const aiModel = await getAIModelByTier((ctx as any as BotContext).settings, 'low');
+            const aiClient = createAIClient(apiKey, aiModel);
+            const battleMode = createBattleMode((ctx as any as BotContext).db, (ctx as any as BotContext).settings, (msgs, temp, max) => aiClient.complete(msgs, temp, max));
+            const { message } = await battleMode.startBattle(chatId);
+            await sendTelegramMessageDirect(botToken, chatId, message);
+          } catch (error) {
+            console.error('Battle callback error:', error);
+            await sendTelegramMessageDirect(botToken, chatId, '❌ حدث خطأ في تحضير المعركة');
+          }
+        })();
+
+        if ((ctx as any as BotContext).executionContext?.waitUntil) {
+          (ctx as any as BotContext).executionContext!.waitUntil(backgroundBattle);
+        } else {
+          await backgroundBattle;
+        }
+        break;
+      }
+
+      case 'plan': {
+        await ctx.answerCallbackQuery('📅 جاري الإعداد...');
+        await ctx.reply('🤖 جاري إعداد خطة اليوم بالذكاء الاصطناعي...\n⏳ قد يستغرق هذا بضع ثوان...');
+
+        const backgroundPlan = (async () => {
+          try {
+            const today = getTodayInEgypt();
+            const planMessage = await generateDailyPlan(ctx as any as BotContext, today, true);
+            await sendTelegramMessageDirect(botToken, chatId, planMessage);
+          } catch (error) {
+            console.error('Plan callback error:', error);
+            await sendTelegramMessageDirect(botToken, chatId, '❌ حدث خطأ في إعداد الخطة');
+          }
+        })();
+
+        if ((ctx as any as BotContext).executionContext?.waitUntil) {
+          (ctx as any as BotContext).executionContext!.waitUntil(backgroundPlan);
+        } else {
+          await backgroundPlan;
+        }
+        break;
+      }
+
+      case 'progress': {
+        await ctx.answerCallbackQuery('📊 جاري التحميل...');
+        try {
+          const today = getTodayInEgypt();
+          try { await syncFailuresFromTodoist(today, (ctx as any as BotContext).db, (ctx as any as BotContext).settings); } catch (_e) { /* continue */ }
+          const reportGen = createReportGenerator((ctx as any as BotContext).db, (ctx as any as BotContext).settings);
+          const preview = await reportGen.generatePreview();
+          await sendLongMessage(ctx, preview.formatted_text);
+        } catch (error) {
+          console.error('Progress callback error:', error);
+          await ctx.reply('❌ حدث خطأ أثناء إعداد الملخص');
+        }
+        break;
+      }
+
+      case 'streak': {
+        await ctx.answerCallbackQuery('🏆');
+        try {
+          const celebrationsService = createCelebrationsService((ctx as any as BotContext).db);
+          const streakInfo = await celebrationsService.getStreakInfo(chatId);
+          await ctx.reply(streakInfo, { parse_mode: 'Markdown' });
+        } catch (error) {
+          console.error('Streak callback error:', error);
+          await ctx.reply('❌ حدث خطأ');
+        }
+        break;
+      }
+
+      default:
+        await ctx.answerCallbackQuery();
+        break;
     }
 
   } catch (error) {
@@ -4345,7 +4609,7 @@ bot.callbackQuery(/^session:/, async (ctx) => {
             });
 
             // Update task content first
-            await fetch(`https://api.todoist.com/rest/v3/tasks/${todoistTaskId}`, {
+            await fetch(`https://api.todoist.com/api/v1/tasks/${todoistTaskId}`, {
               method: 'POST',
               headers: {
                 'Authorization': `Bearer ${todoistToken.trim()}`,
@@ -4357,7 +4621,7 @@ bot.callbackQuery(/^session:/, async (ctx) => {
             await new Promise(resolve => setTimeout(resolve, 500));
 
             // Then close
-            await fetch(`https://api.todoist.com/rest/v3/tasks/${todoistTaskId}/close`, {
+            await fetch(`https://api.todoist.com/api/v1/tasks/${todoistTaskId}/close`, {
               method: 'POST',
               headers: { 'Authorization': `Bearer ${todoistToken.trim()}` },
             });
@@ -4886,30 +5150,45 @@ bot.callbackQuery(/^failsel:/, async (ctx) => {
     const dailyFailures = await getDailyFailures(ctx.db, today);
     const failedTasks = dailyFailures?.failed_tasks || [];
 
-    const existingFailure = failedTasks.find((f: FailedTask) =>
+    const existingIndex = failedTasks.findIndex((f: FailedTask) =>
       f.id === selectedTask.id || f.content === selectedTask.content
     );
 
-    if (existingFailure) {
+    if (existingIndex >= 0 && failedTasks[existingIndex].is_pending === false) {
+      // Already confirmed failed — skip
       await ctx.editMessageText(
         `⚠️ المهمة "${selectedTask.content}" مسجلة بالفعل كفشل اليوم`
       );
       return;
     }
 
-    // Add new failure
+    // Determine if this is a subtask and find parent info
+    const isSubtask = !!selectedTask.parent_id;
+    let parentContent: string | null = null;
+    if (isSubtask && selectedTask.parent_id) {
+      // Look up parent name from the task list
+      const parentTask = taskList.find((t: any) => t.id === selectedTask.parent_id);
+      parentContent = parentTask?.content || null;
+    }
+
+    // Create confirmed failure entry
     const newFailure: FailedTask = {
       id: selectedTask.id,
       content: selectedTask.content,
-      parent_id: null,
-      parent_content: null,
-      priority: 1,
-      is_subtask: false,
+      parent_id: selectedTask.parent_id || null,
+      parent_content: parentContent,
+      priority: selectedTask.priority || 1,
+      is_subtask: isSubtask,
       description: 'Manual failure logged via /log_failure',
       is_manual: true,
+      is_pending: false, // Confirmed failed
     };
 
-    failedTasks.push(newFailure);
+    if (existingIndex >= 0) {
+      failedTasks[existingIndex] = newFailure;
+    } else {
+      failedTasks.push(newFailure);
+    }
 
     const updatedDailyFailures = {
       date: today,
@@ -4918,9 +5197,114 @@ bot.callbackQuery(/^failsel:/, async (ctx) => {
     };
     await upsertDailyFailures(ctx.db, updatedDailyFailures);
 
+    // Close the task in Todoist (so it disappears from active tasks)
+    let todoistStatus = '';
+    const todoistToken = await ctx.settings.get('todoist_api_token');
+    if (todoistToken && selectedTask.id && !selectedTask.id.startsWith('manual_')) {
+      try {
+        // Create failure_completion marker so webhook ignores this completion
+        const markerKey = `failure_completion_${selectedTask.id}`;
+        await ctx.db.delete('conversation_state', { chat_id: op.eq(markerKey) }).catch(() => {});
+        await ctx.db.insert('conversation_state', {
+          chat_id: markerKey,
+          conversation_type: 'failure_completion',
+          data: { taskId: selectedTask.id, taskName: selectedTask.content, manualFail: true },
+          expires_at: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
+        });
+
+        // Wait for marker to be visible before closing
+        await new Promise(resolve => setTimeout(resolve, 300));
+
+        const closeResponse = await fetch(
+          `https://api.todoist.com/api/v1/tasks/${selectedTask.id}/close`,
+          {
+            method: 'POST',
+            headers: { 'Authorization': `Bearer ${todoistToken.trim()}` },
+          }
+        );
+
+        if (closeResponse.ok) {
+          todoistStatus = '\n🔄 تم إغلاق المهمة في Todoist';
+        } else {
+          console.error(`Failed to close task in Todoist: ${closeResponse.status}`);
+          todoistStatus = '\n⚠️ فشل إغلاق المهمة في Todoist';
+        }
+      } catch (err) {
+        console.error('Error closing task in Todoist:', err);
+        todoistStatus = '\n⚠️ فشل إغلاق المهمة في Todoist';
+      }
+    }
+
+    // Build failure notification similar to completion notification
+    const { extractCleanTaskName } = await import('../utils/task-parser');
+    let notificationMsg = '';
+
+    if (isSubtask && parentContent) {
+      // Subtask failed — show parent context with all sibling subtasks
+      const updatedFailures = await getDailyFailures(ctx.db, today);
+      const parentCleanName = extractCleanTaskName(parentContent);
+
+      // Get completed sibling subtasks from tasks table
+      const { start, end } = await import('../utils/timezone').then(m => {
+        const bounds = m.getEgyptDayBoundaries(today);
+        return bounds;
+      });
+      const allTasks = await ctx.db.select('tasks', { limit: 5000 });
+      const todayTasks = (allTasks as any[]).filter((t: any) => {
+        const d = new Date(t.completed_at);
+        return d >= start && d <= end;
+      });
+
+      const completedSiblings = todayTasks.filter((t: any) => {
+        if (!t.origin_task) return false;
+        const originMatch = t.content?.match(/\(origin:\s*([^)]+)\)/i);
+        if (originMatch?.[1]) {
+          return extractCleanTaskName(originMatch[1]) === parentCleanName;
+        }
+        const parentBaseId = selectedTask.parent_id?.split('_')[0];
+        if (parentBaseId) {
+          return t.origin_task?.split('_')[0] === parentBaseId;
+        }
+        return false;
+      });
+
+      // Get failed sibling subtasks
+      const failedSiblings = updatedFailures?.failed_tasks.filter((f: FailedTask) => {
+        if (!f.is_subtask) return false;
+        if (f.parent_content) return extractCleanTaskName(f.parent_content) === parentCleanName;
+        if (f.parent_id === selectedTask.parent_id) return true;
+        return false;
+      }) || [];
+
+      const totalSibs = completedSiblings.length + failedSiblings.length;
+      const confirmedFailed = failedSiblings.filter((f: FailedTask) => f.is_pending === false);
+
+      // Parent symbol
+      let parentSymbol = '⏳';
+      const parentCompleted = todayTasks.some((t: any) =>
+        !t.origin_task && extractCleanTaskName(t.content) === parentCleanName
+      );
+      if (parentCompleted && confirmedFailed.length === 0) parentSymbol = '✅';
+      else if (parentCompleted && completedSiblings.length > 0 && confirmedFailed.length > 0) parentSymbol = '⚠️';
+      else if (!parentCompleted && confirmedFailed.length > 0 && completedSiblings.length > 0) parentSymbol = '⚠️';
+      else if (confirmedFailed.length > 0 && completedSiblings.length === 0) parentSymbol = '❌';
+
+      notificationMsg = `${parentSymbol} ${parentCleanName} (${completedSiblings.length}/${totalSibs})`;
+
+      for (const sub of completedSiblings) {
+        notificationMsg += `\n  ✓ ${extractCleanTaskName(sub.content)}`;
+      }
+      for (const sub of failedSiblings) {
+        const subSymbol = sub.is_pending !== false ? '…' : '✕';
+        notificationMsg += `\n  ${subSymbol} ${extractCleanTaskName(sub.content)}`;
+      }
+    } else {
+      // Standalone task failed
+      notificationMsg = `❌ ${extractCleanTaskName(selectedTask.content)}`;
+    }
+
     await ctx.editMessageText(
-      `✅ تم تسجيل فشل المهمة:\n📌 ${selectedTask.content}\n\n` +
-      `📊 إجمالي الفشل اليوم: ${failedTasks.length} مهمة`
+      `${notificationMsg}${todoistStatus}`
     );
 
   } catch (error) {
@@ -5235,7 +5619,124 @@ bot.callbackQuery(/^resumechoice:/, async (ctx) => {
       }
 
       // ============================================
-      // Handle Interactive Coach Conversation
+      // Handle Talk Session (احكيلي) - Extended Conversation
+      // ============================================
+      const talkSessionKey = `talk_session_${chatId}`;
+      const talkSessions = await ctx.db.select('conversation_state', {
+        filter: { chat_id: op.eq(talkSessionKey) },
+        limit: 1,
+      });
+
+      if (talkSessions.length > 0 && (talkSessions[0] as any).conversation_type === 'coach_talk') {
+        const talkData = (talkSessions[0] as any).data || {};
+        const { maxTurns, history = [] } = talkData;
+        const currentTurn = (talkData.currentTurn || 0) + 1;
+
+        // Check if session expired
+        const expiresAt = new Date((talkSessions[0] as any).expires_at);
+        if (new Date() > expiresAt || currentTurn > maxTurns) {
+          // Session over — clean up
+          await ctx.db.delete('conversation_state', { chat_id: op.eq(talkSessionKey) });
+          const coachAnalytics = createCoachingAnalytics(ctx.db);
+          await coachAnalytics.completeCheckin(chatId, true);
+          await ctx.reply('💬 انتهت الجلسة! يلا نبدأ شغل؟ 💪', { reply_markup: createCoachCheckInKeyboard() });
+          return;
+        }
+
+        // Use background processing for AI-heavy talk response
+        const botToken = ctx.env.TELEGRAM_BOT_TOKEN;
+        const apiKey = await ctx.settings.get('openrouter_api_key');
+        if (apiKey && botToken) {
+          // Immediately update turn count to prevent duplicate processing
+          await ctx.db.delete('conversation_state', { chat_id: op.eq(talkSessionKey) }).catch(() => {});
+          await ctx.db.insert('conversation_state', {
+            chat_id: talkSessionKey,
+            conversation_type: 'coach_talk',
+            data: { ...talkData, currentTurn, history: [...history, { role: 'user', content: text }] },
+            expires_at: (talkSessions[0] as any).expires_at,
+          });
+
+          const coachAnalytics = createCoachingAnalytics(ctx.db);
+          const activeCheck = await coachAnalytics.getActiveCheckin(chatId);
+          if (activeCheck) {
+            await coachAnalytics.recordTextResponse(activeCheck.id, 2, talkData.duration || 10);
+          }
+
+          // Run AI generation in background to avoid webhook timeout
+          const backgroundTask = (async () => {
+            try {
+              const aiModel = await getAIModelByTier(ctx.settings, 'low');
+              const aiClient = createAIClient(apiKey, aiModel);
+              const metaCoach = createMetaCoach(ctx.db, ctx.settings, (msgs, temp, max) => aiClient.complete(msgs, temp, max), ctx.env.TELEGRAM_BOT_TOKEN);
+
+              const response = await metaCoach.generateTalkResponse(
+                chatId,
+                text,
+                history,
+                currentTurn,
+                maxTurns,
+                activeCheck?.userMood
+              );
+
+              // Update session with full history including coach response
+              const newHistory = [...history, { role: 'user', content: text }, { role: 'coach', content: response }];
+              await ctx.db.delete('conversation_state', { chat_id: op.eq(talkSessionKey) }).catch(() => {});
+              await ctx.db.insert('conversation_state', {
+                chat_id: talkSessionKey,
+                conversation_type: 'coach_talk',
+                data: { ...talkData, currentTurn, history: newHistory.slice(-20) },
+                expires_at: (talkSessions[0] as any).expires_at,
+              });
+
+              // Send response with remaining time
+              const turnsLeft = maxTurns - currentTurn;
+              const sessionStarted = new Date(talkData.startedAt || Date.now());
+              const sessionDuration = talkData.duration || 5;
+              const elapsedMs = Date.now() - sessionStarted.getTime();
+              const remainingMin = Math.max(0, Math.ceil((sessionDuration * 60 * 1000 - elapsedMs) / 60000));
+
+              if (turnsLeft <= 0 || remainingMin <= 0) {
+                // Session over - clean up and show action keyboard
+                await ctx.db.delete('conversation_state', { chat_id: op.eq(talkSessionKey) });
+                const ca = createCoachingAnalytics(ctx.db);
+                await ca.completeCheckin(chatId, true);
+                const finalText = response + '\n\n✅ انتهت الجلسة! يلا نبدأ شغل؟';
+                const keyboard = {
+                  inline_keyboard: [
+                    [{ text: '▶️ ابدأ مهمة', callback_data: 'coach:start_task' }, { text: '📅 خطة اليوم', callback_data: 'cmd:plan' }],
+                    [{ text: '💬 احكيلي', callback_data: 'coach:talk' }, { text: '😴 تعبان', callback_data: 'coach:tired' }, { text: '⏸️ مشغول', callback_data: 'coach:busy' }],
+                    [{ text: '🔥 احرقني', callback_data: 'cmd:roast' }, { text: '⚔️ معركة', callback_data: 'cmd:battle' }],
+                  ]
+                };
+                await sendTelegramMessageDirect(botToken, chatId, finalText, undefined, keyboard);
+              } else {
+                const timeLabel = remainingMin === 1 ? 'دقيقة' : remainingMin <= 10 ? `${remainingMin} دقايق` : `${remainingMin} دقيقة`;
+                const responseWithTime = `${response}\n\n⏱️ باقي ${timeLabel}`;
+                const keyboard = {
+                  inline_keyboard: [
+                    [{ text: `🔚 إنهاء المحادثة`, callback_data: 'coach:end' }],
+                  ]
+                };
+                await sendTelegramMessageDirect(botToken, chatId, responseWithTime, undefined, keyboard);
+              }
+            } catch (err) {
+              console.error('Talk session background error:', err);
+              await sendTelegramMessageDirect(botToken, chatId, '💬 حصل مشكلة، حاول تاني أو اكتب /coach_check');
+            }
+          })();
+
+          // Use waitUntil for background processing
+          if (ctx.executionContext?.waitUntil) {
+            ctx.executionContext.waitUntil(backgroundTask);
+          } else {
+            await backgroundTask;
+          }
+        }
+        return;
+      }
+
+      // ============================================
+      // Handle Interactive Coach Conversation (regular check-in)
       // ============================================
       const coachingAnalytics = createCoachingAnalytics(ctx.db);
       const activeCheckin = await coachingAnalytics.getActiveCheckin(chatId);
@@ -5250,7 +5751,7 @@ bot.callbackQuery(/^resumechoice:/, async (ctx) => {
           if (apiKey) {
             const aiModel = await getAIModelByTier(ctx.settings, 'low');
             const aiClient = createAIClient(apiKey, aiModel);
-            const metaCoach = createMetaCoach(ctx.db, ctx.settings, (msgs, temp, max) => aiClient.complete(msgs, temp, max));
+            const metaCoach = createMetaCoach(ctx.db, ctx.settings, (msgs, temp, max) => aiClient.complete(msgs, temp, max), ctx.env.TELEGRAM_BOT_TOKEN);
 
             const response = await metaCoach.generateConversationResponse(
               chatId,
@@ -5529,7 +6030,9 @@ if (pendingFailureSelect.length > 0) {
   const availableTasks = selectionData.availableTasks as Array<{
     id: string;
     content: string;
-    due?: { date: string; is_recurring: boolean };
+    parent_id?: string | null;
+    priority?: number;
+    due?: { date: string; is_recurring?: boolean; recurring?: boolean };
   }> || [];
 
   // Parse selection (fallback for number input)
@@ -5539,7 +6042,19 @@ if (pendingFailureSelect.length > 0) {
     await ctx.db.delete('conversation_state', { chat_id: op.eq(failureSelectKey) });
     const selectedTask = availableTasks[selection - 1];
     if (selectedTask) {
-      await processTaskFailure(ctx, selectedTask.id, selectedTask.content, selectedTask.due);
+      // Determine parent info for subtask grouping
+      const isSubtask = !!selectedTask.parent_id;
+      let parentContent: string | null = null;
+      if (isSubtask && selectedTask.parent_id) {
+        const parentTask = availableTasks.find((t: any) => t.id === selectedTask.parent_id);
+        parentContent = parentTask?.content || null;
+      }
+      await processTaskFailure(ctx, selectedTask.id, selectedTask.content, selectedTask.due, {
+        parent_id: selectedTask.parent_id || null,
+        parent_content: parentContent,
+        is_subtask: isSubtask,
+        priority: selectedTask.priority,
+      });
       return;
     }
   }
@@ -5789,7 +6304,7 @@ if (pendingFailureNewTask.length > 0) {
               }
 
               // Get all tasks from Todoist
-              const tasksResponse = await fetch('https://api.todoist.com/rest/v3/tasks', {
+              const tasksResponse = await fetch('https://api.todoist.com/api/v1/tasks', {
                 headers: { 'Authorization': `Bearer ${todoistToken.trim()}` },
               });
 
@@ -5798,13 +6313,14 @@ if (pendingFailureNewTask.length > 0) {
                 return;
               }
 
-              const allTasks = await tasksResponse.json() as Array<{
+              const tasksJson = await tasksResponse.json() as any;
+              const allTasks = (Array.isArray(tasksJson) ? tasksJson : (tasksJson.results || [])) as Array<{
                 id: string;
                 content: string;
                 project_id: string;
                 priority: number;
                 parent_id?: string;
-                due?: { date: string; is_recurring?: boolean } | null;
+                due?: { date: string; is_recurring?: boolean; recurring?: boolean } | null;
               }>;
 
               // Filter tasks due today or earlier
@@ -5872,7 +6388,7 @@ if (pendingFailureNewTask.length > 0) {
                   });
 
                   // Complete the task in Todoist
-                  await fetch(`https://api.todoist.com/rest/v3/tasks/${task.id}/close`, {
+                  await fetch(`https://api.todoist.com/api/v1/tasks/${task.id}/close`, {
                     method: 'POST',
                     headers: { 'Authorization': `Bearer ${todoistToken.trim()}` },
                   });
@@ -6344,7 +6860,7 @@ if (pendingConfirm.length > 0) {
 
               // UPDATE existing Todoist task content, then complete it
               // Step 1: Update task content with duration/quantity
-              const updateResponse = await fetch(`https://api.todoist.com/rest/v3/tasks/${todoistTaskId}`, {
+              const updateResponse = await fetch(`https://api.todoist.com/api/v1/tasks/${todoistTaskId}`, {
                 method: 'POST',
                 headers: {
                   'Authorization': `Bearer ${todoistToken.trim()}`,
@@ -6360,7 +6876,7 @@ if (pendingConfirm.length > 0) {
                 await new Promise(resolve => setTimeout(resolve, 500));
 
                 // Step 2: Complete the task
-                await fetch(`https://api.todoist.com/rest/v3/tasks/${todoistTaskId}/close`, {
+                await fetch(`https://api.todoist.com/api/v1/tasks/${todoistTaskId}/close`, {
                   method: 'POST',
                   headers: { 'Authorization': `Bearer ${todoistToken.trim()}` },
                 });
@@ -6376,7 +6892,7 @@ if (pendingConfirm.length > 0) {
             } else {
               // CREATE new task and complete it (no existing task found)
               const todoistProjectId = await ctx.settings.get('todoist_project_id');
-              const createResponse = await fetch('https://api.todoist.com/rest/v3/tasks', {
+              const createResponse = await fetch('https://api.todoist.com/api/v1/tasks', {
                 method: 'POST',
                 headers: {
                   'Authorization': `Bearer ${todoistToken.trim()}`,
@@ -6390,7 +6906,7 @@ if (pendingConfirm.length > 0) {
 
               if (createResponse.ok) {
                 const newTask = await createResponse.json() as { id: string };
-                await fetch(`https://api.todoist.com/rest/v3/tasks/${newTask.id}/close`, {
+                await fetch(`https://api.todoist.com/api/v1/tasks/${newTask.id}/close`, {
                   method: 'POST',
                   headers: { 'Authorization': `Bearer ${todoistToken.trim()}` },
                 });

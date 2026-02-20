@@ -22,7 +22,7 @@ export class DebugLogger {
    */
   async init(): Promise<void> {
     try {
-      const debugMode = await this.settings.get('debugger_mode');
+      const debugMode = await this.settings.get('debug_mode');
       this.enabled = debugMode === 'true';
 
       if (this.enabled) {

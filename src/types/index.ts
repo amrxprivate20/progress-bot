@@ -155,7 +155,8 @@ export interface TodoistEventData {
   priority: number;
   due?: {
     date: string;
-    is_recurring: boolean;
+    is_recurring?: boolean;  // Webhook/Sync API format
+    recurring?: boolean;     // REST API v1 format
     string: string; // e.g., "every day", "every Mon, Wed, Fri"
   };
   labels?: string[];

@@ -1180,6 +1180,7 @@ if (highPriorityIds.has(task.id)) {
     is_subtask: isSubtask,
     description: 'Auto-failed at end of day',
     is_manual: true, // Preserve during Todoist sync (auto-failed = already closed in Todoist)
+    is_pending: false, // Confirmed failed by autofail
   };
 
   // Check if task already exists in failures (by clean name) - same as /log_failure
@@ -1215,7 +1216,7 @@ if (highPriorityIds.has(task.id)) {
 
         // Complete in Todoist
         const closeResponse = await fetch(
-          `https://api.todoist.com/rest/v3/tasks/${task.id}/close`,
+          `https://api.todoist.com/api/v1/tasks/${task.id}/close`,
           {
             method: 'POST',
             headers: { 'Authorization': `Bearer ${todoistToken}` },

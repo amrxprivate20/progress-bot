@@ -21,7 +21,7 @@ export interface TodoistTask {
   id: string;
   content: string;
   priority: number;
-  due?: { date: string; is_recurring?: boolean } | null;
+  due?: { date: string; is_recurring?: boolean; recurring?: boolean } | null;
   parent_id?: string | null;
   description?: string;
 }
@@ -164,20 +164,38 @@ export class AutofailService {
    * Fetch tasks from Todoist
    */
   async fetchTodoistTasks(config: AutoFailConfig): Promise<TodoistTask[]> {
-    let url = 'https://api.todoist.com/rest/v3/tasks';
-    if (config.todoistProjectId) {
-      url += `?project_id=${config.todoistProjectId}`;
-    }
+    const allTasks: TodoistTask[] = [];
+    let cursor: string | null = null;
 
-    const response = await fetch(url, {
-      headers: { 'Authorization': `Bearer ${config.todoistToken}` },
-    });
+    do {
+      let url = 'https://api.todoist.com/api/v1/tasks';
+      const params: string[] = [];
+      if (config.todoistProjectId) {
+        params.push(`project_id=${config.todoistProjectId}`);
+      }
+      if (cursor) {
+        params.push(`cursor=${cursor}`);
+      }
+      if (params.length > 0) {
+        url += '?' + params.join('&');
+      }
 
-    if (!response.ok) {
-      throw new Error(`Failed to fetch tasks from Todoist: ${response.status}`);
-    }
+      const response = await fetch(url, {
+        headers: { 'Authorization': `Bearer ${config.todoistToken}` },
+      });
 
-    return await response.json() as TodoistTask[];
+      if (!response.ok) {
+        throw new Error(`Failed to fetch tasks from Todoist: ${response.status}`);
+      }
+
+      const json = await response.json() as any;
+      const pageTasks = (Array.isArray(json) ? json : (json.results || [])) as TodoistTask[];
+      allTasks.push(...pageTasks);
+      cursor = json.next_cursor || null;
+    } while (cursor);
+
+    console.log(`📋 Autofail: Fetched ${allTasks.length} total tasks from Todoist (paginated)`);
+    return allTasks;
   }
 
   /**

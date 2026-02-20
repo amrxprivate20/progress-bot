@@ -21,13 +21,8 @@ import { AIMessage } from '../services/ai-client';
 import { getTodayInEgypt } from '../utils/timezone';
 import { createCoachingContextBuilder } from './coaching-context';
 import { createTaskSessionManager, TaskSession } from '../services/task-session-manager';
-import { getCoachCommandFooter } from '../utils/keyboards';
-
-// ============================================
-// Constants
-// ============================================
-
-const COMMAND_FOOTER = getCoachCommandFooter();
+import { createJournalManager } from '../services/journal';
+import { extractCleanTaskName } from '../utils/task-parser';
 
 // ============================================
 // Types
@@ -441,14 +436,17 @@ HP البوس: {BOSS_HP}%
 export class MetaCoach {
   private aiComplete: (messages: AIMessage[], temp?: number, maxTokens?: number) => Promise<string>;
   private settings: SettingsManager;
+  private botToken: string | null;
 
   constructor(
     private db: SupabaseClient,
     settings: SettingsManager,
-    aiCompleteFunc: (messages: AIMessage[], temp?: number, maxTokens?: number) => Promise<string>
+    aiCompleteFunc: (messages: AIMessage[], temp?: number, maxTokens?: number) => Promise<string>,
+    botToken?: string
   ) {
     this.settings = settings;
     this.aiComplete = aiCompleteFunc;
+    this.botToken = botToken || null;
   }
 
   /**
@@ -504,11 +502,9 @@ export class MetaCoach {
     // Count interventions today
     const interventionsToday = await this.getInterventionsToday(chatId);
 
-    // Get deferrals today
-    const deferralsToday = await this.getDeferralsToday(chatId);
-
-    // Get avoidance patterns
-    const avoidancePatterns = await this.getAvoidancePatternNames(chatId);
+    // Deferrals and avoidance patterns (skipped to reduce subrequests)
+    const deferralsToday = 0;
+    const avoidancePatterns: string[] = [];
 
     // Get active session
     const activeSession = await sessionMgr.getActiveSession(chatId);
@@ -560,6 +556,11 @@ export class MetaCoach {
     const sleepStartH = parseInt(sleepStartStr.split(':')[0] || '23', 10);
     const sleepEndH = parseInt(sleepEndStr.split(':')[0] || '7', 10);
 
+    // Calculate dynamic boundaries
+    const morningEndH = (sleepEndH + 3) % 24; // Morning kickoff window: sleepEnd to sleepEnd+3h
+    // Night wrapup: 1 hour before sleep_start
+    const nightWrapupStartH = sleepStartH > 0 ? sleepStartH - 1 : 23;
+
     // ============================================
     // 1. Sleep time? → No intervention
     // ============================================
@@ -593,12 +594,11 @@ export class MetaCoach {
     }
 
     // ============================================
-    // 4. Morning first check? → MORNING KICKOFF
+    // 4. Morning kickoff (sleepEnd to sleepEnd+3h)
     // ============================================
     if (
-      state.currentHour >= sleepEndH &&
-      state.currentHour < 10 &&
-      !this.hadInterventionInHourRange(state.lastInterventionHour, sleepEndH, 10)
+      this.isInHourRange(state.currentHour, sleepEndH, morningEndH) &&
+      !this.hadInterventionInHourRange(state.lastInterventionHour, sleepEndH, morningEndH)
     ) {
       return {
         type: 'morning_kickoff',
@@ -609,44 +609,11 @@ export class MetaCoach {
     }
 
     // ============================================
-    // 5. Midday (12-14)? → MIDDAY PUSH
+    // 5. Night wrap-up (1h before sleepStart)
     // ============================================
     if (
-      state.currentHour >= 12 &&
-      state.currentHour < 14 &&
-      !this.hadInterventionInHourRange(state.lastInterventionHour, 12, 14)
-    ) {
-      return {
-        type: 'midday_push',
-        message: '',
-        escalationLevel: state.tasksCompletedToday < 3 ? 2 : 1,
-        followUpDelay: 90,
-      };
-    }
-
-    // ============================================
-    // 6. Evening (18-20)? → EVENING CHECK
-    // ============================================
-    if (
-      state.currentHour >= 18 &&
-      state.currentHour < 20 &&
-      !this.hadInterventionInHourRange(state.lastInterventionHour, 18, 20)
-    ) {
-      return {
-        type: 'evening_check',
-        message: '',
-        escalationLevel: state.tasksCompletedToday < 5 ? 3 : 1,
-        followUpDelay: 60,
-      };
-    }
-
-    // ============================================
-    // 7. Night wrap-up (21-22)? → NIGHT WRAPUP
-    // ============================================
-    if (
-      state.currentHour >= 21 &&
-      state.currentHour < sleepStartH &&
-      !this.hadInterventionInHourRange(state.lastInterventionHour, 21, sleepStartH)
+      this.isInHourRange(state.currentHour, nightWrapupStartH, sleepStartH) &&
+      !this.hadInterventionInHourRange(state.lastInterventionHour, nightWrapupStartH, sleepStartH)
     ) {
       return {
         type: 'night_wrapup',
@@ -657,7 +624,7 @@ export class MetaCoach {
     }
 
     // ============================================
-    // 8. Battle active with high boss HP? → BATTLE NARRATIVE
+    // 6. Battle active with high boss HP? → BATTLE NARRATIVE
     // ============================================
     if (state.currentBattleState) {
       const bossHP = state.currentBattleState.bossCurrentHP || 0;
@@ -675,11 +642,17 @@ export class MetaCoach {
     }
 
     // ============================================
-    // 9. Inactive >= threshold? → INACTIVITY NUDGE
+    // 7. Inactive >= threshold? → Time-appropriate nudge
+    //    Covers ALL waking hours dynamically
     // ============================================
     if (state.hoursInactive >= inactivityThreshold) {
+      // Pick prompt type based on current time of day
+      const nudgeType = (state.timeOfDay === 'morning' || state.timeOfDay === 'afternoon')
+        ? 'midday_push' as const
+        : 'evening_check' as const;
+
       return {
-        type: 'inactivity_nudge',
+        type: nudgeType,
         message: '',
         escalationLevel,
         followUpDelay: 45,
@@ -687,7 +660,8 @@ export class MetaCoach {
     }
 
     // ============================================
-    // 10. Active but threshold passed since last check? → MOMENTUM CHECK
+    // 8. Active but threshold passed since last check? → MOMENTUM CHECK
+    //    Covers ALL waking hours dynamically
     // ============================================
     const checkIntervalMinutes = inactivityThreshold * 60;
     if (state.minutesSinceLastIntervention >= checkIntervalMinutes) {
@@ -780,9 +754,21 @@ export class MetaCoach {
     return currentHour >= sleepStartH && currentHour < sleepEndH;
   }
 
+  private isInHourRange(currentHour: number, startH: number, endH: number): boolean {
+    if (startH <= endH) {
+      return currentHour >= startH && currentHour < endH;
+    }
+    // Wraps overnight (e.g., 23 to 2)
+    return currentHour >= startH || currentHour < endH;
+  }
+
   private hadInterventionInHourRange(lastHour: number | null, startH: number, endH: number): boolean {
     if (lastHour === null) return false;
-    return lastHour >= startH && lastHour < endH;
+    if (startH <= endH) {
+      return lastHour >= startH && lastHour < endH;
+    }
+    // Wraps overnight
+    return lastHour >= startH || lastHour < endH;
   }
 
   private calculateEscalationLevel(state: UserState): number {
@@ -830,8 +816,15 @@ export class MetaCoach {
       );
     }
 
+    // Gather enriched context
+    const extraContext = await this.buildExtraContext(chatId);
+
+    // Get current time in Egypt
+    const currentTime = this.getCurrentEgyptTime();
+    const dayPeriodContext = this.getDayPeriodContext(state.currentHour);
+
     // Replace placeholders
-    const prompt = promptTemplate
+    let prompt = promptTemplate
       .replace('{HOURS_INACTIVE}', state.hoursInactive.toFixed(1))
       .replace('{TASKS_COMPLETED}', state.tasksCompletedToday.toString())
       .replace('{TASKS_FAILED}', state.tasksFailed.toString())
@@ -844,10 +837,21 @@ export class MetaCoach {
       .replace('{BOSS_HP}', bossHP.toString())
       .replace('{BOSS_STATUS}', state.currentBattleState ? `${bossName} - ${bossHP}% HP` : 'لا توجد معركة');
 
+    // Append enriched context
+    prompt += `\n\n--- سياق إضافي ---\nالوقت الحالي: ${currentTime}\nفترة اليوم: ${dayPeriodContext}\n${extraContext}`;
+
+    // Debug mode: send full prompt to Telegram for observation
+    const debugMode = await this.settings.get('debug_mode');
+    console.log(`🔍 Debug mode check: debug_mode="${debugMode}", chatId="${chatId}"`);
+    if (debugMode === 'true') {
+      console.log('🔍 Debug mode ON - sending prompt to Telegram');
+      await this.sendDebugMessage(chatId, `Coach Prompt (${type})`, prompt);
+    }
+
     const message = await this.aiComplete(
       [{ role: 'user', content: prompt }],
       0.9,
-      150
+      200
     );
 
     // Log interaction
@@ -865,8 +869,7 @@ export class MetaCoach {
       battle_narrative: '⚔️',
     };
 
-    // Include command footer for all coach messages
-    return `${emojis[type] || '📌'} ${message.trim()}${COMMAND_FOOTER}`;
+    return `${emojis[type] || '📌'} ${message.trim()}`;
   }
 
   private getArabicTimeOfDay(timeOfDay: string): string {
@@ -877,6 +880,181 @@ export class MetaCoach {
       night: 'الليل',
     };
     return map[timeOfDay] || timeOfDay;
+  }
+
+  private getCurrentEgyptTime(): string {
+    return new Date().toLocaleString('ar-EG', {
+      timeZone: 'Africa/Cairo',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: true,
+    });
+  }
+
+  private getDayPeriodContext(currentHour: number): string {
+    if (currentHour >= 5 && currentHour < 9) return 'لسه الصبح بدري - وقت البداية الذهبية';
+    if (currentHour >= 9 && currentHour < 12) return 'الصبح - وقت الإنتاجية العالية';
+    if (currentHour >= 12 && currentHour < 14) return 'نص النهار - وقت check-in';
+    if (currentHour >= 14 && currentHour < 17) return 'بعد الضهر - لسه فيه وقت كتير';
+    if (currentHour >= 17 && currentHour < 20) return 'المغرب قرب - اليوم بيخلص';
+    if (currentHour >= 20 && currentHour < 22) return 'بالليل - آخر فرصة للإنجاز';
+    if (currentHour >= 22) return 'متأخر - وقت ختام اليوم';
+    return 'فجر';
+  }
+
+  /**
+   * Send debug message to Telegram (when debug_mode is on)
+   * Splits long messages to stay under Telegram's 4096 char limit
+   */
+  async sendDebugMessage(chatId: string, label: string, content: string): Promise<void> {
+    try {
+      const botToken = this.botToken || await this.settings.get('telegram_bot_token');
+      if (!botToken) {
+        console.error('Debug: telegram_bot_token not found (neither in constructor nor settings)');
+        return;
+      }
+
+      // Split into chunks of 3800 chars (leaving room for header)
+      const maxChunk = 3800;
+      const header = `🔍 DEBUG - ${label}`;
+
+      if (content.length <= maxChunk) {
+        await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ chat_id: chatId, text: `${header}:\n\n${content}` }),
+        });
+      } else {
+        // Send in parts
+        const parts = Math.ceil(content.length / maxChunk);
+        for (let i = 0; i < parts; i++) {
+          const chunk = content.slice(i * maxChunk, (i + 1) * maxChunk);
+          const partLabel = `${header} (${i + 1}/${parts}):\n\n`;
+          const resp = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ chat_id: chatId, text: `${partLabel}${chunk}` }),
+          });
+          if (!resp.ok) {
+            console.error(`Debug send failed (part ${i + 1}):`, await resp.text());
+          }
+        }
+      }
+    } catch (e) {
+      console.error('Debug message send error:', e);
+    }
+  }
+
+  private async buildExtraContext(chatId: string): Promise<string> {
+    const today = getTodayInEgypt();
+    const parts: string[] = [];
+
+    try {
+      // 1. Report preview (tasks summary)
+      const tasks = await this.db.select('tasks', {
+        filter: { status: op.eq('done') },
+      });
+      const todayTasks = tasks.filter((t: any) => {
+        const completedAt = t.completed_at?.split('T')[0];
+        return completedAt === today;
+      });
+      const failedData = await this.db.select('daily_failures', {
+        filter: { failure_date: op.eq(today) },
+        limit: 1,
+      });
+      const failuresJson = failedData[0]?.failures_json;
+      const parsed = typeof failuresJson === 'string' ? JSON.parse(failuresJson) : failuresJson;
+      const failedCount = parsed?.failed_tasks?.length || 0;
+      const confirmedFailed = (parsed?.failed_tasks || []).filter((f: any) => f.is_pending === false);
+      const totalTracked = todayTasks.length + failedCount;
+      const rate = totalTracked > 0 ? Math.round((todayTasks.length / totalTracked) * 100) : 0;
+      parts.push(`تقرير اليوم: ${todayTasks.length} مكتملة, ${confirmedFailed.length} فاشلة مؤكدة, ${failedCount - confirmedFailed.length} معلقة, نسبة النجاح ${rate}%`);
+
+      // List completed task names
+      if (todayTasks.length > 0) {
+        const taskNames = todayTasks.map((t: any) => extractCleanTaskName(t.content)).join('، ');
+        parts.push(`المهام المكتملة: ${taskNames.slice(0, 500)}`);
+      }
+
+      // List confirmed failed task names
+      if (confirmedFailed.length > 0) {
+        const failedNames = confirmedFailed.map((f: any) => extractCleanTaskName(f.content)).join('، ');
+        parts.push(`المهام الفاشلة: ${failedNames.slice(0, 300)}`);
+      }
+
+      // 2. Journal summary
+      const journalMgr = createJournalManager(this.db);
+      const journalEntries = await journalMgr.getEntriesForDate(today);
+      if (journalEntries.length > 0) {
+        const journalTexts = journalEntries
+          .filter((e: any) => e.message_text)
+          .map((e: any) => e.message_text)
+          .join(' | ');
+        if (journalTexts) {
+          parts.push(`يوميات اليوم: ${journalTexts.slice(0, 500)}`);
+        }
+      }
+
+      // 3. Today's coaching conversation history (limited to reduce subrequests)
+      const interactions = await this.db.select('coaching_interactions', {
+        filter: {
+          chat_id: op.eq(chatId),
+          interaction_date: op.eq(today),
+        },
+        order: 'timestamp.desc',
+        limit: 15,
+      });
+
+      if (interactions.length > 0) {
+        const positive = interactions.filter((i: any) => i.outcome === 'positive').length;
+        const pending = interactions.filter((i: any) => i.outcome === 'pending').length;
+        parts.push(`إحصائيات المحادثات: ${interactions.length} تفاعل (${positive} إيجابي, ${pending} بدون رد)`);
+
+        // Full conversation log (chronological order)
+        let conversationLog = 'سجل محادثات اليوم:\n';
+        const chronological = [...interactions].reverse(); // oldest first
+        for (const i of chronological) {
+          const time = new Date(i.timestamp as string).toLocaleTimeString('en-US', {
+            timeZone: 'Africa/Cairo',
+            hour: '2-digit',
+            minute: '2-digit',
+            hour12: false,
+          });
+          const type = (i as any).metadata?.interventionType || i.interaction_type || '?';
+          if ((i as any).user_input) {
+            conversationLog += `[${time}] المستخدم: ${(i as any).user_input}\n`;
+          }
+          if ((i as any).bot_response) {
+            conversationLog += `[${time}] الكوتش (${type}): ${(i as any).bot_response}\n`;
+          }
+        }
+        parts.push(conversationLog.slice(0, 2000));
+
+        // 4. Report diff since last intervention
+        const lastInteraction = interactions[0]; // most recent (desc order)
+        if (lastInteraction?.timestamp) {
+          const lastTime = lastInteraction.timestamp as string;
+
+          // New completions since last check-in
+          const newCompletions = todayTasks.filter((t: any) => {
+            const completedAt = t.completed_at as string;
+            return completedAt > lastTime;
+          });
+
+          if (newCompletions.length > 0) {
+            const names = newCompletions.map((t: any) => extractCleanTaskName(t.content)).join('، ');
+            parts.push(`جديد من آخر تشيك-ان: ${newCompletions.length} مهمة مكتملة (${names.slice(0, 300)})`);
+          } else {
+            parts.push(`لا يوجد إنجاز جديد من آخر تشيك-ان`);
+          }
+        }
+      }
+
+    } catch (e) {
+      console.error('Error building extra context:', e);
+    }
+
+    return parts.length > 0 ? parts.join('\n') : '';
   }
 
   private async logInteraction(
@@ -905,11 +1083,45 @@ export class MetaCoach {
         limit: 1,
       });
 
-      if (tasks.length === 0) return 24;
+      if (tasks.length === 0) {
+        console.log('⏱️ Inactivity: no completed tasks found → 24h');
+        return 24;
+      }
 
       const lastCompletion = new Date(tasks[0]?.completed_at as string);
-      return (Date.now() - lastCompletion.getTime()) / (1000 * 60 * 60);
-    } catch {
+      const now = new Date();
+
+      // Sleep-aware: exclude sleep period from inactivity count
+      const sleepStartStr = await this.settings.get('coach.sleep_start') || '23:00';
+      const sleepEndStr = await this.settings.get('coach.sleep_end') || '07:00';
+      const sleepStartH = parseInt(sleepStartStr.split(':')[0] || '23', 10);
+      const sleepEndH = parseInt(sleepEndStr.split(':')[0] || '7', 10);
+
+      // Get current hour in Egypt
+      const egyptNow = new Date(now.toLocaleString('en-US', { timeZone: 'Africa/Cairo' }));
+      const currentHour = egyptNow.getHours();
+
+      // Get today's sleep_end as a Date in Egypt time
+      const todayStr = getTodayInEgypt();
+      const sleepEndToday = new Date(`${todayStr}T${sleepEndStr.padStart(5, '0')}:00+02:00`);
+
+      // If last completion was before today's sleep_end, count from sleep_end instead
+      // If last completion is in the future (bad data), also fall back to sleep_end
+      const effectiveStart = (lastCompletion < sleepEndToday || lastCompletion > now)
+        ? sleepEndToday
+        : lastCompletion;
+
+      // If we're currently in sleep period, return 0 (sleep time, not inactive)
+      if (this.isInSleepPeriod(currentHour, sleepStartH, sleepEndH)) {
+        console.log(`⏱️ Inactivity: in sleep period (hour=${currentHour}, sleep=${sleepStartH}-${sleepEndH}) → 0h`);
+        return 0;
+      }
+
+      const hours = Math.max(0, (now.getTime() - effectiveStart.getTime()) / (1000 * 60 * 60));
+      console.log(`⏱️ Inactivity: lastCompletion=${(tasks[0]?.completed_at as string)}, sleepEnd=${sleepEndStr}, effectiveStart=${effectiveStart.toISOString()}, now=${now.toISOString()}, hours=${hours.toFixed(2)}`);
+      return hours;
+    } catch (e) {
+      console.error('⏱️ Inactivity error:', e);
       return 0;
     }
   }
@@ -968,8 +1180,19 @@ export class MetaCoach {
 
   private async getAvailableTasksCount(): Promise<number> {
     try {
-      // This would ideally fetch from Todoist, but for now return a placeholder
-      return 10;
+      const todoistToken = await this.settings.get('todoist_api_token');
+      const projectId = await this.settings.get('todoist_project_id');
+      if (!todoistToken || !projectId) return 0;
+
+      const resp = await fetch(`https://api.todoist.com/api/v1/tasks?project_id=${projectId}`, {
+        headers: { Authorization: `Bearer ${todoistToken}` },
+      });
+      if (resp.ok) {
+        const json = await resp.json() as any;
+        const tasks: any[] = Array.isArray(json) ? json : (json.results || []);
+        return tasks.length;
+      }
+      return 0;
     } catch {
       return 0;
     }
@@ -1041,6 +1264,8 @@ export class MetaCoach {
   ): Promise<string> {
     const state = await this.analyzeUserState(chatId);
     const style = state.coachingStyle;
+    const extraContext = await this.buildExtraContext(chatId);
+    const currentTime = this.getCurrentEgyptTime();
 
     const moodContext = userMood
       ? `المستخدم حالته النفسية: ${userMood === 'high' ? 'طاقة عالية' : userMood === 'low' ? 'تعبان' : 'عادي'}`
@@ -1056,6 +1281,7 @@ export class MetaCoach {
 
 ⚠️ مهم جداً: الرد بالعامية المصرية فقط!
 
+الوقت الحالي: ${currentTime}
 ${moodContext}
 ${turnContext}
 
@@ -1064,23 +1290,132 @@ ${turnContext}
 المهام المكتملة اليوم: ${state.tasksCompletedToday}
 ساعات بدون إنجاز: ${state.hoursInactive.toFixed(1)}
 
-اكتب رد قصير (1-2 جمل):
+${extraContext ? `--- سياق إضافي ---\n${extraContext}` : ''}
+
+اكتب رد قصير (2-3 جمل):
 - تفاعل مع كلامه
 - حفزه يبدأ مهمة
-- ${conversationTurn >= 2 ? 'اقترح يستخدم /starttask' : 'اسأله عن أول مهمة'}
+- ${conversationTurn >= 2 ? 'اقترح يبدأ مهمة' : 'اسأله عن أول مهمة'}
 
 خليها طبيعية ومحفزة.`;
 
     const response = await this.aiComplete(
       [{ role: 'user', content: prompt }],
       0.9,
-      100
+      200
     );
 
-    // On last turn, add command suggestions
-    if (conversationTurn >= 3) {
-      return `💬 ${response.trim()}${COMMAND_FOOTER}`;
-    }
+    return `💬 ${response.trim()}`;
+  }
+
+  /**
+   * Generate response for an extended talk session (احكيلي button)
+   * Supports multi-turn conversation with history
+   */
+  async generateTalkResponse(
+    chatId: string,
+    userMessage: string,
+    conversationHistory: Array<{ role: 'user' | 'coach'; content: string }>,
+    currentTurn: number,
+    totalTurns: number,
+    userMood?: 'high' | 'normal' | 'low'
+  ): Promise<string> {
+    const state = await this.analyzeUserState(chatId);
+    const style = state.coachingStyle;
+    const extraContext = await this.buildExtraContext(chatId);
+    const currentTime = this.getCurrentEgyptTime();
+    const dayPeriod = this.getDayPeriodContext(state.currentHour);
+
+    const turnsLeft = totalTurns - currentTurn;
+    const isWrappingUp = turnsLeft <= 2;
+
+    // Build conversation history for AI
+    const historyText = conversationHistory.length > 0
+      ? conversationHistory.map(h =>
+          h.role === 'user' ? `المستخدم: "${h.content}"` : `الكوتش: "${h.content}"`
+        ).join('\n')
+      : '';
+
+    const moodText = userMood
+      ? `حالة المستخدم: ${userMood === 'high' ? 'طاقة عالية' : userMood === 'low' ? 'تعبان/محبط' : 'عادي'}`
+      : '';
+
+    const phaseInstructions = isWrappingUp
+      ? `أنت في آخر الجلسة. لازم:
+- لخّص النقاط المهمة اللي اتكلمتوا فيها
+- اقترح خطوة عملية واحدة يبدأ بيها دلوقتي
+- شجعه يبدأ فوراً`
+      : currentTurn <= 2
+      ? `أنت في بداية الجلسة. لازم:
+- ابني علاقة وثقة
+- افهم إيه اللي مانعه يشتغل
+- اسمع أكتر ما تتكلم`
+      : `أنت في نص الجلسة. لازم:
+- تفاعل مع اللي قاله
+- ساعده يشوف المشكلة من زاوية تانية
+- اقترح حلول عملية صغيرة`;
+
+    const prompt = `أنت كوتش إنتاجية ${style === 'confrontational' ? 'مواجه بس محترم' : style === 'supportive' ? 'داعم وحنون' : 'متوازن'}.
+أنت في جلسة محادثة مع المستخدم (الدور ${currentTurn} من ${totalTurns}).
+
+⚠️ مهم جداً: الرد بالعامية المصرية فقط! كأنك صاحبه بتتكلم معاه.
+
+الوقت: ${currentTime} - ${dayPeriod}
+${moodText}
+
+--- حالة اليوم ---
+المهام المكتملة: ${state.tasksCompletedToday}
+ساعات بدون إنجاز: ${state.hoursInactive.toFixed(1)}
+${extraContext}
+
+${historyText ? `--- المحادثة السابقة ---\n${historyText}` : ''}
+
+--- الرسالة الحالية ---
+المستخدم: "${userMessage}"
+
+--- تعليمات ---
+${phaseInstructions}
+
+اكتب رد طبيعي (2-4 جمل). خليك إنسان مش روبوت. تفاعل مع مشاعره وكلامه.`;
+
+    const response = await this.aiComplete(
+      [{ role: 'user', content: prompt }],
+      0.85,
+      250
+    );
+
+    return `💬 ${response.trim()}`;
+  }
+
+  /**
+   * Generate opening message for a talk session
+   */
+  async generateTalkOpener(chatId: string, durationMinutes: number): Promise<string> {
+    const state = await this.analyzeUserState(chatId);
+    const style = state.coachingStyle;
+    const currentTime = this.getCurrentEgyptTime();
+
+    const prompt = `أنت كوتش إنتاجية ${style === 'confrontational' ? 'مواجه' : style === 'supportive' ? 'داعم' : 'متوازن'}.
+المستخدم اختار يتكلم معاك ${durationMinutes} دقيقة.
+
+⚠️ مهم جداً: الرد بالعامية المصرية فقط!
+
+الوقت: ${currentTime}
+المهام المكتملة اليوم: ${state.tasksCompletedToday}
+ساعات بدون إنجاز: ${state.hoursInactive.toFixed(1)}
+
+ابدأ محادثة ودية (2-3 جمل):
+- رحب بيه
+- اسأله عن حاله وإيه اللي شاغله
+- خليها طبيعية كأنك صاحبه
+
+ممنوع تذكر المدة أو عدد الرسائل.`;
+
+    const response = await this.aiComplete(
+      [{ role: 'user', content: prompt }],
+      0.9,
+      150
+    );
 
     return `💬 ${response.trim()}`;
   }
@@ -1101,7 +1436,7 @@ ${turnContext}
       message = '📌 تمام، لما تكون جاهز تبدأ، قولي.';
     }
 
-    return `${message}${COMMAND_FOOTER}`;
+    return message;
   }
 
   /**
@@ -1126,7 +1461,8 @@ ${turnContext}
 export function createMetaCoach(
   db: SupabaseClient,
   settings: SettingsManager,
-  aiCompleteFunc: (messages: AIMessage[], temp?: number, maxTokens?: number) => Promise<string>
+  aiCompleteFunc: (messages: AIMessage[], temp?: number, maxTokens?: number) => Promise<string>,
+  botToken?: string
 ): MetaCoach {
-  return new MetaCoach(db, settings, aiCompleteFunc);
+  return new MetaCoach(db, settings, aiCompleteFunc, botToken);
 }

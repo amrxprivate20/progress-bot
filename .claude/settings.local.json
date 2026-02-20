@@ -27,7 +27,15 @@
       "Bash(gh workflow:*)",
       "Bash(node:*)",
       "Bash(chmod:*)",
-      "Bash(./check-autofail.sh:*)"
+      "Bash(./check-autofail.sh:*)",
+      "WebSearch",
+      "WebFetch(domain:developer.todoist.com)",
+      "WebFetch(domain:api.todoist.com)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "WebFetch(domain:doist.github.io)",
+      "Bash(npm view:*)",
+      "WebFetch(domain:forums.getdrafts.com)"
     ]
   }
 }

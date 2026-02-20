@@ -21,6 +21,7 @@ export interface FailedTask {
   category?: string;             // Task category/label
   duration_minutes?: number;     // Expected duration
   is_manual?: boolean;           // Whether this was manually logged (not from Todoist sync)
+  is_pending?: boolean;          // true = not yet failed (still open in Todoist), false/undefined = confirmed failed
 }
 
 /**
@@ -56,17 +57,16 @@ export async function syncFailuresForDate(
 
   const failedTasks: FailedTask[] = [];
 
-  // Filter for failed recurring tasks
-  const { start, end } = getEgyptDayBoundaries(date);
+  // Filter for failed tasks (both recurring AND non-recurring)
 
   for (const task of todoistTasks) {
-    // Skip if not recurring or already completed
-    if (!task.due?.is_recurring) continue;
+    // Skip if already completed
     if (completedTaskIds.has(task.id)) continue;
 
-    // Check due date falls on this day
-    const dueDate = new Date(task.due.date);
-    if (dueDate < start || dueDate > end) continue;
+    // Check due date is today or overdue (string comparison to avoid timezone issues)
+    if (!task.due?.date) continue;
+    const dueDate = task.due.date.split('T')[0];
+    if (!dueDate || dueDate > date) continue; // Skip future tasks
 
     // Check priority threshold (Todoist: 1=lowest, 4=highest)
     // Our threshold: 2 means P1-P2 only (priority 3-4 in Todoist)
@@ -90,7 +90,7 @@ export async function syncFailuresForDate(
       }
     }
     
-    // Add to failed tasks
+    // Add to failed tasks (marked as pending — autofail will clear this flag)
     const failedTask: FailedTask = {
       id: task.id,
       content: task.content,
@@ -100,6 +100,7 @@ export async function syncFailuresForDate(
       is_subtask: isSubtask,
       description: task.description || undefined,
       category: task.labels?.[0] || undefined,
+      is_pending: true,
     };
     
     failedTasks.push(failedTask);
@@ -353,7 +354,7 @@ export async function addManualFailure(
     return;
   }
 
-  // Add as manual failure
+  // Add as manual failure (confirmed failed, not pending)
   const failedTask: FailedTask = {
     id: task.id,
     content: task.content,
@@ -363,7 +364,8 @@ export async function addManualFailure(
     is_subtask: task.is_subtask || false,
     category: task.category,
     duration_minutes: task.duration_minutes,
-    is_manual: true, // Mark as manual
+    is_manual: true,
+    is_pending: false,
   };
 
   dailyFailures.failed_tasks.push(failedTask);

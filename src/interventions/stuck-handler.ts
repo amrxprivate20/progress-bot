@@ -516,7 +516,7 @@ export class StuckHandler {
   ): Promise<TaskRecommendation | null> {
     try {
       // Fetch active tasks from Todoist
-      let url = 'https://api.todoist.com/rest/v3/tasks';
+      let url = 'https://api.todoist.com/api/v1/tasks';
       if (projectId) {
         url += `?project_id=${projectId.trim()}`;
       }
@@ -530,7 +530,8 @@ export class StuckHandler {
         return null;
       }
 
-      const tasks = await response.json() as Array<{
+      const tasksJson = await response.json() as any;
+      const tasks = (Array.isArray(tasksJson) ? tasksJson : (tasksJson.results || [])) as Array<{
         id: string;
         content: string;
         priority: number;
@@ -821,7 +822,7 @@ export class StuckHandler {
   ): Promise<string> {
     try {
       // Fetch tasks
-      let url = 'https://api.todoist.com/rest/v3/tasks';
+      let url = 'https://api.todoist.com/api/v1/tasks';
       if (projectId) {
         url += `?project_id=${projectId.trim()}`;
       }
@@ -834,7 +835,8 @@ export class StuckHandler {
         return '❌ فشل في جلب المهام من Todoist';
       }
 
-      const tasks = await response.json() as Array<{
+      const tasksJson2 = await response.json() as any;
+      const tasks = (Array.isArray(tasksJson2) ? tasksJson2 : (tasksJson2.results || [])) as Array<{
         id: string;
         content: string;
         priority: number;

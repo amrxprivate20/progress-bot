@@ -49,7 +49,8 @@ interface TodoistTask {
   labels?: string[];
   due?: {
     date: string;
-    is_recurring: boolean;
+    is_recurring?: boolean;  // Webhook format
+    recurring?: boolean;     // REST API v1 format
     string: string;
   };
 }
@@ -92,7 +93,7 @@ async function syncParentTaskFromTodoist(
     }
 
     const response = await fetch(
-      `https://api.todoist.com/rest/v3/tasks/${parentId}`,
+      `https://api.todoist.com/api/v1/tasks/${parentId}`,
       {
         headers: {
           'Authorization': `Bearer ${todoistToken}`,
@@ -211,7 +212,7 @@ export async function completeParentInTodoistIfAllDone(
 
     // ✅ Check parent task status in Todoist - if already done for today, skip
     const parentResponse = await fetch(
-      `https://api.todoist.com/rest/v3/tasks/${parentTodoistId}`,
+      `https://api.todoist.com/api/v1/tasks/${parentTodoistId}`,
       { headers: { 'Authorization': `Bearer ${todoistToken.trim()}` } }
     );
 
@@ -225,7 +226,7 @@ export async function completeParentInTodoistIfAllDone(
       content: string;
       is_completed: boolean;
       priority: number;
-      due?: { date: string; is_recurring?: boolean } | null;
+      due?: { date: string; is_recurring?: boolean; recurring?: boolean } | null;
     };
 
     // Get priority threshold from settings (used for subtask filtering, not parent skip)
@@ -251,7 +252,7 @@ export async function completeParentInTodoistIfAllDone(
     try {
       // Get all subtasks of this parent from Todoist
       const subtasksResponse = await fetch(
-        `https://api.todoist.com/rest/v3/tasks?parent_id=${parentTodoistId}`,
+        `https://api.todoist.com/api/v1/tasks?parent_id=${parentTodoistId}`,
         { headers: { 'Authorization': `Bearer ${todoistToken.trim()}` } }
       );
 
@@ -260,12 +261,13 @@ export async function completeParentInTodoistIfAllDone(
         return;
       }
 
-      const todoistSubtasks = await subtasksResponse.json() as Array<{
+      const subtasksJson = await subtasksResponse.json() as any;
+      const todoistSubtasks = (Array.isArray(subtasksJson) ? subtasksJson : (subtasksJson.results || [])) as Array<{
         id: string;
         content: string;
         is_completed: boolean;
         priority: number; // Todoist: 1=lowest, 4=highest
-        due?: { date: string; is_recurring?: boolean } | null;
+        due?: { date: string; is_recurring?: boolean; recurring?: boolean } | null;
       }>;
       console.log(`📋 Found ${todoistSubtasks.length} total subtasks in Todoist`);
 
@@ -355,7 +357,7 @@ export async function completeParentInTodoistIfAllDone(
 
         // Complete parent in Todoist to postpone it
         await fetch(
-          `https://api.todoist.com/rest/v3/tasks/${parentTodoistId}/close`,
+          `https://api.todoist.com/api/v1/tasks/${parentTodoistId}/close`,
           {
             method: 'POST',
             headers: { 'Authorization': `Bearer ${todoistToken.trim()}` },
@@ -398,7 +400,7 @@ export async function completeParentInTodoistIfAllDone(
       }
 
       const completeResponse = await fetch(
-        `https://api.todoist.com/rest/v3/tasks/${parentTodoistId}/close`,
+        `https://api.todoist.com/api/v1/tasks/${parentTodoistId}/close`,
         {
           method: 'POST',
           headers: { 'Authorization': `Bearer ${todoistToken.trim()}` },
@@ -586,7 +588,7 @@ export async function handleTodoistWebhook(
   console.log('⏰ UTC completion timestamp:', completedAt.toISOString());
   console.log('📅 Egypt date:', egyptDate);
 
-  const isRecurring = event.event_data.due?.is_recurring || false;
+  const isRecurring = event.event_data.due?.is_recurring || event.event_data.due?.recurring || false;
   const isSubtask = !!event.event_data.parent_id;
 
   console.log('📋 Task info:', {
@@ -801,7 +803,7 @@ export async function handleTodoistWebhook(
       if (todoistToken) {
         try {
           const parentResponse = await fetch(
-            `https://api.todoist.com/rest/v3/tasks/${event.event_data.parent_id}`,
+            `https://api.todoist.com/api/v1/tasks/${event.event_data.parent_id}`,
             { headers: { 'Authorization': `Bearer ${todoistToken.trim()}` } }
           );
 
@@ -1384,36 +1386,49 @@ export async function syncFailuresFromTodoist(
     console.log('   End:', end.toISOString());
     console.log('🎯 Priority threshold: P1-P' + priorityThreshold);
 
-    const response = await fetch(
-      `https://api.todoist.com/rest/v3/tasks?project_id=${projectId}`,
-      {
-        headers: {
-          Authorization: `Bearer ${todoistToken}`,
-        },
+    // Fetch ALL tasks with pagination (API v1 returns paginated results)
+    const allTasks: TodoistTask[] = [];
+    let cursor: string | null = null;
+
+    do {
+      let url = `https://api.todoist.com/api/v1/tasks?project_id=${projectId}`;
+      if (cursor) url += `&cursor=${cursor}`;
+
+      const response = await fetch(url, {
+        headers: { Authorization: `Bearer ${todoistToken}` },
+      });
+
+      if (!response.ok) {
+        throw new Error(`Todoist API error: ${response.status}`);
       }
-    );
 
-    if (!response.ok) {
-      throw new Error(`Todoist API error: ${response.status}`);
-    }
+      const json = await response.json() as any;
+      const pageTasks = Array.isArray(json) ? json : (json.results || []);
+      allTasks.push(...pageTasks);
+      cursor = json.next_cursor || null;
+    } while (cursor);
 
-    const allTasks: TodoistTask[] = await response.json();
-    console.log(`📋 Found ${allTasks.length} tasks in Todoist project`);
+    console.log(`📋 Found ${allTasks.length} tasks in Todoist project (all pages)`);
 
-    const recurringTasks = allTasks.filter((task: any) => {
-      if (!task.due?.is_recurring) return false;
-      const dueDate = new Date(task.due.date);
-      return dueDate >= start && dueDate <= end;
+    // Get ALL tasks due today or overdue (recurring AND non-recurring)
+    const tasksDueToday = allTasks.filter((task: any) => {
+      if (!task.due?.date) return false;
+      const dueDate = task.due.date.split('T')[0]; // Compare date strings only
+      return dueDate && dueDate <= egyptDate; // Due today or overdue
     });
 
-    console.log(`🔄 Found ${recurringTasks.length} recurring tasks due on ${egyptDate}`);
+    console.log(`📋 Found ${tasksDueToday.length} tasks due on or before ${egyptDate}`);
 
-    const completedTasks = await db.select<Task>('tasks', {});
+    // Fetch completed tasks with date filter to avoid PostgREST 1000-row limit
+    const completedTasks = await db.select<Task>('tasks', {
+      filter: { completed_at: `gte.${start.toISOString()}` },
+      limit: 5000,
+    });
     const completedTaskIds = new Set(
       completedTasks
         .filter(t => {
-          const taskDate = getEgyptDateString(new Date(t.completed_at));
-          return taskDate === egyptDate && t.status === 'done' && t.task_id;
+          const completedAt = new Date(t.completed_at);
+          return completedAt <= end && t.status === 'done' && t.task_id;
         })
         .map(t => t.task_id.split('_')[0])
         .filter((id): id is string => id !== undefined)
@@ -1424,7 +1439,7 @@ export async function syncFailuresFromTodoist(
     await syncFailuresForDate(
       db,
       egyptDate,
-      recurringTasks,
+      tasksDueToday,
       completedTaskIds,
       priorityThreshold,
       allTasks  // Pass all tasks for parent lookup
@@ -1580,21 +1595,33 @@ export async function sendTaskNotification(
 
     console.log(`📋 Found ${completedSubtasks.length} completed subtasks`);
 
-    // ✅ STEP 3: Get failed subtasks from JSON (by PARENT NAME)
+    // ✅ STEP 3: Get failed subtasks from JSON (by PARENT NAME or PARENT ID)
     try {
       const dailyFailures = await getDailyFailures(db, egyptDate);
-      
+
       if (dailyFailures) {
         failedSubtasks = dailyFailures.failed_tasks.filter(f => {
-          if (!f.is_subtask || !f.parent_content) return false;
-          
-          const failedParentCleanName = extractCleanTaskName(f.parent_content);
-          return failedParentCleanName === mainTaskCleanName;
+          if (!f.is_subtask) return false;
+
+          // Method 1: Match by parent_content name
+          if (f.parent_content) {
+            const failedParentCleanName = extractCleanTaskName(f.parent_content);
+            if (failedParentCleanName === mainTaskCleanName) return true;
+          }
+
+          // Method 2: Match by parent_id
+          if (f.parent_id && parentTodoistId) {
+            const failedParentBase = f.parent_id.split('_')[0];
+            const mainParentBase = parentTodoistId.split('_')[0];
+            if (failedParentBase === mainParentBase) return true;
+          }
+
+          return false;
         });
-        
+
         console.log(`📊 Found ${failedSubtasks.length} failed subtasks`);
       }
-      
+
     } catch (error) {
       console.error('❌ Error fetching failed subtasks:', error);
     }
@@ -1606,13 +1633,13 @@ export async function sendTaskNotification(
 
     // Determine symbol:
     // - ✅ = all done (parent + all subtasks)
-    // - ⏳ = parent pending, some subtasks done
-    // - ⚠️ = mixed (some done, some failed)
+    // - ⏳ = parent pending (not completed yet, regardless of subtask status)
+    // - ⚠️ = parent completed but mixed subtask results
     // - ❌ = all failed
     let symbol: string;
     if (isParentPending) {
-      // Parent not completed yet - show progress
-      symbol = failedSubtasks.length > 0 ? '⚠️' : '⏳';
+      // Parent not completed yet — always ⏳ regardless of subtask status
+      symbol = '⏳';
     } else if (totalSubtasks === 0) {
       symbol = isParentCompleted ? '✅' : '❌';
     } else {
@@ -1665,7 +1692,8 @@ export async function sendTaskNotification(
 
       failedSubtasks.forEach(sub => {
         const subClean = extractCleanTaskName(sub.content);
-        message += `\n  ✗ ${subClean}`;
+        const subSymbol = sub.is_pending !== false ? '…' : '✗'; // … = pending, ✗ = confirmed failed
+        message += `\n  ${subSymbol} ${subClean}`;
       });
     }
 
