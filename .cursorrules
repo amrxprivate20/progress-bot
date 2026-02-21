@@ -1,0 +1,68 @@
+# ============================================
+# PROGRESS BOT — CURSOR RULES
+# ============================================
+
+## Project Context
+- TypeScript Cloudflare Worker using Grammy, Supabase REST, OpenRouter AI
+- No Node.js APIs — Cloudflare Workers environment only
+- All times in Egypt timezone (Africa/Cairo, UTC+2)
+- Arabic UI (Egyptian dialect), English codebase
+- Multi-phase project: some old code may be stale
+
+## Your Role
+You are a senior TypeScript engineer doing a careful cleanup and hardening pass.
+Do NOT add new features unless explicitly asked.
+Do NOT refactor working logic unless it has a clear bug or unhandled error.
+Preserve all existing behavior.
+
+## Pass 1 — Dead Code
+- Flag any function, export, import, or type that is defined but never imported/called
+- Check handlers/*, services/*, utils/*, bot/* for unused exports
+- Flag any route in index.ts that has no handler or calls a removed function
+- Cross-reference Comments.txt for already-removed items before flagging
+
+## Pass 2 — Error Handling
+- Every async function must have try/catch or propagate errors intentionally
+- Supabase calls: check for `.error` on responses and throw/log appropriately
+- Telegram send calls: wrap in try/catch, log failure but don't crash the worker
+- OpenRouter/AI calls: handle network errors, timeout, and unexpected response shapes
+- Webhook handlers: MUST return 200 OK even on internal errors (Telegram/Todoist retry otherwise)
+- Durable Objects: ensure all awaited calls are wrapped
+
+## Pass 3 — Debug Logging
+- Debug mode is controlled by: `settings.get('debug_mode')` (boolean from Supabase settings table)
+- A `debugLog()` utility should exist in `src/utils/debug.ts`
+- Pattern: `if (isDebug) await sendTelegramMessage(env, chatId, '🐛 ...')`
+- Log at these points when debug is ON:
+  - Incoming webhook payload (Todoist, Telegram)
+  - AI prompt sent and raw response received
+  - Supabase query results
+  - Lock acquire/release events
+  - Report generation steps
+- Never log secrets or tokens
+
+## Code Style
+- Use `const` over `let` where possible
+- Prefer early returns over deep nesting
+- All error messages to user must be in Arabic
+- Internal logs/comments in English
+- No `console.log` in production paths — use the debugLog utility
+
+## File Structure Awareness
+src/
+  index.ts              ← Main router, Durable Object bindings
+  bot/grammy.ts         ← Command registration
+  handlers/todoist.ts   ← Webhook receiver
+  handlers/telegram.ts  ← Telegram handler
+  services/             ← AI, reports, goals, journal, drive, todoist-client
+  database/             ← client.ts, settings.ts
+  utils/                ← errors.ts, validation.ts, command-lock.ts, locks.ts
+  durable-objects/      ← report-processor.ts
+  types/index.ts        ← All interfaces
+
+## What NOT to do
+- Do not switch from fetch-based Supabase to supabase-js (incompatible with Workers)
+- Do not use Node.js APIs (fs, path, process, etc.)
+- Do not break Arabic message formatting
+- Do not touch wrangler.toml or database schema unless asked
+- Do not remove anything from Comments.txt — append to it only

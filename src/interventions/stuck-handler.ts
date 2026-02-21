@@ -22,6 +22,7 @@ import {
   createCoachingContextBuilder,
 } from '../coach/coaching-context';
 import { getTodayInEgypt } from '../utils/timezone';
+import { extractCleanTaskName } from '../utils/task-parser';
 
 // ============================================
 // Types
@@ -856,11 +857,12 @@ export class StuckHandler {
         return '❌ لا توجد مهام بديلة متاحة';
       }
 
-      // Build task list
+      // Build task list (display: strip [30m], [5 pages] etc. from names)
       let message = `📋 *المهام البديلة:*\n\n`;
       todayTasks.forEach((t, i) => {
         const priorityStars = '⭐'.repeat(5 - t.priority);
-        message += `${i + 1}. ${t.content} ${priorityStars}\n`;
+        const displayName = extractCleanTaskName(t.content).trim();
+        message += `${i + 1}. ${displayName} ${priorityStars}\n`;
       });
       message += `\n🔢 أرسل رقم المهمة للبدء:`;
 
@@ -922,7 +924,7 @@ export class StuckHandler {
     return {
       success: true,
       task: { id: selectedTask.id, content: selectedTask.content },
-      message: `✅ تم اختيار: ${selectedTask.content}`,
+      message: `✅ تم اختيار: ${extractCleanTaskName(selectedTask.content).trim()}`,
     };
   }
 

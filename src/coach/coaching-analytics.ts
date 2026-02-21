@@ -95,8 +95,9 @@ export class CoachingAnalytics {
 
   /**
    * Get active pending check-in for a chat
+   * When the check-in has expired and no reply was received, calls onExpiredNoResponse(chatId) if provided, then expires the check-in.
    */
-  async getActiveCheckin(chatId: string): Promise<PendingCheckin | null> {
+  async getActiveCheckin(chatId: string, options?: { onExpiredNoResponse?: (chatId: string) => Promise<void> }): Promise<PendingCheckin | null> {
     try {
       const results = await this.db.select('pending_checkins', {
         filter: {
@@ -115,6 +116,14 @@ export class CoachingAnalytics {
 
       // Check if expired
       if (now > expiresAt) {
+        const noReply = (r.messages_received || 0) === 0;
+        if (noReply && options?.onExpiredNoResponse) {
+          try {
+            await options.onExpiredNoResponse(r.chat_id);
+          } catch (err) {
+            console.error('onExpiredNoResponse error:', err);
+          }
+        }
         await this.expireCheckin(r.id);
         return null;
       }

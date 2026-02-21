@@ -297,17 +297,20 @@ export interface RetryConfig {
 // Constants
 // ============================================
 
+// Reserved for future use — not currently imported
 export const TASK_STATUS = {
   DONE: 'done',
   FAILED: 'failed',
   PARTIAL: 'partial',
 } as const;
 
+// Reserved for future use — not currently imported
 export const STREAK_TYPE = {
   DAILY: 'daily',
   WEEKLY: 'weekly',
 } as const;
 
+// Reserved for future use — not currently imported
 export const CONVERSATION_STATE_TYPE = {
   QA_FLOW: 'qa_flow',
   REPORT_CONFIRMATION: 'report_confirmation',
@@ -316,6 +319,7 @@ export const CONVERSATION_STATE_TYPE = {
   LOG_FAILURE: 'log_failure',
 } as const;
 
+// Reserved for future use — not currently imported
 export const TELEGRAM_THREAD = {
   ARABIC: '149',
   ENGLISH: '155',
@@ -326,6 +330,7 @@ export const TELEGRAM_THREAD = {
 // Type Guards
 // ============================================
 
+// Reserved for future use — not currently imported
 export function isTask(obj: any): obj is Task {
   return (
     typeof obj === 'object' &&
@@ -336,6 +341,7 @@ export function isTask(obj: any): obj is Task {
   );
 }
 
+// Reserved for future use — not currently imported
 export function isTodoistWebhookEvent(obj: any): obj is TodoistWebhookEvent {
   return (
     typeof obj === 'object' &&

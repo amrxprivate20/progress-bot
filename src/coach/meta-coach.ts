@@ -22,7 +22,9 @@ import { getTodayInEgypt } from '../utils/timezone';
 import { createCoachingContextBuilder } from './coaching-context';
 import { createTaskSessionManager, TaskSession } from '../services/task-session-manager';
 import { createJournalManager } from '../services/journal';
+import { createReportGenerator } from '../services/report-generator';
 import { extractCleanTaskName } from '../utils/task-parser';
+import { splitMessage } from '../utils/split-message';
 
 // ============================================
 // Types
@@ -816,14 +818,7 @@ export class MetaCoach {
       );
     }
 
-    // Gather enriched context
-    const extraContext = await this.buildExtraContext(chatId);
-
-    // Get current time in Egypt
-    const currentTime = this.getCurrentEgyptTime();
-    const dayPeriodContext = this.getDayPeriodContext(state.currentHour);
-
-    // Replace placeholders
+    // Replace placeholders in template
     let prompt = promptTemplate
       .replace('{HOURS_INACTIVE}', state.hoursInactive.toFixed(1))
       .replace('{TASKS_COMPLETED}', state.tasksCompletedToday.toString())
@@ -837,8 +832,10 @@ export class MetaCoach {
       .replace('{BOSS_HP}', bossHP.toString())
       .replace('{BOSS_STATUS}', state.currentBattleState ? `${bossName} - ${bossHP}% HP` : 'لا توجد معركة');
 
-    // Append enriched context
-    prompt += `\n\n--- سياق إضافي ---\nالوقت الحالي: ${currentTime}\nفترة اليوم: ${dayPeriodContext}\n${extraContext}`;
+    // Append lean intervention context (report preview, activity, interventions history, interactive session)
+    const currentTime = this.getCurrentEgyptTime();
+    const interventionContext = await this.buildInterventionContext(chatId);
+    prompt += `\n\nالوقت الحالي: ${currentTime}\n\n${interventionContext}`;
 
     // Debug mode: send full prompt to Telegram for observation
     const debugMode = await this.settings.get('debug_mode');
@@ -904,7 +901,7 @@ export class MetaCoach {
 
   /**
    * Send debug message to Telegram (when debug_mode is on)
-   * Splits long messages to stay under Telegram's 4096 char limit
+   * Splits long messages via splitMessage to stay under Telegram's 4096 char limit
    */
   async sendDebugMessage(chatId: string, label: string, content: string): Promise<void> {
     try {
@@ -914,30 +911,25 @@ export class MetaCoach {
         return;
       }
 
-      // Split into chunks of 3800 chars (leaving room for header)
-      const maxChunk = 3800;
-      const header = `🔍 DEBUG - ${label}`;
+      const fullText = `🔍 DEBUG - ${label}:\n\n${content}`;
+      const chunks = splitMessage(fullText);
+      const totalChunks = chunks.length;
 
-      if (content.length <= maxChunk) {
-        await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
+      for (let i = 0; i < chunks.length; i++) {
+        let chunk = chunks[i] || '';
+        if (totalChunks > 1) {
+          chunk = `📄 [${i + 1}/${totalChunks}]\n\n${chunk}`;
+        }
+        const resp = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ chat_id: chatId, text: `${header}:\n\n${content}` }),
+          body: JSON.stringify({ chat_id: chatId, text: chunk }),
         });
-      } else {
-        // Send in parts
-        const parts = Math.ceil(content.length / maxChunk);
-        for (let i = 0; i < parts; i++) {
-          const chunk = content.slice(i * maxChunk, (i + 1) * maxChunk);
-          const partLabel = `${header} (${i + 1}/${parts}):\n\n`;
-          const resp = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ chat_id: chatId, text: `${partLabel}${chunk}` }),
-          });
-          if (!resp.ok) {
-            console.error(`Debug send failed (part ${i + 1}):`, await resp.text());
-          }
+        if (!resp.ok) {
+          console.error(`Debug send failed (chunk ${i + 1}/${totalChunks}):`, await resp.text());
+        }
+        if (totalChunks > 1 && i < chunks.length - 1) {
+          await new Promise(resolve => setTimeout(resolve, 300));
         }
       }
     } catch (e) {
@@ -945,116 +937,140 @@ export class MetaCoach {
     }
   }
 
-  private async buildExtraContext(chatId: string): Promise<string> {
+  /**
+   * Build lean intervention context: report preview, activity since last intervention,
+   * today's interventions history (short), and interactive session script if any.
+   */
+  private async buildInterventionContext(chatId: string): Promise<string> {
     const today = getTodayInEgypt();
-    const parts: string[] = [];
+    const sections: string[] = [];
 
     try {
-      // 1. Report preview (tasks summary)
-      const tasks = await this.db.select('tasks', {
-        filter: { status: op.eq('done') },
-      });
-      const todayTasks = tasks.filter((t: any) => {
-        const completedAt = t.completed_at?.split('T')[0];
-        return completedAt === today;
-      });
-      const failedData = await this.db.select('daily_failures', {
-        filter: { failure_date: op.eq(today) },
-        limit: 1,
-      });
-      const failuresJson = failedData[0]?.failures_json;
-      const parsed = typeof failuresJson === 'string' ? JSON.parse(failuresJson) : failuresJson;
-      const failedCount = parsed?.failed_tasks?.length || 0;
-      const confirmedFailed = (parsed?.failed_tasks || []).filter((f: any) => f.is_pending === false);
-      const totalTracked = todayTasks.length + failedCount;
-      const rate = totalTracked > 0 ? Math.round((todayTasks.length / totalTracked) * 100) : 0;
-      parts.push(`تقرير اليوم: ${todayTasks.length} مكتملة, ${confirmedFailed.length} فاشلة مؤكدة, ${failedCount - confirmedFailed.length} معلقة, نسبة النجاح ${rate}%`);
+      const reportGen = createReportGenerator(this.db, this.settings);
 
-      // List completed task names
-      if (todayTasks.length > 0) {
-        const taskNames = todayTasks.map((t: any) => extractCleanTaskName(t.content)).join('، ');
-        parts.push(`المهام المكتملة: ${taskNames.slice(0, 500)}`);
-      }
+      // 1. REPORT PREVIEW — same data as /preview
+      const preview = await reportGen.generatePreview(today);
+      sections.push('## تقرير اليوم (معاينة)\n' + preview.formatted_text);
 
-      // List confirmed failed task names
-      if (confirmedFailed.length > 0) {
-        const failedNames = confirmedFailed.map((f: any) => extractCleanTaskName(f.content)).join('، ');
-        parts.push(`المهام الفاشلة: ${failedNames.slice(0, 300)}`);
-      }
-
-      // 2. Journal summary
-      const journalMgr = createJournalManager(this.db);
-      const journalEntries = await journalMgr.getEntriesForDate(today);
-      if (journalEntries.length > 0) {
-        const journalTexts = journalEntries
-          .filter((e: any) => e.message_text)
-          .map((e: any) => e.message_text)
-          .join(' | ');
-        if (journalTexts) {
-          parts.push(`يوميات اليوم: ${journalTexts.slice(0, 500)}`);
-        }
-      }
-
-      // 3. Today's coaching conversation history (limited to reduce subrequests)
-      const interactions = await this.db.select('coaching_interactions', {
+      // 2. ACTIVITY LOG — since last meta_coach intervention
+      const metaInterventions = await this.db.select('coaching_interactions', {
         filter: {
           chat_id: op.eq(chatId),
           interaction_date: op.eq(today),
+          interaction_type: op.eq('meta_coach'),
         },
         order: 'timestamp.desc',
-        limit: 15,
+        limit: 1,
       });
+      const lastInterventionTime = metaInterventions[0]?.timestamp as string | undefined;
 
-      if (interactions.length > 0) {
-        const positive = interactions.filter((i: any) => i.outcome === 'positive').length;
-        const pending = interactions.filter((i: any) => i.outcome === 'pending').length;
-        parts.push(`إحصائيات المحادثات: ${interactions.length} تفاعل (${positive} إيجابي, ${pending} بدون رد)`);
+      const tasks = await this.db.select('tasks', { filter: { status: op.eq('done') } });
+      const todayTasks = tasks.filter((t: any) => (t.completed_at as string)?.split('T')[0] === today);
 
-        // Full conversation log (chronological order)
-        let conversationLog = 'سجل محادثات اليوم:\n';
-        const chronological = [...interactions].reverse(); // oldest first
-        for (const i of chronological) {
-          const time = new Date(i.timestamp as string).toLocaleTimeString('en-US', {
-            timeZone: 'Africa/Cairo',
-            hour: '2-digit',
-            minute: '2-digit',
-            hour12: false,
-          });
-          const type = (i as any).metadata?.interventionType || i.interaction_type || '?';
-          if ((i as any).user_input) {
-            conversationLog += `[${time}] المستخدم: ${(i as any).user_input}\n`;
-          }
-          if ((i as any).bot_response) {
-            conversationLog += `[${time}] الكوتش (${type}): ${(i as any).bot_response}\n`;
-          }
+      let activityLines: string[] = [];
+      if (lastInterventionTime) {
+        const since = todayTasks.filter((t: any) => (t.completed_at as string) > lastInterventionTime);
+        if (since.length > 0) {
+          const names = since.map((t: any) => extractCleanTaskName(t.content)).join('، ');
+          const totalMin = since.reduce((sum: number, t: any) => sum + (t.duration_minutes || 0), 0);
+          activityLines.push(`مهام مكتملة منذ آخر تدخل: ${since.length} (${names.slice(0, 300)}${names.length > 300 ? '...' : ''})`);
+          if (totalMin > 0) activityLines.push(`وقت مضاف: ${totalMin} دقيقة`);
+        } else {
+          activityLines.push('لا إنجاز جديد منذ آخر تدخل.');
         }
-        parts.push(conversationLog.slice(0, 2000));
-
-        // 4. Report diff since last intervention
-        const lastInteraction = interactions[0]; // most recent (desc order)
-        if (lastInteraction?.timestamp) {
-          const lastTime = lastInteraction.timestamp as string;
-
-          // New completions since last check-in
-          const newCompletions = todayTasks.filter((t: any) => {
-            const completedAt = t.completed_at as string;
-            return completedAt > lastTime;
-          });
-
-          if (newCompletions.length > 0) {
-            const names = newCompletions.map((t: any) => extractCleanTaskName(t.content)).join('، ');
-            parts.push(`جديد من آخر تشيك-ان: ${newCompletions.length} مهمة مكتملة (${names.slice(0, 300)})`);
-          } else {
-            parts.push(`لا يوجد إنجاز جديد من آخر تشيك-ان`);
-          }
+      } else {
+        if (todayTasks.length > 0) {
+          const names = todayTasks.map((t: any) => extractCleanTaskName(t.content)).join('، ');
+          const totalMin = todayTasks.reduce((sum: number, t: any) => sum + (t.duration_minutes || 0), 0);
+          activityLines.push(`مهام مكتملة اليوم: ${todayTasks.length} (${names.slice(0, 300)}${names.length > 300 ? '...' : ''})`);
+          if (totalMin > 0) activityLines.push(`إجمالي الوقت: ${totalMin} دقيقة`);
+        } else {
+          activityLines.push('لا مهام مكتملة اليوم بعد.');
         }
       }
 
+      const sessionMgr = createTaskSessionManager(this.db);
+      const activeSession = await sessionMgr.getActiveSession(chatId);
+      if (activeSession) {
+        activityLines.push(`جلسة مهمة نشطة: ${extractCleanTaskName(activeSession.taskContent)} (${activeSession.totalTimeWorked} دقيقة)`);
+      }
+
+      sections.push('## سجل النشاط منذ آخر تدخل\n' + activityLines.join('\n'));
+
+      // 3. INTERVENTIONS HISTORY — meta_coach only; short coach line + user reply or "لم يرد المستخدم"
+      const allMeta = await this.db.select('coaching_interactions', {
+        filter: {
+          chat_id: op.eq(chatId),
+          interaction_date: op.eq(today),
+          interaction_type: op.eq('meta_coach'),
+        },
+        order: 'timestamp.asc',
+        limit: 20,
+      });
+
+      if (allMeta.length > 0) {
+        const historyLines: string[] = [];
+        for (const i of allMeta) {
+          const r = i as any;
+          const coachShort = (r.bot_response || '').replace(/\n/g, ' ').trim().slice(0, 120);
+          const userPart = r.user_input ? `المستخدم: ${(r.user_input as string).slice(0, 150)}` : 'لم يرد المستخدم';
+          historyLines.push(`الكوتش: ${coachShort}\n${userPart}`);
+        }
+        sections.push('## سجل تدخلات اليوم\n' + historyLines.join('\n---\n'));
+      } else {
+        sections.push('## سجل تدخلات اليوم\nلا تدخلات سابقة اليوم.');
+      }
+
+      // 4. INTERACTIVE SESSION — احكيلي script if any
+      const talkSessions = await this.db.select('coaching_interactions', {
+        filter: {
+          chat_id: op.eq(chatId),
+          interaction_date: op.eq(today),
+          interaction_type: op.eq('coach_talk'),
+        },
+        order: 'timestamp.desc',
+        limit: 1,
+      });
+
+      if (talkSessions.length > 0) {
+        const script = (talkSessions[0] as any).metadata?.script as Array<{ role: string; content: string }> | undefined;
+        if (script && script.length > 0) {
+          const scriptText = script
+            .map((m: { role: string; content: string }) => (m.role === 'user' ? `المستخدم: ${m.content}` : `الكوتش: ${m.content}`))
+            .join('\n');
+          sections.push('## جلسة احكيلي اليوم\n' + scriptText);
+        } else {
+          sections.push('## جلسة احكيلي اليوم\nلا سجل نصي.');
+        }
+      } else {
+        sections.push('## جلسة احكيلي اليوم\nلا توجد جلسة احكيلي مسجلة اليوم.');
+      }
+
+    } catch (e) {
+      console.error('Error building intervention context:', e);
+    }
+
+    return sections.length > 0 ? sections.join('\n\n') : '';
+  }
+
+  /** @deprecated Use buildInterventionContext for interventions. Kept for generateConversationResponse / generateTalkResponse. */
+  private async buildExtraContext(_chatId: string): Promise<string> {
+    const today = getTodayInEgypt();
+    const parts: string[] = [];
+    try {
+      const reportGen = createReportGenerator(this.db, this.settings);
+      const preview = await reportGen.generatePreview(today);
+      parts.push(`تقرير اليوم: ${preview.completed_tasks} مكتملة، ${preview.failed_tasks} فاشلة، نسبة النجاح ${preview.success_rate}%`);
+      const journalMgr = createJournalManager(this.db);
+      const journalEntries = await journalMgr.getEntriesForDate(today);
+      if (journalEntries.length > 0) {
+        const journalTexts = journalEntries.filter((e: any) => e.message_text).map((e: any) => e.message_text).join(' | ');
+        if (journalTexts) parts.push(`يوميات: ${journalTexts.slice(0, 400)}`);
+      }
     } catch (e) {
       console.error('Error building extra context:', e);
     }
-
-    return parts.length > 0 ? parts.join('\n') : '';
+    return parts.join('\n');
   }
 
   private async logInteraction(
@@ -1195,56 +1211,6 @@ export class MetaCoach {
       return 0;
     } catch {
       return 0;
-    }
-  }
-
-  private async getDeferralsToday(chatId: string): Promise<number> {
-    try {
-      const today = getTodayInEgypt();
-      const logs = await this.db.select('intervention_logs', {
-        filter: { chat_id: op.eq(chatId) },
-        order: 'created_at.desc',
-        limit: 20,
-      });
-
-      return logs.filter((log: any) => {
-        const createdAt = log.created_at?.split('T')[0];
-        const data = log.data as any;
-        return createdAt === today && (data?.type === 'stuck_deferred' || data?.deferred);
-      }).length;
-    } catch {
-      return 0;
-    }
-  }
-
-  private async getAvoidancePatternNames(chatId: string): Promise<string[]> {
-    try {
-      const logs = await this.db.select('intervention_logs', {
-        filter: {
-          chat_id: op.eq(chatId),
-          intervention_type: op.eq('stuck'),
-        },
-        order: 'created_at.desc',
-        limit: 30,
-      });
-
-      const taskCounts = new Map<string, number>();
-      for (const log of logs) {
-        const data = log.data as any;
-        if (data?.type === 'stuck_deferred' || data?.deferred) {
-          const taskName = data.taskDescription || data.taskContent || '';
-          if (taskName) {
-            taskCounts.set(taskName, (taskCounts.get(taskName) || 0) + 1);
-          }
-        }
-      }
-
-      return Array.from(taskCounts.entries())
-        .filter(([_, count]) => count >= 2)
-        .sort((a, b) => b[1] - a[1])
-        .map(([task]) => task);
-    } catch {
-      return [];
     }
   }
 

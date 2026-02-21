@@ -278,44 +278,6 @@ export const SETTINGS_KEYS = {
 } as const;
 
 /**
- * Helper function to get commonly used settings in one call
- */
-export async function getCommonSettings(manager: SettingsManager) {
-  const keys = [
-    SETTINGS_KEYS.TELEGRAM_BOT_TOKEN,
-    SETTINGS_KEYS.TELEGRAM_CHAT_ID,
-    SETTINGS_KEYS.TODOIST_API_TOKEN,
-    SETTINGS_KEYS.TODOIST_PROJECT_ID,
-    SETTINGS_KEYS.AI_MODEL,
-    SETTINGS_KEYS.TIMEZONE,
-  ];
-
-  return await manager.getMultiple(keys);
-}
-
-/**
- * Validate that all required settings are present
- */
-export async function validateRequiredSettings(
-  manager: SettingsManager
-): Promise<{ valid: boolean; missing: string[] }> {
-  const required = [
-    SETTINGS_KEYS.TELEGRAM_BOT_TOKEN,
-    SETTINGS_KEYS.TELEGRAM_CHAT_ID,
-    SETTINGS_KEYS.TODOIST_API_TOKEN,
-    SETTINGS_KEYS.TODOIST_PROJECT_ID,
-  ];
-
-  const settings = await manager.getMultiple(required);
-  const missing = required.filter(key => !settings[key] || settings[key] === 'YOUR_TOKEN_HERE');
-
-  return {
-    valid: missing.length === 0,
-    missing,
-  };
-}
-
-/**
  * AI Model Tiers
  * - high: For critical analysis tasks (unified report analysis, memory optimization)
  * - low: For simpler tasks (planning, coaching, battle mode, etc.)

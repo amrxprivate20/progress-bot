@@ -1045,38 +1045,29 @@ for (const task of data.tasks) {
 
       const totalSubs = completedSubs.length + failedSubs.length;
 
-      // Determine status symbol
-      // ✅ = fully completed | ⚠️ = partial (some subs failed/pending) | ❌ = confirmed failed | ⏳ = pending/in-progress
-      let symbol: string;
-      const mainCompleted = task.status === 'done';
+      // Determine status symbol - parent complete ONLY when ALL subtasks done in DB (never use task.status from Todoist)
+      const allSubsCompleteInDb = totalSubs > 0 && failedSubs.length === 0;
       const mainFailed = failedTasksByName.get(cleanName);
-      const mainIsPending = mainFailed?.is_pending !== false; // true or undefined = pending
 
+      let symbol: string;
       if (totalSubs === 0) {
-        // No subtasks - use task status
-        if (mainCompleted) {
+        if (task.status === 'done') {
           symbol = '✅';
-        } else if (mainFailed && !mainIsPending) {
-          symbol = '❌'; // Confirmed failed (autofail or manual)
+        } else if (mainFailed && mainFailed.is_pending === false) {
+          symbol = '❌';
         } else {
-          symbol = '⏳'; // Not yet completed, still pending
+          symbol = '⏳';
         }
       } else {
-        // Has subtasks
-        const allSubsComplete = failedSubs.length === 0;
         const confirmedFailedSubs = failedSubs.filter(s => s.is_pending === false);
-
-        if (mainCompleted && allSubsComplete) {
-          symbol = '✅'; // Parent done + all subs done
-        } else if (!mainCompleted && mainIsPending) {
-          // Parent NOT completed yet — still pending regardless of subtask progress
-          symbol = '⏳';
+        if (allSubsCompleteInDb) {
+          symbol = '✅';
         } else if (confirmedFailedSubs.length > 0 && completedSubs.length > 0) {
-          symbol = '⚠️'; // Mix of completed and confirmed failed subs
+          symbol = '⚠️';
         } else if (confirmedFailedSubs.length > 0 && completedSubs.length === 0) {
-          symbol = '❌'; // All subs confirmed failed
+          symbol = '❌';
         } else {
-          symbol = mainCompleted ? '✅' : '⏳';
+          symbol = '⏳';
         }
       }
       
@@ -1095,6 +1086,7 @@ for (const task of data.tasks) {
       }
       
       // Add streak info (only for completed recurring tasks)
+      const mainCompleted = totalSubs === 0 ? task.status === 'done' : allSubsCompleteInDb;
       if (mainCompleted) {
         const streak = data.streaks.find(s => s.task_name === task.content);
         if (streak && streak.current_streak > 1) {

@@ -199,15 +199,6 @@ function parseQuantity(text: string): { value: number; unit: string } | null {
 }
 
 /**
- * Parse origin task from content
- * Format: "Subtask (origin: Main Task)"
- */
-export function parseOriginTask(content: string): string | undefined {
-  const match = content.match(/\(origin:\s*([^)]+)\)/i);
-  return match && match[1] ? match[1].trim() : undefined;
-}
-
-/**
  * Extract task name without metadata
  * Removes brackets, origin markers, and categories
  */

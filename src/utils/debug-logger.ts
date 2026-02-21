@@ -5,6 +5,7 @@
 // ============================================
 
 import type { SettingsManager } from '../database/settings';
+import { splitMessage } from './split-message';
 
 export type AIPromptType = 'coach' | 'planning' | 'analysis' | 'celebration' | 'general';
 
@@ -218,7 +219,7 @@ export class DebugLogger {
 
     try {
       // Split long messages into chunks
-      const chunks = this.splitMessage(text);
+      const chunks = splitMessage(text);
       const totalChunks = chunks.length;
 
       for (let i = 0; i < chunks.length; i++) {
@@ -261,48 +262,6 @@ export class DebugLogger {
     }
   }
 
-  /**
-   * Split message into chunks for Telegram (max 4096 chars)
-   * Handles long lines and tries to split at natural boundaries
-   */
-  private splitMessage(text: string): string[] {
-    const MAX_LENGTH = 4000; // Leave some margin for chunk indicators
-
-    if (text.length <= MAX_LENGTH) {
-      return [text];
-    }
-
-    const chunks: string[] = [];
-    let remaining = text;
-
-    while (remaining.length > 0) {
-      if (remaining.length <= MAX_LENGTH) {
-        chunks.push(remaining);
-        break;
-      }
-
-      // Find a good split point
-      let splitAt = MAX_LENGTH;
-
-      // Try to split at a newline
-      const lastNewline = remaining.lastIndexOf('\n', MAX_LENGTH);
-      if (lastNewline > MAX_LENGTH * 0.5) {
-        splitAt = lastNewline + 1;
-      } else {
-        // Try to split at a space
-        const lastSpace = remaining.lastIndexOf(' ', MAX_LENGTH);
-        if (lastSpace > MAX_LENGTH * 0.5) {
-          splitAt = lastSpace + 1;
-        }
-        // Otherwise just split at MAX_LENGTH
-      }
-
-      chunks.push(remaining.substring(0, splitAt));
-      remaining = remaining.substring(splitAt);
-    }
-
-    return chunks;
-  }
 }
 
 /**

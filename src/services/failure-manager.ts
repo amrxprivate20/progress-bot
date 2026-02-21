@@ -5,7 +5,6 @@
 // CLEAN VERSION - No duplicates
 
 import { SupabaseClient, op } from '../database/client';
-import { getEgyptDayBoundaries } from '../utils/timezone';
 
 /**
  * Failed task structure in JSON

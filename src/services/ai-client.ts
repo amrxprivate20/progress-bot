@@ -979,24 +979,9 @@ setDebugLogger(logger: any): void {
   formattedReport?: string;
 }): Promise<UnifiedAIResponse> {
   const prompt = this.buildUnifiedPrompt(context);
-
-  // ✅ IMPROVED: Always log the unified prompt with proper error handling
   const logger = this.debugLogger;
-  if (logger?.isEnabled()) {
-    try {
-      console.log('🐛 Debug mode: Logging unified prompt...');
-      await logger.log(
-        `📋 **UNIFIED PROMPT** (${context.reportDate})\n\n` +
-        `**Length:** ${prompt.length} characters\n\n` +
-        '```\n' + prompt + '\n```',
-        '📋'
-      );
-      console.log('✅ Unified prompt logged successfully');
-    } catch (logError) {
-      console.error('❌ Failed to log unified prompt:', logError);
-      // Continue execution even if logging fails
-    }
-  }
+
+  // Prompt is logged once via logAIRequest when complete() is called below
 
   const messages: AIMessage[] = [
     {

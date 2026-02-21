@@ -14,6 +14,8 @@ import { ReportProcessor } from './durable-objects/report-processor';
 import { createReportGenerator } from './services/report-generator';
 import { getTodayInEgypt } from './utils/timezone';
 import { createAutofailService, PreparedAutofailData } from './services/autofail-service';
+import { debugLog } from './utils/debug';
+import { isUserInTaskOrReportFlow } from './utils/tasking-state';
 
 // Extended Env with Durable Object binding
 interface EnvWithDO extends Env {
@@ -30,17 +32,16 @@ export default {
    * Configure in wrangler.toml with crons trigger for meta-coach interventions
    */
   async scheduled(_event: ScheduledEvent, env: EnvWithDO, _ctx: ExecutionContext): Promise<void> {
-    console.log('🕐 Scheduled task triggered at:', new Date().toISOString());
-
     const db = createSupabaseClient(env);
     const settings = new SettingsManager(db);
+    await debugLog(env, settings, 'Scheduled task triggered at: ' + new Date().toISOString());
 
     // Get Egypt time
     const egyptTime = new Date().toLocaleString('en-US', { timeZone: 'Africa/Cairo' });
     const egyptDate = new Date(egyptTime);
     const egyptHour = egyptDate.getHours();
     const egyptMinute = egyptDate.getMinutes();
-    console.log(`🕐 Egypt time: ${egyptHour}:${egyptMinute.toString().padStart(2, '0')}`);
+    await debugLog(env, settings, `Egypt time: ${egyptHour}:${egyptMinute.toString().padStart(2, '0')}`);
 
     // ============================================
     // AUTO-PAUSE: Check for stale active tasks (4+ hours)
@@ -85,7 +86,7 @@ export default {
             }),
           });
 
-          console.log('✅ Auto-paused stale task:', pausedSession.taskContent);
+          await debugLog(env, settings, 'Auto-paused stale task: ' + pausedSession.taskContent);
         }
       }
     } catch (autoPauseError) {
@@ -106,14 +107,14 @@ export default {
       const botToken = env.TELEGRAM_BOT_TOKEN;
 
       if (!apiKey || !chatId) {
-        console.log('⏭️ Meta-coach skipped: missing API key or chat ID');
+        await debugLog(env, settings, 'Meta-coach skipped: missing API key or chat ID');
         return;
       }
 
       // Check if coach is enabled
       const coachMode = await settings.get('coach.auto_mode');
       if (coachMode === 'off') {
-        console.log('⏭️ Meta-coach skipped: auto_mode is off');
+        await debugLog(env, settings, 'Meta-coach skipped: auto_mode is off');
         return;
       }
 
@@ -133,7 +134,14 @@ export default {
         : (currentMinutes >= sleepStartMinutes && currentMinutes < sleepEndMinutes);
 
       if (isInSleep) {
-        console.log('⏭️ Meta-coach skipped: sleep period');
+        await debugLog(env, settings, 'Meta-coach skipped: sleep period');
+        return;
+      }
+
+      // Guard: block only when user has active task session or report Q&A in progress (DB state)
+      const blockResult = await isUserInTaskOrReportFlow(db, chatId);
+      if (blockResult.blocked) {
+        await debugLog(env, settings, `🐛 Coach send blocked: ${blockResult.reason ?? 'unknown'}`);
         return;
       }
 
@@ -144,18 +152,22 @@ export default {
 
       // Analyze user state
       const userState = await metaCoach.analyzeUserState(chatId);
-      console.log(`📊 User state: hour=${userState.currentHour}, ${userState.hoursInactive.toFixed(1)}h inactive, ${userState.tasksCompletedToday} tasks, ${userState.timeOfDay}, last intervention ${userState.minutesSinceLastIntervention.toFixed(0)}min ago (hour ${userState.lastInterventionHour})`);
+      await debugLog(env, settings, `User state: hour=${userState.currentHour}, ${userState.hoursInactive.toFixed(1)}h inactive, ${userState.tasksCompletedToday} tasks, ${userState.timeOfDay}, last intervention ${userState.minutesSinceLastIntervention.toFixed(0)}min ago (hour ${userState.lastInterventionHour})`);
 
       // Decide which intervention to use (rate limiting is handled inside decideIntervention)
       const decision = await metaCoach.decideIntervention(userState);
 
       if (decision.type !== 'none') {
-        console.log(`✅ Meta-coach intervention: ${decision.type} (level ${decision.escalationLevel})`);
+        await debugLog(env, settings, `Meta-coach intervention: ${decision.type} (level ${decision.escalationLevel})`);
 
         // Execute the intervention
-        const message = await metaCoach.executeIntervention(chatId, decision);
+        let message = await metaCoach.executeIntervention(chatId, decision);
 
         if (message) {
+          // Check-in window from settings (minutes) for "متبقي X دقائق للرد"
+          const windowMinutes = Math.max(1, parseInt(await settings.get('coach.checkin_window_minutes') || '10', 10) || 10);
+          message = `${message}\n\nمتبقي ${windowMinutes} دقائق للرد 🕐`;
+
           // Send via Telegram API with interactive keyboard
           const coachKeyboard = {
             inline_keyboard: [
@@ -204,14 +216,14 @@ export default {
           }
 
           if (sendOk) {
-            console.log('✅ Meta-coach message sent successfully');
+            await debugLog(env, settings, 'Meta-coach message sent successfully');
 
             // Create pending check-in so user text responses are handled interactively
             try {
               const { createCoachingAnalytics } = await import('./coach/coaching-analytics');
               const coachingAnalytics = createCoachingAnalytics(db);
-              await coachingAnalytics.createPendingCheckin(chatId, decision.type, 10);
-              console.log('✅ Pending check-in created');
+              await coachingAnalytics.createPendingCheckin(chatId, decision.type, windowMinutes);
+              await debugLog(env, settings, 'Pending check-in created');
             } catch (checkinError) {
               console.error('⚠️ Failed to create pending check-in:', checkinError);
             }
@@ -220,7 +232,7 @@ export default {
           }
         }
       } else {
-        console.log(`⏭️ No intervention needed (decision: ${decision.type})`);
+        await debugLog(env, settings, `No intervention needed (decision: ${decision.type})`);
       }
     } catch (error) {
       console.error('❌ Scheduled task error:', error);
@@ -233,8 +245,6 @@ export default {
   async fetch(request: Request, env: EnvWithDO, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
     const path = url.pathname;
-    
-    console.log(`📥 ${request.method} ${path}`);
 
     const envValidation = validateEnvironment(env);
     if (!envValidation.valid) {
@@ -254,6 +264,14 @@ export default {
     const db = createSupabaseClient(env);
     const settings = new SettingsManager(db);
 
+    // Skip debug log for high-frequency paths (GET /, /health, widgets) to avoid spam
+    const isNoisyPath =
+      request.method === 'GET' &&
+      (path === '/' || path === '/health' || path.startsWith('/api/widget/'));
+    if (!isNoisyPath) {
+      await debugLog(env, settings, `${request.method} ${path}`);
+    }
+
     try {
       // ============================================
       // HEALTH CHECK
@@ -268,7 +286,7 @@ export default {
       if (path === '/webhook/todoist' && request.method === 'POST') {
         return asyncHandler(async () => {
           const rawBody = await request.text();
-          console.log('📥 Raw Todoist webhook:', rawBody);
+          await debugLog(env, settings, 'Raw Todoist webhook', { body: rawBody });
           const payload = JSON.parse(rawBody);
           
           return await handleTodoistWebhookEndpoint(payload, env, db, settings);
@@ -279,21 +297,21 @@ export default {
       // TELEGRAM WEBHOOK
       // ============================================
       if (path === '/telegram/webhook' && request.method === 'POST') {
-  console.log('📨 Telegram webhook received');
-  
+  await debugLog(env, settings, 'Telegram webhook received');
+
   // ✅ ADD THIS: Idempotency check to prevent duplicate processing
   try {
     const update = await request.clone().json() as { update_id: number };
     const updateId = update.update_id;
     const idempotencyKey = `webhook_${updateId}`;
-    
+
     // Check if we already processed this update
     const existing = await db.select('conversation_state', {
       filter: { chat_id: op.eq(idempotencyKey) }
     });
-    
+
     if (existing.length > 0) {
-      console.log(`⏭️ Skipping duplicate webhook update ${updateId}`);
+      await debugLog(env, settings, `Skipping duplicate webhook update ${updateId}`);
       return new Response('OK', { status: 200 });
     }
     
@@ -320,11 +338,12 @@ export default {
 
         try {
           const response = await handler(request);
-          console.log('✅ Telegram webhook handled successfully');
+          await debugLog(env, settings, 'Telegram webhook handled successfully');
           return response;
         } catch (webhookError) {
           console.error('❌ Telegram webhook error:', webhookError);
-          throw webhookError;
+          // Always return 200 to prevent Telegram from retrying
+          return new Response('OK', { status: 200 });
         }
       }
 
@@ -427,7 +446,7 @@ export default {
       // ============================================
       // 404 NOT FOUND
       // ============================================
-      console.log(`❌ Route not found: ${path}`);
+      await debugLog(env, settings, `Route not found: ${path}`);
       return new Response(
         JSON.stringify({ success: false, error: 'Not found', path }),
         { status: 404, headers: { 'Content-Type': 'application/json' } }
@@ -488,23 +507,23 @@ async function handleTodoistWebhookEndpoint(
   settings: SettingsManager
 ): Promise<Response> {
   try {
-    const result = await handleTodoistWebhook(payload, db, settings);
+    const result = await handleTodoistWebhook(payload, env, db, settings);
 
     if (result.task) {
       const botToken = env.TELEGRAM_BOT_TOKEN;
       const chatId = env.TELEGRAM_CHAT_ID;
 
-      console.log('📤 Sending notification to:', chatId);
+      await debugLog(env, settings, 'Sending notification to: ' + chatId);
 
       try {
         // FIXED: Added db as 4th parameter
         await sendTaskNotification(result.task, chatId, botToken, db);
-        console.log('✅ Notification sent successfully');
+        await debugLog(env, settings, 'Notification sent successfully');
 
         // ✅ Trigger dopamine hit and battle mode AFTER notification
         const { triggerOnTaskComplete } = await import('./handlers/todoist');
         await triggerOnTaskComplete(result.task, chatId, botToken, db, settings);
-        console.log('✅ Coach features triggered');
+        await debugLog(env, settings, 'Coach features triggered');
       } catch (err) {
         console.error('❌ Notification/coach error:', err);
       }
@@ -512,14 +531,21 @@ async function handleTodoistWebhookEndpoint(
 
     return new Response(
       JSON.stringify({
-        success: true,
+        success: result.success,
         message: result.message,
       }),
       { status: 200, headers: { 'Content-Type': 'application/json' } }
     );
   } catch (error) {
     console.error('Todoist webhook error:', error);
-    throw error;
+    // Always return 200 to prevent Todoist from retrying (Telegram/Todoist retry otherwise)
+    return new Response(
+      JSON.stringify({
+        success: false,
+        message: error instanceof Error ? error.message : 'Internal error',
+      }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } }
+    );
   }
 }
 

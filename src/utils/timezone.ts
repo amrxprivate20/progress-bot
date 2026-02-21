@@ -42,14 +42,6 @@ export function utcToEgypt(utcDate: Date): Date {
 }
 
 /**
- * Convert Egypt Date to UTC Date
- * FIXED: Subtracts 2 hours from Egypt
- */
-export function egyptToUtc(egyptDate: Date): Date {
-  return new Date(egyptDate.getTime() - EGYPT_OFFSET_MS);
-}
-
-/**
  * Get date string in Egypt timezone from UTC Date
  * FIXED: Properly converts to Egypt date
  */
@@ -93,13 +85,6 @@ export function getEgyptDayBoundaries(dateString: string): { start: Date; end: D
     start: startUTC,
     end: endUTC,
   };
-}
-
-/**
- * Check if two dates are the same day in Egypt timezone
- */
-export function isSameDayInEgypt(date1: Date, date2: Date): boolean {
-  return getEgyptDateString(date1) === getEgyptDateString(date2);
 }
 
 /**
@@ -189,39 +174,4 @@ function formatArabicNumber(
   } else {
     return `${num} ${singularLarge}`;
   }
-}
-
-/**
- * Calculate days between two dates in Egypt timezone
- */
-export function daysBetweenInEgypt(date1: Date, date2: Date): number {
-  const egypt1 = getEgyptDateString(date1);
-  const egypt2 = getEgyptDateString(date2);
-  
-  const d1 = new Date(egypt1);
-  const d2 = new Date(egypt2);
-  
-  const diffMs = d2.getTime() - d1.getTime();
-  return Math.floor(diffMs / (1000 * 60 * 60 * 24));
-}
-
-/**
- * TEST FUNCTION - Verify timezone works correctly
- */
-export function testTimezone() {
-  // Test case: 1:16 AM Egypt = 23:16 UTC previous day
-  const testUTC = new Date('2026-01-07T23:16:00Z'); // UTC
-  
-  console.log('Test: 1:16 AM Egypt (23:16 UTC Jan 7)');
-  console.log('UTC Date:', testUTC.toISOString());
-  console.log('Egypt Date String:', getEgyptDateString(testUTC));
-  console.log('Should be: 2026-01-08');
-  
-  const boundaries = getEgyptDayBoundaries('2026-01-08');
-  console.log('Jan 8 boundaries:');
-  console.log('  Start UTC:', boundaries.start.toISOString());
-  console.log('  End UTC:', boundaries.end.toISOString());
-  console.log('  Test time is after start:', testUTC >= boundaries.start);
-  console.log('  Test time is before end:', testUTC <= boundaries.end);
-  console.log('  Test time is IN Jan 8:', testUTC >= boundaries.start && testUTC <= boundaries.end);
 }

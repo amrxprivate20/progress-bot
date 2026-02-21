@@ -37,6 +37,8 @@ import { createAutofailService, PreparedAutofailData } from '../services/autofai
 // New Interactive Features
 import { createCelebrationsService } from '../services/celebrations';
 import { createCoachingAnalytics } from '../coach/coaching-analytics';
+import { createCoachingContextBuilder } from '../coach/coaching-context';
+import { isUserInTaskOrReportFlow } from '../utils/tasking-state';
 import {
   createCoachCheckInKeyboard,
   createMoodKeyboard,
@@ -2054,7 +2056,8 @@ bot.command(['starttask', 'start_task'], async (ctx) => {
     if (matchedTasks.length === 1) {
      // Exactly one match - show with inline keyboard
      const task = matchedTasks[0]!;
-     const message = `📋 **هل تريد تتبع هذه المهمة؟**\n\n📌 ${task.content}`;
+     const { extractCleanTaskName } = await import('../utils/task-parser');
+     const message = `📋 **هل تريد تتبع هذه المهمة؟**\n\n📌 ${extractCleanTaskName(task.content).trim()}`;
 
       // Store for potential "new task" flow
       const selectKey = `task_select_${chatId}`;
@@ -2444,16 +2447,18 @@ bot.command(['completetask', 'complete_task'], async (ctx) => {
             ctx.settings,
             todoistTaskId,
             startDate,
-            undefined // No parent hint for /completetask - this is typically a main task
+            undefined, // No parent hint for /completetask - this is typically a main task
+            { TELEGRAM_BOT_TOKEN: ctx.env.TELEGRAM_BOT_TOKEN }
           );
 
            const { createPostCompletionKeyboard } = await import('../utils/keyboards');
+           const completionSuffix = '\n\n💪 جاهز للمهمة الجاية؟ ابدأ بـ /starttask';
            await ctx.reply(
               `✅ **تم إكمال المهمة!**\n\n` +
               `📌 ${updatedTaskName}\n` +
               `⏱️ المدة: ${durationMinutes} دقيقة${sessionCount > 1 ? ` (${sessionCount} جلسات)` : ''}\n` +
               `${manualQuantity ? `📊 الكمية: ${manualQuantity} ${manualQuantityUnit}\n` : ''}` +
-              `✓ تم التحديث في Todoist`,
+              `✓ تم التحديث في Todoist` + completionSuffix,
               { parse_mode: 'Markdown', reply_markup: createPostCompletionKeyboard() }
            );
 
@@ -2483,10 +2488,11 @@ bot.command(['completetask', 'complete_task'], async (ctx) => {
       } catch (todoistError) {
         console.error('Todoist error:', todoistError);
         const { createPostCompletionKeyboard: postKb } = await import('../utils/keyboards');
+        const completionSuffix = '\n\n💪 جاهز للمهمة الجاية؟ ابدأ بـ /starttask';
         await ctx.reply(
           `✅ **تم إكمال المهمة محلياً!**\n\n` +
           `📌 ${updatedTaskName}\n` +
-          `⚠️ فشل التحديث في Todoist`,
+          `⚠️ فشل التحديث في Todoist` + completionSuffix,
           { parse_mode: 'Markdown', reply_markup: postKb() }
         );
       }
@@ -2514,18 +2520,20 @@ bot.command(['completetask', 'complete_task'], async (ctx) => {
           });
 
           const { createPostCompletionKeyboard: pcKb1 } = await import('../utils/keyboards');
+          const completionSuffix = '\n\n💪 جاهز للمهمة الجاية؟ ابدأ بـ /starttask';
           await ctx.reply(
             `✅ **تم إكمال المهمة!**\n\n` +
             `📌 ${updatedTaskName}\n` +
-            `✓ تم الإنشاء في Todoist`,
+            `✓ تم الإنشاء في Todoist` + completionSuffix,
             { parse_mode: 'Markdown', reply_markup: pcKb1() }
           );
         }
       } catch (e) {
         const { createPostCompletionKeyboard: pcKb2 } = await import('../utils/keyboards');
+        const completionSuffix = '\n\n💪 جاهز للمهمة الجاية؟ ابدأ بـ /starttask';
         await ctx.reply(
           `✅ **تم إكمال المهمة محلياً!**\n\n` +
-          `📌 ${updatedTaskName}`,
+          `📌 ${updatedTaskName}` + completionSuffix,
           { parse_mode: 'Markdown', reply_markup: pcKb2() }
         );
       }
@@ -2542,9 +2550,10 @@ bot.command(['completetask', 'complete_task'], async (ctx) => {
       });
 
       const { createPostCompletionKeyboard: pcKb3 } = await import('../utils/keyboards');
+      const completionSuffix = '\n\n💪 جاهز للمهمة الجاية؟ ابدأ بـ /starttask';
       await ctx.reply(
         `✅ **تم إكمال المهمة!**\n\n` +
-        `📌 ${updatedTaskName}`,
+        `📌 ${updatedTaskName}` + completionSuffix,
         { parse_mode: 'Markdown', reply_markup: pcKb3() }
       );
     }
@@ -2724,11 +2733,13 @@ bot.command(['completetask', 'complete_task'], async (ctx) => {
 
       // Multiple paused sessions - show inline keyboard with each session
       const { InlineKeyboard } = await import('grammy');
+      const { extractCleanTaskName } = await import('../utils/task-parser');
       const keyboard = new InlineKeyboard();
       pausedSessions.forEach((s) => {
-        const displayName = s.taskContent.length > 30
-          ? s.taskContent.substring(0, 27) + '...'
-          : s.taskContent;
+        const cleaned = extractCleanTaskName(s.taskContent).trim();
+        const displayName = cleaned.length > 30
+          ? cleaned.substring(0, 27) + '...'
+          : cleaned;
         keyboard.text(`▶️ ${displayName} (${formatTime(s.totalTimeWorked)})`, `session:resume:${s.id}`).row();
       });
       keyboard.text('🎯 مهمة جديدة', 'cmd:starttask');
@@ -3201,6 +3212,16 @@ async function processTaskFailure(
     dailyFailures.last_sync = new Date().toISOString();
     await upsertDailyFailures(ctx.db, dailyFailures);
 
+    // Trigger battle mode boss healing (fire-and-forget)
+    const chatId = ctx.chat?.id.toString();
+    const botToken = ctx.env?.TELEGRAM_BOT_TOKEN || (await ctx.settings.get('telegram_bot_token'));
+    if (chatId && botToken) {
+      const { triggerOnTaskFailed } = await import('../handlers/todoist');
+      triggerOnTaskFailed(cleanName, chatId, botToken, ctx.db, ctx.settings, 1).catch((e) =>
+        console.error('triggerOnTaskFailed error:', e)
+      );
+    }
+
     const isRecurring = due?.is_recurring || due?.recurring || false;
 
     // If we have a Todoist task, complete it (this postpones recurring, removes non-recurring)
@@ -3241,20 +3262,21 @@ async function processTaskFailure(
           }
         );
 
+        const failureSuffix = '\n\n💪 جاهز للمهمة الجاية؟ ابدأ بـ /starttask';
         if (closeResponse.ok) {
           if (isRecurring) {
             await ctx.reply(
               `✅ تم تسجيل الفشل:\n` +
               `❌ ${taskName}\n\n` +
               `🔄 تم تأجيل المهمة للموعد التالي في Todoist\n` +
-              `💾 تم تسجيل الفشل في قاعدة البيانات`
+              `💾 تم تسجيل الفشل في قاعدة البيانات` + failureSuffix
             );
           } else {
             await ctx.reply(
               `✅ تم تسجيل الفشل:\n` +
               `❌ ${taskName}\n\n` +
               `🗑️ تم إزالة المهمة من Todoist\n` +
-              `💾 تم تسجيل الفشل في قاعدة البيانات`
+              `💾 تم تسجيل الفشل في قاعدة البيانات` + failureSuffix
             );
           }
         } else {
@@ -3263,22 +3285,24 @@ async function processTaskFailure(
             `✅ تم تسجيل الفشل:\n` +
             `❌ ${taskName}\n\n` +
             `⚠️ فشل إغلاق المهمة في Todoist\n` +
-            `💾 تم تسجيل الفشل في قاعدة البيانات`
+            `💾 تم تسجيل الفشل في قاعدة البيانات` + failureSuffix
           );
         }
       } else {
+        const failureSuffixElse = '\n\n💪 جاهز للمهمة الجاية؟ ابدأ بـ /starttask';
         await ctx.reply(
           `✅ تم تسجيل الفشل:\n` +
           `❌ ${taskName}\n\n` +
-          `ستظهر في تقرير اليوم`
+          `ستظهر في تقرير اليوم` + failureSuffixElse
         );
       }
     } else {
       // No Todoist task (manual entry)
+      const failureSuffixManual = '\n\n💪 جاهز للمهمة الجاية؟ ابدأ بـ /starttask';
       await ctx.reply(
         `✅ تم تسجيل الفشل:\n` +
         `❌ ${taskName}\n\n` +
-        `ستظهر في تقرير اليوم`
+        `ستظهر في تقرير اليوم` + failureSuffixManual
       );
     }
 
@@ -3679,6 +3703,14 @@ bot.command('coach_check', async (ctx) => {
     console.log('✅ coach_check passed idempotency');
 
     const chatId = ctx.chat?.id.toString() || '';
+
+    // Guard: block only when user has active task session or report Q&A in progress (DB state)
+    const blockResult = await isUserInTaskOrReportFlow(ctx.db, chatId);
+    if (blockResult.blocked) {
+      console.log(`🐛 Coach send blocked: ${blockResult.reason ?? 'unknown'}`);
+      await ctx.reply('⚠️ انت حالياً في مهمة أو تحليل تقرير. خلّص الأول وبعدين نفّذ /coach_check');
+      return;
+    }
     const botToken = ctx.env.TELEGRAM_BOT_TOKEN;
     const apiKey = await ctx.settings.get('openrouter_api_key');
     if (!apiKey) {
@@ -3760,8 +3792,12 @@ bot.command('coach_check', async (ctx) => {
 
         if (decision.type !== 'none') {
           console.log(`🔍 Executing intervention: ${decision.type}`);
-          const message = await metaCoach.executeIntervention(chatId, decision);
+          let message = await metaCoach.executeIntervention(chatId, decision);
           console.log(`🔍 Intervention generated, length=${message.length}`);
+
+          // Check-in window from settings (minutes) for "متبقي X دقائق للرد"
+          const windowMinutes = Math.max(1, parseInt(await ctx.settings.get('coach.checkin_window_minutes') || '10', 10) || 10);
+          message = `${message}\n\nمتبقي ${windowMinutes} دقائق للرد 🕐`;
 
           // Send with interactive keyboard
           const coachKeyboard = {
@@ -3785,7 +3821,7 @@ bot.command('coach_check', async (ctx) => {
 
           // Create pending check-in so text responses are handled
           const coachingAnalytics = createCoachingAnalytics(ctx.db);
-          await coachingAnalytics.createPendingCheckin(chatId, decision.type, 10);
+          await coachingAnalytics.createPendingCheckin(chatId, decision.type, windowMinutes);
         }
       } catch (error) {
         console.error('Coach check background error:', error);
@@ -4627,17 +4663,18 @@ bot.callbackQuery(/^session:/, async (ctx) => {
             });
 
             // Check if parent should autocomplete
-            await completeParentInTodoistIfAllDone(ctx.db, ctx.settings, todoistTaskId, startDate, undefined);
+            await completeParentInTodoistIfAllDone(ctx.db, ctx.settings, todoistTaskId, startDate, undefined, { TELEGRAM_BOT_TOKEN: ctx.env.TELEGRAM_BOT_TOKEN });
           } catch (_e) { /* todoist error */ }
         }
 
         const { createPostCompletionKeyboard } = await import('../utils/keyboards');
+        const completionSuffixSession = '\n\n💪 جاهز للمهمة الجاية؟ ابدأ بـ /starttask';
         await ctx.editMessageText(
           `✅ **تم إكمال المهمة!**\n\n` +
           `📌 ${updatedTaskName}\n` +
           `⏱️ المدة: ${durationMinutes} دقيقة${sessionCount > 1 ? ` (${sessionCount} جلسات)` : ''}` +
           (manualQuantity ? `\n📊 الكمية: ${manualQuantity} ${manualQuantityUnit || ''}` : '') +
-          `\n✓ تم التحديث في Todoist`,
+          `\n✓ تم التحديث في Todoist` + completionSuffixSession,
           { parse_mode: 'Markdown', reply_markup: createPostCompletionKeyboard() }
         );
         break;
@@ -5047,10 +5084,11 @@ bot.callbackQuery(/^tasksel:/, async (ctx) => {
 
     const now = new Date();
     const timeStr = now.toLocaleTimeString('ar-EG', { timeZone: 'Africa/Cairo', hour: '2-digit', minute: '2-digit' });
+    const { extractCleanTaskName } = await import('../utils/task-parser');
 
     await ctx.editMessageText(
       `⏱️ **بدأ تتبع المهمة**\n\n` +
-      `📌 ${selectedTask.content}\n` +
+      `📌 ${extractCleanTaskName(selectedTask.content).trim()}\n` +
       `🕐 البداية: ${timeStr}`,
       { parse_mode: 'Markdown', reply_markup: createTaskStartedKeyboard() }
     );
@@ -5142,6 +5180,8 @@ bot.callbackQuery(/^failsel:/, async (ctx) => {
       return;
     }
 
+    const { extractCleanTaskName } = await import('../utils/task-parser');
+
     // Delete selection state
     await ctx.db.delete('conversation_state', { chat_id: op.eq(selectKey) });
 
@@ -5154,10 +5194,11 @@ bot.callbackQuery(/^failsel:/, async (ctx) => {
       f.id === selectedTask.id || f.content === selectedTask.content
     );
 
-    if (existingIndex >= 0 && failedTasks[existingIndex].is_pending === false) {
+    const existingFailed = existingIndex >= 0 ? failedTasks[existingIndex] : undefined;
+    if (existingFailed && existingFailed.is_pending === false) {
       // Already confirmed failed — skip
       await ctx.editMessageText(
-        `⚠️ المهمة "${selectedTask.content}" مسجلة بالفعل كفشل اليوم`
+        `⚠️ المهمة "${extractCleanTaskName(selectedTask.content).trim()}" مسجلة بالفعل كفشل اليوم`
       );
       return;
     }
@@ -5196,6 +5237,15 @@ bot.callbackQuery(/^failsel:/, async (ctx) => {
       failed_tasks: failedTasks,
     };
     await upsertDailyFailures(ctx.db, updatedDailyFailures);
+
+    // Trigger battle mode boss healing (fire-and-forget)
+    const botToken = ctx.env?.TELEGRAM_BOT_TOKEN || (await ctx.settings.get('telegram_bot_token'));
+    if (chatId && botToken) {
+      const { triggerOnTaskFailed } = await import('../handlers/todoist');
+      triggerOnTaskFailed(extractCleanTaskName(selectedTask.content), chatId, botToken, ctx.db, ctx.settings, 1).catch((e) =>
+        console.error('triggerOnTaskFailed error:', e)
+      );
+    }
 
     // Close the task in Todoist (so it disappears from active tasks)
     let todoistStatus = '';
@@ -5236,7 +5286,6 @@ bot.callbackQuery(/^failsel:/, async (ctx) => {
     }
 
     // Build failure notification similar to completion notification
-    const { extractCleanTaskName } = await import('../utils/task-parser');
     let notificationMsg = '';
 
     if (isSubtask && parentContent) {
@@ -5279,14 +5328,11 @@ bot.callbackQuery(/^failsel:/, async (ctx) => {
       const totalSibs = completedSiblings.length + failedSiblings.length;
       const confirmedFailed = failedSiblings.filter((f: FailedTask) => f.is_pending === false);
 
-      // Parent symbol
+      // Parent complete ONLY when ALL subtasks done in DB (never use parent row status from Todoist path)
+      const parentCompleted = totalSibs > 0 && confirmedFailed.length === 0;
       let parentSymbol = '⏳';
-      const parentCompleted = todayTasks.some((t: any) =>
-        !t.origin_task && extractCleanTaskName(t.content) === parentCleanName
-      );
-      if (parentCompleted && confirmedFailed.length === 0) parentSymbol = '✅';
-      else if (parentCompleted && completedSiblings.length > 0 && confirmedFailed.length > 0) parentSymbol = '⚠️';
-      else if (!parentCompleted && confirmedFailed.length > 0 && completedSiblings.length > 0) parentSymbol = '⚠️';
+      if (parentCompleted) parentSymbol = '✅';
+      else if (confirmedFailed.length > 0 && completedSiblings.length > 0) parentSymbol = '⚠️';
       else if (confirmedFailed.length > 0 && completedSiblings.length === 0) parentSymbol = '❌';
 
       notificationMsg = `${parentSymbol} ${parentCleanName} (${completedSiblings.length}/${totalSibs})`;
@@ -5303,8 +5349,9 @@ bot.callbackQuery(/^failsel:/, async (ctx) => {
       notificationMsg = `❌ ${extractCleanTaskName(selectedTask.content)}`;
     }
 
+    const failureSuffix = '\n\n💪 جاهز للمهمة الجاية؟ ابدأ بـ /starttask';
     await ctx.editMessageText(
-      `${notificationMsg}${todoistStatus}`
+      `${notificationMsg}${todoistStatus}${failureSuffix}`
     );
 
   } catch (error) {
@@ -5696,7 +5743,20 @@ bot.callbackQuery(/^resumechoice:/, async (ctx) => {
               const remainingMin = Math.max(0, Math.ceil((sessionDuration * 60 * 1000 - elapsedMs) / 60000));
 
               if (turnsLeft <= 0 || remainingMin <= 0) {
-                // Session over - clean up and show action keyboard
+                // Session over - log full script for intervention context, then clean up
+                try {
+                  const contextBuilder = createCoachingContextBuilder(ctx.db, ctx.settings);
+                  await contextBuilder.logInteraction({
+                    chat_id: chatId,
+                    interaction_date: getTodayInEgypt(),
+                    timestamp: new Date().toISOString(),
+                    interaction_type: 'coach_talk',
+                    outcome: 'positive',
+                    metadata: { script: newHistory },
+                  });
+                } catch (logErr) {
+                  console.error('Failed to log coach_talk script:', logErr);
+                }
                 await ctx.db.delete('conversation_state', { chat_id: op.eq(talkSessionKey) });
                 const ca = createCoachingAnalytics(ctx.db);
                 await ca.completeCheckin(chatId, true);
@@ -5736,10 +5796,119 @@ bot.callbackQuery(/^resumechoice:/, async (ctx) => {
       }
 
       // ============================================
+      // Handle pending duration input (BEFORE coach - so "20m" goes to task, not coach)
+      // ============================================
+      const pendingDurationKey = `pending_duration_${chatId}`;
+      const pendingDurationState = await ctx.db.select('conversation_state', {
+        filter: { chat_id: op.eq(pendingDurationKey) },
+      });
+
+      if (pendingDurationState.length > 0) {
+        await ctx.db.delete('conversation_state', { chat_id: op.eq(pendingDurationKey) });
+
+        // Parse duration
+        const { parseTaskMetadata } = await import('../utils/task-parser');
+        const metadata = parseTaskMetadata(`[${text}]`);
+
+        if (!metadata.duration_minutes) {
+          await ctx.reply('❌ صيغة المدة غير صحيحة. حاول مرة أخرى أو /cancel');
+          return;
+        }
+
+        const taskKey = `active_task_${chatId}`;
+        const existingTask = await ctx.db.select('conversation_state', {
+          filter: { chat_id: op.eq(taskKey) },
+        });
+
+        if (existingTask.length > 0) {
+          const taskData = (existingTask[0] as any).data || {};
+
+          // Accumulate manual duration (don't replace)
+          const existingManual = taskData.manualDuration || 0;
+          const newManual = existingManual + metadata.duration_minutes;
+          await ctx.db.update(
+            'conversation_state',
+            { chat_id: op.eq(taskKey) },
+            {
+              data: {
+                ...taskData,
+                manualDuration: newManual,
+              }
+            }
+          );
+
+          await ctx.reply(
+            `✅ تم إضافة المدة: ${metadata.duration_minutes} دقيقة` +
+            (existingManual > 0 ? ` (الإجمالي المضاف: ${newManual} دقيقة)` : '') +
+            `\n\n📌 ${taskData.taskName}`,
+            { parse_mode: 'Markdown', reply_markup: createTaskStartedKeyboard() }
+          );
+        }
+        return;
+      }
+
+      // ============================================
+      // Handle pending quantity input
+      // ============================================
+      const pendingQuantityInputKey = `pending_quantity_${chatId}`;
+      const pendingQuantityInputState = await ctx.db.select('conversation_state', {
+        filter: { chat_id: op.eq(pendingQuantityInputKey) },
+      });
+
+      if (pendingQuantityInputState.length > 0) {
+        await ctx.db.delete('conversation_state', { chat_id: op.eq(pendingQuantityInputKey) });
+
+        // Parse quantity
+        const quantityMatch = text.match(/^(\d+)\s*(.+)$/);
+        if (!quantityMatch || !quantityMatch[1] || !quantityMatch[2]) {
+          await ctx.reply('❌ صيغة الكمية غير صحيحة. حاول مرة أخرى أو /cancel');
+          return;
+        }
+
+        const quantity = quantityMatch[1];
+        const unit = quantityMatch[2].trim();
+
+        const taskKey = `active_task_${chatId}`;
+        const existingTask = await ctx.db.select('conversation_state', {
+          filter: { chat_id: op.eq(taskKey) },
+        });
+
+        if (existingTask.length > 0) {
+          const taskData = (existingTask[0] as any).data || {};
+
+          await ctx.db.update(
+            'conversation_state',
+            { chat_id: op.eq(taskKey) },
+            {
+              data: {
+                ...taskData,
+                manualQuantity: quantity,
+                manualQuantityUnit: unit,
+              }
+            }
+          );
+
+          await ctx.reply(
+            `✅ تم إضافة الكمية: ${quantity} ${unit}\n\n` +
+            `📌 ${taskData.taskName}`,
+            { parse_mode: 'Markdown', reply_markup: createTaskStartedKeyboard() }
+          );
+        }
+        return;
+      }
+
+      // ============================================
       // Handle Interactive Coach Conversation (regular check-in)
       // ============================================
       const coachingAnalytics = createCoachingAnalytics(ctx.db);
-      const activeCheckin = await coachingAnalytics.getActiveCheckin(chatId);
+      const botTokenForFollowUp = ctx.env.TELEGRAM_BOT_TOKEN;
+      const activeCheckin = await coachingAnalytics.getActiveCheckin(chatId, {
+        onExpiredNoResponse: async (targetChatId: string) => {
+          if (botTokenForFollowUp) {
+            await sendTelegramMessageDirect(botTokenForFollowUp, targetChatId, 'متابعة بدون رد ✓');
+          }
+        },
+      });
 
       if (activeCheckin) {
         // User responded to a coach check-in - handle interactive conversation
@@ -6541,10 +6710,11 @@ if (pendingSelection.length > 0) {
 
       const now = new Date();
       const timeStr = now.toLocaleTimeString('ar-EG', { timeZone: 'Africa/Cairo', hour: '2-digit', minute: '2-digit' });
+      const { extractCleanTaskName } = await import('../utils/task-parser');
 
       await ctx.reply(
         `⏱️ **بدأ تتبع المهمة**\n\n` +
-        `📌 ${selectedTask.content}\n` +
+        `📌 ${extractCleanTaskName(selectedTask.content).trim()}\n` +
         `🕐 البداية: ${timeStr}`,
         { parse_mode: 'Markdown', reply_markup: createTaskStartedKeyboard() }
       );
@@ -6927,15 +7097,17 @@ if (pendingConfirm.length > 0) {
           } catch (todoistError) {
             console.error('Todoist error:', todoistError);
             const { createPostCompletionKeyboard: pcKb6 } = await import('../utils/keyboards');
+            const completionSuffixLocal = '\n\n💪 جاهز للمهمة الجاية؟ ابدأ بـ /starttask';
             await ctx.reply(
-              `⚠️ تم حفظ المهمة محلياً:\n📌 ${taskName}`,
+              `⚠️ تم حفظ المهمة محلياً:\n📌 ${taskName}` + completionSuffixLocal,
               { reply_markup: pcKb6() }
             );
           }
         } else {
           const { createPostCompletionKeyboard: pcKb7 } = await import('../utils/keyboards');
+          const completionSuffixInline = '\n\n💪 جاهز للمهمة الجاية؟ ابدأ بـ /starttask';
           await ctx.reply(
-            `✅ تم إكمال المهمة:\n📌 ${taskName}`,
+            `✅ تم إكمال المهمة:\n📌 ${taskName}` + completionSuffixInline,
             { reply_markup: pcKb7() }
           );
         }
@@ -6960,105 +7132,6 @@ if (pendingConfirm.length > 0) {
 
         return;
       }
-
-// Check for pending duration input
-const pendingDurationKey = `pending_duration_${chatId}`;
-const pendingDurationState = await ctx.db.select('conversation_state', {
-  filter: { chat_id: op.eq(pendingDurationKey) },
-});
-
-if (pendingDurationState.length > 0) {
-  await ctx.db.delete('conversation_state', { chat_id: op.eq(pendingDurationKey) });
-  
-  // Parse duration
-  const { parseTaskMetadata } = await import('../utils/task-parser');
-  const metadata = parseTaskMetadata(`[${text}]`);
-
-  if (!metadata.duration_minutes) {
-    await ctx.reply('❌ صيغة المدة غير صحيحة. حاول مرة أخرى أو /cancel');
-    return;
-  }
-
-  const taskKey = `active_task_${chatId}`;
-  const existingTask = await ctx.db.select('conversation_state', {
-    filter: { chat_id: op.eq(taskKey) },
-  });
-
-  if (existingTask.length > 0) {
-    const taskData = (existingTask[0] as any).data || {};
-    
-    // Accumulate manual duration (don't replace)
-    const existingManual = taskData.manualDuration || 0;
-    const newManual = existingManual + metadata.duration_minutes;
-    await ctx.db.update(
-      'conversation_state',
-      { chat_id: op.eq(taskKey) },
-      {
-        data: {
-          ...taskData,
-          manualDuration: newManual,
-        }
-      }
-    );
-
-    await ctx.reply(
-      `✅ تم إضافة المدة: ${metadata.duration_minutes} دقيقة` +
-      (existingManual > 0 ? ` (الإجمالي المضاف: ${newManual} دقيقة)` : '') +
-      `\n\n📌 ${taskData.taskName}`,
-      { parse_mode: 'Markdown', reply_markup: createTaskStartedKeyboard() }
-    );
-  }
-  return;
-}
-
-// Check for pending quantity input
-const pendingQuantityInputKey = `pending_quantity_${chatId}`;
-const pendingQuantityInputState = await ctx.db.select('conversation_state', {
-  filter: { chat_id: op.eq(pendingQuantityInputKey) },
-});
-
-if (pendingQuantityInputState.length > 0) {
-  await ctx.db.delete('conversation_state', { chat_id: op.eq(pendingQuantityInputKey) });
-  
-  // Parse quantity
-  const quantityMatch = text.match(/^(\d+)\s*(.+)$/);
-  if (!quantityMatch || !quantityMatch[1] || !quantityMatch[2]) {
-    await ctx.reply('❌ صيغة الكمية غير صحيحة. حاول مرة أخرى أو /cancel');
-    return;
-  }
-
-  const quantity = quantityMatch[1];
-  const unit = quantityMatch[2].trim();
-
-  const taskKey = `active_task_${chatId}`;
-  const existingTask = await ctx.db.select('conversation_state', {
-    filter: { chat_id: op.eq(taskKey) },
-  });
-
-  if (existingTask.length > 0) {
-    const taskData = (existingTask[0] as any).data || {};
-    
-    await ctx.db.update(
-      'conversation_state',
-      { chat_id: op.eq(taskKey) },
-      {
-        data: {
-          ...taskData,
-          manualQuantity: quantity,
-          manualQuantityUnit: unit,
-        }
-      }
-    );
-
-    await ctx.reply(
-      `✅ تم إضافة الكمية: ${quantity} ${unit}\n\n` +
-      `📌 ${taskData.taskName}`,
-      { parse_mode: 'Markdown', reply_markup: createTaskStartedKeyboard() }
-    );
-  }
-  return;
-}
-
 
       // First, try to add to journal if there's an active session
       const journalResult = await journalMgr.addTextEntry(text);

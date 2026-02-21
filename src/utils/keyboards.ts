@@ -6,6 +6,7 @@
  */
 
 import { InlineKeyboard } from 'grammy';
+import { extractCleanTaskName } from './task-parser';
 
 // ============================================
 // Types
@@ -46,55 +47,9 @@ export function createMoodKeyboard(): InlineKeyboard {
     .text('😴 تعبان', 'mood:low');
 }
 
-/**
- * Keyboard with all available commands (shown in coach messages)
- */
-export function createCommandsKeyboard(): InlineKeyboard {
-  return new InlineKeyboard()
-    .text('🎯 ابدأ مهمة', 'cmd:starttask')
-    .text('🆘 محتاج مساعدة', 'cmd:stuck')
-    .row()
-    .text('😏 احرقني', 'cmd:roast')
-    .text('⚔️ معركة', 'cmd:battle')
-    .row()
-    .text('📋 المهام', 'cmd:tasks')
-    .text('📅 الخطة', 'cmd:plan');
-}
-
-/**
- * Quick task start keyboard with top tasks
- */
-export function createQuickTasksKeyboard(tasks: TaskInfo[], limit: number = 3): InlineKeyboard {
-  const keyboard = new InlineKeyboard();
-
-  const displayTasks = tasks.slice(0, limit);
-  for (const task of displayTasks) {
-    // Truncate long task names
-    const displayName = task.content.length > 30
-      ? task.content.substring(0, 27) + '...'
-      : task.content;
-    keyboard.text(`▶️ ${displayName}`, `task:start:${task.id}`).row();
-  }
-
-  keyboard.text('📋 عرض الكل', 'cmd:starttask');
-
-  return keyboard;
-}
-
 // ============================================
 // Task Session Keyboards
 // ============================================
-
-/**
- * Keyboard for active task session
- */
-export function createActiveSessionKeyboard(): InlineKeyboard {
-  return new InlineKeyboard()
-    .text('✅ خلصت', 'session:complete')
-    .text('⏸️ وقف مؤقت', 'session:pause')
-    .row()
-    .text('❌ إلغاء', 'session:abandon');
-}
 
 /**
  * Keyboard for paused session
@@ -119,16 +74,6 @@ export function createPostCompletionKeyboard(): InlineKeyboard {
     .text('🏆 إنجازاتي', 'cmd:streak');
 }
 
-/**
- * Keyboard for resume decision (existing paused session found)
- */
-export function createResumeDecisionKeyboard(sessionId: string): InlineKeyboard {
-  return new InlineKeyboard()
-    .text('1️⃣ استئناف السابقة', `resume:yes:${sessionId}`)
-    .row()
-    .text('2️⃣ جلسة جديدة', 'resume:new');
-}
-
 // ============================================
 // Interactive Coach Keyboards
 // ============================================
@@ -143,17 +88,6 @@ export function createCoachConversationKeyboard(): InlineKeyboard {
     .row()
     .text('💪 حفزني أكتر', 'coach:motivate')
     .text('🔚 كفاية', 'coach:end');
-}
-
-/**
- * Keyboard for no-response follow-up
- */
-export function createNoResponseKeyboard(): InlineKeyboard {
-  return new InlineKeyboard()
-    .text('👋 أنا هنا', 'coach:here')
-    .text('⏰ فكرني بعدين', 'coach:remind_later')
-    .row()
-    .text('🎯 ابدأ دلوقتي', 'coach:start_task');
 }
 
 // ============================================
@@ -184,60 +118,6 @@ export function createQuickModeEndKeyboard(): InlineKeyboard {
 }
 
 // ============================================
-// Streak and Progress Keyboards
-// ============================================
-
-/**
- * Keyboard for streak display
- */
-export function createStreakKeyboard(): InlineKeyboard {
-  return new InlineKeyboard()
-    .text('🎯 كمّل السلسلة', 'cmd:starttask')
-    .text('📊 تفاصيل أكتر', 'streak:details');
-}
-
-// ============================================
-// Command Menu Helpers
-// ============================================
-
-/**
- * Get contextual command suggestions based on user state
- */
-export function getContextualCommands(state: {
-  hasActiveSession: boolean;
-  hasPausedSession: boolean;
-  hasActiveBattle: boolean;
-}): string {
-  const commands: string[] = [];
-
-  if (state.hasActiveSession) {
-    commands.push('/completetask', '/pause', '/abandon');
-  } else if (state.hasPausedSession) {
-    commands.push('/resumetask', '/starttask', '/abandon');
-  } else {
-    commands.push('/starttask', '/quick', '/plan');
-  }
-
-  if (state.hasActiveBattle) {
-    commands.push('/battle_status');
-  } else {
-    commands.push('/battle_mode');
-  }
-
-  commands.push('/stuck', '/roast_me');
-
-  return commands.join(' • ');
-}
-
-/**
- * Format command menu for message footer
- */
-export function formatCommandMenu(commands: string[]): string {
-  return `\n\n━━━━━━━━━━━━━━━━━━\n🎮 ${commands.join(' • ')}`;
-}
-
-
-// ============================================
 // Task Selection Keyboards
 // ============================================
 
@@ -260,10 +140,11 @@ export function createTaskSelectionKeyboard(
 
   const displayTasks = tasks.slice(start, end);
   for (const task of displayTasks) {
-    // Truncate long task names
-    const displayName = task.content.length > 35
-      ? task.content.substring(0, 32) + '...'
-      : task.content;
+    // Clean display name: strip [30m], [5 pages], etc. Raw content stays in DB
+    const cleaned = extractCleanTaskName(task.content).trim();
+    const displayName = cleaned.length > 35
+      ? cleaned.substring(0, 32) + '...'
+      : cleaned;
     keyboard.text(`📌 ${displayName}`, `${prefix}:${task.id}`).row();
   }
 
@@ -356,26 +237,4 @@ export function createTalkDurationKeyboard(): InlineKeyboard {
     .row()
     .text('15 دقيقة', 'talk_dur:15')
     .text('20 دقيقة', 'talk_dur:20');
-}
-
-/**
- * Keyboard shown during an active talk session — only end button
- */
-export function createTalkConversationKeyboard(): InlineKeyboard {
-  return new InlineKeyboard()
-    .text('🔚 إنهاء المحادثة', 'coach:end');
-}
-
-/**
- * Get task session command footer (shown after task starts)
- */
-export function getTaskSessionFooter(): string {
-  return '\n\n━━━━━━━━━━━━━━━━━━\n' +
-    '🎮 الأوامر المتاحة:\n' +
-    '• /completetask - إنهاء المهمة\n' +
-    '• /pause - إيقاف مؤقت\n' +
-    '• /resumetask - استئناف\n' +
-    '• /addduration - إضافة مدة\n' +
-    '• /addquantity - إضافة كمية\n' +
-    '• /canceltask - إلغاء المهمة';
 }

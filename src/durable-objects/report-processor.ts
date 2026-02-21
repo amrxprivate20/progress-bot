@@ -394,7 +394,7 @@ console.log('📋 Generating formatted report for AI...');
 const formattedReport = await reportGen.getFormattedReportForAI(reportData.date);
 console.log('✅ Formatted report generated:', formattedReport.length, 'chars');
 
-// ✅ NEW: Log the COMPLETE formatted report if debug enabled
+// ✅ Log formatted report if debug enabled (prompt is logged once by ai-client via logAIRequest)
 if (debugLogger.isEnabled()) {
   await debugLogger.log(
     `📋 **FORMATTED REPORT (Complete)**\n\n` +
@@ -404,105 +404,6 @@ if (debugLogger.isEnabled()) {
     formattedReport,
     '📋'
   );
-}
-
-// ✅ NEW: Build and log the EXACT prompt that will be sent
-if (debugLogger.isEnabled()) {
-  // Manually build the prompt (same logic as buildUnifiedPrompt)
-  let fullPrompt = `# تحليل التقدم اليومي - ${reportData.date}\n\n`;
-  
-  if (userAnswers && Object.keys(userAnswers).length > 0) {
-    fullPrompt += `## إجابات المستخدم:\n`;
-    fullPrompt += Object.entries(userAnswers).map(([q, a]) => `**س:** ${q}\n**ج:** ${a}`).join('\n\n') + '\n\n';
-  }
-  
-  fullPrompt += `## التقرير اليومي:\n${formattedReport || 'لا توجد بيانات للتقرير'}\n\n`;
-  
-  if (reportData.journal) {
-    fullPrompt += `## يوميات اليوم:\n${reportData.journal}\n\n`;
-  }
-  
-  fullPrompt += `## ملخص الأسبوع الماضي:\n${pastWeekSummary}\n\n`;
-  fullPrompt += `## الأهداف الأسبوعية:\n${reportData.weeklyGoals?.goals_text || 'لا توجد أهداف محددة لهذا الأسبوع'}\n\n`;
-  fullPrompt += `## التحدي اليومي:\n${reportData.dailyChallenge?.challenge_text || 'لا يوجد تحدي محدد لهذا اليوم'}\n\n`;
-  fullPrompt += `## الأهداف الاستراتيجية طويلة المدى:\n${reportData.strategicGoals}\n\n`;
-  
-  fullPrompt += `## الذاكرة المنظمة:\n`;
-  for (const [category, content] of Object.entries(reportData.memory)) {
-    fullPrompt += `### ${category}\n${content || 'لا توجد معلومات'}\n\n`;
-  }
-
-  // Add the full prompt template (same as buildUnifiedPrompt)
-  fullPrompt += `
----
-
-# المطلوب منك:
-
-قدم تحليلاً شاملاً ومحفزاً بناءً على كل المعلومات أعلاه. اتبع هذا الهيكل بدقة:
-
-## [QUESTIONS]
-(اطرح 1-3 أسئلة توضيحية قصيرة ومباشرة إذا كنت تحتاج معلومات إضافية لفهم السياق بشكل أفضل. كل سؤال في سطر منفصل يبدأ بـ "Q:")
-Q: [سؤالك هنا]
-
-## [COMMENTARY]
-(تعليق شامل ومحفز باللهجة المصرية، يشمل:
-- تحليل الأداء اليوم
-- ملاحظات على الأنماط والتحسينات
-- تشجيع وتحفيز شخصي
-- نصائح عملية للتطوير
-- ربط الإنجازات بالأهداف طويلة المدى
-
-اكتب بطريقة طبيعية ودافئة، كأنك صديق مقرب يعرفك جيداً.)
-
-## [CHALLENGE_EVAL]
-(تقييم التحدي اليومي:
-✅ إذا تم إنجازه
-❌ إذا لم يتم إنجازه
-فقط رمز واحد بدون تفسير)
-
-## [REWARD]
-(اقترح مكافأة مناسبة لإنجازات اليوم - شيء عملي وممتع، جملة واحدة قصيرة)
-
-## [GOALS_ANALYSIS]
-تحليل الأهداف الأسبوعية (استخدم هذا الشكل بالضبط):
-
-### منجزة ✅
-- [اذكر الأهداف المنجزة أو اكتب "لا يوجد"]
-
-### قيد التنفيذ 🔄
-- [اذكر الأهداف قيد التنفيذ أو اكتب "لا يوجد"]
-
-### مهملة ⚠️
-- [اذكر الأهداف المهملة أو اكتب "لا يوجد"]
-
-## [MEMORY_UPDATES]
-⚠️ **CRITICAL FORMAT RULES:**
-1. Each memory update MUST start with "CATEGORY:" on its own line
-2. Followed by "CONTENT:" on the next line
-3. Leave a blank line between different category updates
-4. Category names MUST match EXACTLY (copy-paste from list above)
-
-**Available Categories:**
-- Personal Insights & Patterns
-- Successful Strategies & What Works
-- Triggers & Challenges
-- Important Milestones & Breakthroughs
-- Recurring Themes & Lessons
-- Personal Information & Facts
-
----
-`;
-  
-  // Log the complete prompt
-  await debugLogger.log(
-    `📤 **COMPLETE UNIFIED PROMPT**\n\n` +
-    `Total Length: ${fullPrompt.length} characters\n\n` +
-    `─────────────────────────────\n\n` +
-    fullPrompt,
-    '📤'
-  );
-  
-  console.log(`✅ Complete unified prompt logged (${fullPrompt.length} chars)`);
 }
 
 // Call AI - THIS IS THE LONG OPERATION (no timeout here!)
@@ -1196,6 +1097,17 @@ if (highPriorityIds.has(task.id)) {
     // Add new
     dailyFailures.failed_tasks.push(failedTask);
     console.log(`✅ Added new failure to JSON: ${task.content}${isSubtask ? ' [subtask]' : ''}`);
+  }
+
+  // Trigger battle mode boss healing (fire-and-forget)
+  try {
+    const settings = new SettingsMgr(db);
+    const { triggerOnTaskFailed } = await import('../handlers/todoist');
+    triggerOnTaskFailed(cleanName, chatId, botToken, db, settings, 1).catch((e) =>
+      console.error('triggerOnTaskFailed error:', e)
+    );
+  } catch (triggerErr) {
+    console.error('Failed to trigger battle healing:', triggerErr);
   }
 }
 
