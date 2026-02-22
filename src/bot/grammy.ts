@@ -3792,7 +3792,7 @@ bot.command('coach_check', async (ctx) => {
 
         if (decision.type !== 'none') {
           console.log(`🔍 Executing intervention: ${decision.type}`);
-          let message = await metaCoach.executeIntervention(chatId, decision);
+          let message = await metaCoach.executeIntervention(chatId, decision, userState);
           console.log(`🔍 Intervention generated, length=${message.length}`);
 
           // Check-in window from settings (minutes) for "متبقي X دقائق للرد"
@@ -4160,6 +4160,8 @@ bot.callbackQuery(/^coach:/, async (ctx) => {
 
     switch (action) {
       case 'start_task': {
+        const contextBuilder = createCoachingContextBuilder(ctx.db, ctx.settings);
+        await contextBuilder.updateLatestMetaCoachUserInput(chatId, '▶️ ابدأ مهمة').catch(() => {});
         await coachingAnalytics.recordActionTaken(chatId, 'starttask');
         await ctx.answerCallbackQuery('🎯 يلا نبدأ!');
         const shown = await showTaskSelection(ctx as BotContext);
@@ -4169,11 +4171,14 @@ bot.callbackQuery(/^coach:/, async (ctx) => {
         break;
       }
 
-      case 'busy':
+      case 'busy': {
+        const contextBuilder = createCoachingContextBuilder(ctx.db, ctx.settings);
+        await contextBuilder.updateLatestMetaCoachUserInput(chatId, 'مشغول').catch(() => {});
         await coachingAnalytics.completeCheckin(chatId, false);
         await ctx.answerCallbackQuery('👍 تمام');
         await ctx.reply('تمام، هفكرك بعد شوية! 💪');
         break;
+      }
 
       case 'talk': {
         await ctx.answerCallbackQuery('💬 احكيلي');
@@ -4183,7 +4188,9 @@ bot.callbackQuery(/^coach:/, async (ctx) => {
         break;
       }
 
-      case 'tired':
+      case 'tired': {
+        const contextBuilder = createCoachingContextBuilder(ctx.db, ctx.settings);
+        await contextBuilder.updateLatestMetaCoachUserInput(chatId, 'تعبان').catch(() => {});
         await coachingAnalytics.setUserMood(chatId, 'low');
         await ctx.answerCallbackQuery('💙 معلش');
         await ctx.reply(
@@ -4192,17 +4199,21 @@ bot.callbackQuery(/^coach:/, async (ctx) => {
           { reply_markup: createQuickModeKeyboard() }
         );
         break;
+      }
 
       case 'here':
         await ctx.answerCallbackQuery('👋 أهلاً!');
         await ctx.reply('👋 حمد لله! يلا نشتغل؟', { reply_markup: createCoachCheckInKeyboard() });
         break;
 
-      case 'remind_later':
+      case 'remind_later': {
+        const contextBuilder = createCoachingContextBuilder(ctx.db, ctx.settings);
+        await contextBuilder.updateLatestMetaCoachUserInput(chatId, '⏸️ مشغول / هفكرك بعدين').catch(() => {});
         await coachingAnalytics.completeCheckin(chatId, false);
         await ctx.answerCallbackQuery('⏰ هفكرك');
         await ctx.reply('⏰ تمام، هفكرك بعد نص ساعة!');
         break;
+      }
 
       case 'motivate':
         await ctx.answerCallbackQuery('💪');
@@ -5911,6 +5922,10 @@ bot.callbackQuery(/^resumechoice:/, async (ctx) => {
       });
 
       if (activeCheckin) {
+        // User responded to a coach check-in - store reply on latest meta_coach for intervention context
+        const contextBuilder = createCoachingContextBuilder(ctx.db, ctx.settings);
+        await contextBuilder.updateLatestMetaCoachUserInput(chatId, text.trim()).catch(() => {});
+
         // User responded to a coach check-in - handle interactive conversation
         const updatedCheckin = await coachingAnalytics.recordTextResponse(activeCheckin.id);
 

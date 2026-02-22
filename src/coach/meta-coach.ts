@@ -21,8 +21,10 @@ import { AIMessage } from '../services/ai-client';
 import { getTodayInEgypt } from '../utils/timezone';
 import { createCoachingContextBuilder } from './coaching-context';
 import { createTaskSessionManager, TaskSession } from '../services/task-session-manager';
-import { createJournalManager } from '../services/journal';
-import { createReportGenerator } from '../services/report-generator';
+import {
+  buildLightweightDailySummary,
+  formatLightweightSummaryForContext,
+} from '../services/report-generator';
 import { extractCleanTaskName } from '../utils/task-parser';
 import { splitMessage } from '../utils/split-message';
 
@@ -46,6 +48,8 @@ export interface UserState {
   activeTaskSession: TaskSession | null;
   interventionsToday: number;
   lastInterventionHour: number | null;
+  /** Pre-formatted memory section for intervention prompt (avoids extra query in buildInterventionContext) */
+  memoryForPrompt?: string;
 }
 
 export type InterventionType =
@@ -524,6 +528,16 @@ export class MetaCoach {
     const parsedFailures = typeof failuresJson === 'string' ? JSON.parse(failuresJson) : failuresJson;
     const tasksFailed = parsedFailures?.failed_tasks?.length || 0;
 
+    // Pre-format memory for intervention prompt (avoids 1 extra query in buildInterventionContext)
+    let memoryForPrompt: string | undefined;
+    if (context.coachingPatterns || context.interventionEffectiveness || context.userTriggers) {
+      const parts: string[] = [];
+      if (context.coachingPatterns) parts.push(`ما ينجح مع المستخدم:\n${context.coachingPatterns}`);
+      if (context.interventionEffectiveness) parts.push(`فعالية التدخلات:\n${context.interventionEffectiveness}`);
+      if (context.userTriggers) parts.push(`محفزات المستخدم وردود الكوتش:\n${context.userTriggers}`);
+      memoryForPrompt = parts.join('\n\n');
+    }
+
     return {
       hoursInactive,
       tasksCompletedToday: context.tasksCompletedToday,
@@ -540,6 +554,7 @@ export class MetaCoach {
       activeTaskSession: activeSession,
       interventionsToday,
       lastInterventionHour,
+      memoryForPrompt,
     };
   }
 
@@ -682,36 +697,41 @@ export class MetaCoach {
   }
 
   /**
-   * Execute the decided intervention
+   * Execute the decided intervention.
+   * Pass optional state to avoid re-calling analyzeUserState (saves ~15 subrequests when called from coach_check).
    */
-  async executeIntervention(chatId: string, decision: InterventionDecision): Promise<string> {
-    const state = await this.analyzeUserState(chatId);
-    const style = state.coachingStyle;
+  async executeIntervention(
+    chatId: string,
+    decision: InterventionDecision,
+    state?: UserState
+  ): Promise<string> {
+    const resolvedState = state ?? (await this.analyzeUserState(chatId));
+    const style = resolvedState.coachingStyle;
 
     switch (decision.type) {
       case 'morning_kickoff':
-        return this.generateMessage(chatId, 'morning_kickoff', style, state, decision.escalationLevel);
+        return this.generateMessage(chatId, 'morning_kickoff', style, resolvedState, decision.escalationLevel);
 
       case 'midday_push':
-        return this.generateMessage(chatId, 'midday_push', style, state, decision.escalationLevel);
+        return this.generateMessage(chatId, 'midday_push', style, resolvedState, decision.escalationLevel);
 
       case 'evening_check':
-        return this.generateMessage(chatId, 'evening_check', style, state, decision.escalationLevel);
+        return this.generateMessage(chatId, 'evening_check', style, resolvedState, decision.escalationLevel);
 
       case 'momentum_check':
-        return this.generateMessage(chatId, 'momentum_check', style, state, decision.escalationLevel);
+        return this.generateMessage(chatId, 'momentum_check', style, resolvedState, decision.escalationLevel);
 
       case 'night_wrapup':
-        return this.generateMessage(chatId, 'night_wrapup', style, state, decision.escalationLevel);
+        return this.generateMessage(chatId, 'night_wrapup', style, resolvedState, decision.escalationLevel);
 
       case 'inactivity_nudge':
-        return this.generateMessage(chatId, 'inactivity_nudge', style, state, decision.escalationLevel);
+        return this.generateMessage(chatId, 'inactivity_nudge', style, resolvedState, decision.escalationLevel);
 
       case 'escalation':
-        return this.generateMessage(chatId, 'escalation', style, state, decision.escalationLevel);
+        return this.generateMessage(chatId, 'escalation', style, resolvedState, decision.escalationLevel);
 
       case 'battle_narrative':
-        return this.generateMessage(chatId, 'battle_narrative', style, state, decision.escalationLevel);
+        return this.generateMessage(chatId, 'battle_narrative', style, resolvedState, decision.escalationLevel);
 
       default:
         return '';
@@ -802,11 +822,9 @@ export class MetaCoach {
   ): Promise<string> {
     const promptTemplate = PROMPTS[type][style];
 
-    // Get yesterday's tasks
-    const yesterdayTasks = await this.getYesterdayTasksCount();
-
-    // Get available tasks today
-    const availableTasks = await this.getAvailableTasksCount();
+    // Skip yesterday/available task queries to stay under subrequest limit (use placeholders)
+    const yesterdayTasks = 0;
+    const availableTasks = 0;
 
     // Get boss info
     let bossName = 'لا يوجد';
@@ -834,7 +852,7 @@ export class MetaCoach {
 
     // Append lean intervention context (report preview, activity, interventions history, interactive session)
     const currentTime = this.getCurrentEgyptTime();
-    const interventionContext = await this.buildInterventionContext(chatId);
+    const interventionContext = await this.buildInterventionContext(chatId, { memorySection: state.memoryForPrompt });
     prompt += `\n\nالوقت الحالي: ${currentTime}\n\n${interventionContext}`;
 
     // Debug mode: send full prompt to Telegram for observation
@@ -940,34 +958,59 @@ export class MetaCoach {
   /**
    * Build lean intervention context: report preview, activity since last intervention,
    * today's interventions history (short), and interactive session script if any.
+   * Uses buildLightweightDailySummary (4 queries) instead of generatePreview (~11) to stay under subrequest limit.
+   * When memorySection is passed (from analyzeUserState), skips the memory query to save 1 subrequest.
    */
-  private async buildInterventionContext(chatId: string): Promise<string> {
+  private async buildInterventionContext(
+    chatId: string,
+    options?: { memorySection?: string }
+  ): Promise<string> {
     const today = getTodayInEgypt();
     const sections: string[] = [];
 
     try {
-      const reportGen = createReportGenerator(this.db, this.settings);
+      // 0. MEMORY — same as /memory: load all rows from memory table and include every category that has content
+      if (options?.memorySection?.trim()) {
+        sections.push('## ذاكرة الكوتش\n' + options.memorySection.trim());
+      } else {
+        const memoryRows = await this.db.select<{ category: string; content: string | null }>('memory', { limit: 20 });
+        const parts: string[] = [];
+        for (const row of memoryRows) {
+          if (row.category && row.content && row.content.trim()) {
+            parts.push(`${row.category}:\n${row.content.trim()}`);
+          }
+        }
+        if (parts.length > 0) {
+          sections.push('## ذاكرة الكوتش\n' + parts.join('\n\n'));
+        }
+      }
 
-      // 1. REPORT PREVIEW — same data as /preview
-      const preview = await reportGen.generatePreview(today);
-      sections.push('## تقرير اليوم (معاينة)\n' + preview.formatted_text);
+      // 1. REPORT PREVIEW — lightweight summary (4 queries only)
+      const summary = await buildLightweightDailySummary(this.db, today);
+      const formattedPreview = formatLightweightSummaryForContext(summary, today);
+      sections.push('## تقرير اليوم (معاينة)\n' + formattedPreview);
 
-      // 2. ACTIVITY LOG — since last meta_coach intervention
-      const metaInterventions = await this.db.select('coaching_interactions', {
+      // 2 & 3 — One query for meta_coach interventions: last = first row, history = same rows in asc order
+      const metaInterventionsDesc = await this.db.select('coaching_interactions', {
         filter: {
           chat_id: op.eq(chatId),
           interaction_date: op.eq(today),
           interaction_type: op.eq('meta_coach'),
         },
         order: 'timestamp.desc',
-        limit: 1,
+        limit: 20,
       });
-      const lastInterventionTime = metaInterventions[0]?.timestamp as string | undefined;
+      const lastInterventionTime = metaInterventionsDesc[0]?.timestamp as string | undefined;
+      const allMeta = [...metaInterventionsDesc].reverse();
 
-      const tasks = await this.db.select('tasks', { filter: { status: op.eq('done') } });
-      const todayTasks = tasks.filter((t: any) => (t.completed_at as string)?.split('T')[0] === today);
+      const todayTasks = summary.doneTasks;
 
-      let activityLines: string[] = [];
+      const doneMain = summary.doneTasks.filter((t: any) => !t.origin_task).length;
+      const failedMain = summary.failedTasks.filter((t: any) => !t.origin_task).length;
+      const partialMain = summary.partialTasks.filter((t: any) => !t.origin_task).length;
+      const reportStateLine = `حالة التقرير الحالية: ${doneMain} مكتملة، ${failedMain} فاشلة، ${partialMain} جزئية.`;
+
+      let activityLines: string[] = [reportStateLine];
       if (lastInterventionTime) {
         const since = todayTasks.filter((t: any) => (t.completed_at as string) > lastInterventionTime);
         if (since.length > 0) {
@@ -997,17 +1040,7 @@ export class MetaCoach {
 
       sections.push('## سجل النشاط منذ آخر تدخل\n' + activityLines.join('\n'));
 
-      // 3. INTERVENTIONS HISTORY — meta_coach only; short coach line + user reply or "لم يرد المستخدم"
-      const allMeta = await this.db.select('coaching_interactions', {
-        filter: {
-          chat_id: op.eq(chatId),
-          interaction_date: op.eq(today),
-          interaction_type: op.eq('meta_coach'),
-        },
-        order: 'timestamp.asc',
-        limit: 20,
-      });
-
+      // INTERVENTIONS HISTORY — from same meta_coach query above (allMeta)
       if (allMeta.length > 0) {
         const historyLines: string[] = [];
         for (const i of allMeta) {
@@ -1021,7 +1054,7 @@ export class MetaCoach {
         sections.push('## سجل تدخلات اليوم\nلا تدخلات سابقة اليوم.');
       }
 
-      // 4. INTERACTIVE SESSION — احكيلي script if any
+      // 4. INTERACTIVE SESSION — احكيلي: ended (coaching_interactions) + in-progress (conversation_state)
       const talkSessions = await this.db.select('coaching_interactions', {
         filter: {
           chat_id: op.eq(chatId),
@@ -1032,16 +1065,60 @@ export class MetaCoach {
         limit: 1,
       });
 
+      const talkSessionKey = `talk_session_${chatId}`;
+      const activeTalkRows = await this.db.select<{ data?: unknown }>('conversation_state', {
+        filter: { chat_id: op.eq(talkSessionKey) },
+        limit: 1,
+      });
+
+      const parseHistory = (raw: unknown): Array<{ role: string; content: string }> => {
+        if (Array.isArray(raw)) return raw;
+        if (typeof raw === 'string') {
+          try {
+            const parsed = JSON.parse(raw) as unknown;
+            return Array.isArray(parsed) ? parsed : [];
+          } catch {
+            return [];
+          }
+        }
+        return [];
+      };
+
+      let scriptText = '';
       if (talkSessions.length > 0) {
-        const script = (talkSessions[0] as any).metadata?.script as Array<{ role: string; content: string }> | undefined;
-        if (script && script.length > 0) {
-          const scriptText = script
+        const row = talkSessions[0] as any;
+        let meta = row?.metadata;
+        if (typeof meta === 'string') {
+          try {
+            meta = JSON.parse(meta) as Record<string, unknown>;
+          } catch {
+            meta = null;
+          }
+        }
+        const raw = meta?.script ?? meta;
+        const script = parseHistory(raw);
+        if (script.length > 0) {
+          scriptText = script
             .map((m: { role: string; content: string }) => (m.role === 'user' ? `المستخدم: ${m.content}` : `الكوتش: ${m.content}`))
             .join('\n');
-          sections.push('## جلسة احكيلي اليوم\n' + scriptText);
-        } else {
-          sections.push('## جلسة احكيلي اليوم\nلا سجل نصي.');
         }
+      }
+      if (!scriptText && activeTalkRows.length > 0) {
+        const row = activeTalkRows[0];
+        const data = row?.data;
+        const dataObj = typeof data === 'string'
+          ? (() => { try { return JSON.parse(data) as Record<string, unknown>; } catch { return null; } })()
+          : (data as Record<string, unknown> | null);
+        const history = parseHistory(dataObj?.history);
+        if (history.length > 0) {
+          scriptText = history
+            .map((m: { role: string; content: string }) => (m.role === 'user' ? `المستخدم: ${m.content}` : `الكوتش: ${m.content}`))
+            .join('\n');
+          scriptText = `(جلسة جارية)\n${scriptText}`;
+        }
+      }
+      if (scriptText) {
+        sections.push('## جلسة احكيلي اليوم\n' + scriptText);
       } else {
         sections.push('## جلسة احكيلي اليوم\nلا توجد جلسة احكيلي مسجلة اليوم.');
       }
@@ -1053,24 +1130,20 @@ export class MetaCoach {
     return sections.length > 0 ? sections.join('\n\n') : '';
   }
 
-  /** @deprecated Use buildInterventionContext for interventions. Kept for generateConversationResponse / generateTalkResponse. */
+  /** @deprecated Use buildInterventionContext for interventions. Kept for generateConversationResponse / generateTalkResponse. Uses lightweight summary to avoid subrequest limit. */
   private async buildExtraContext(_chatId: string): Promise<string> {
     const today = getTodayInEgypt();
-    const parts: string[] = [];
     try {
-      const reportGen = createReportGenerator(this.db, this.settings);
-      const preview = await reportGen.generatePreview(today);
-      parts.push(`تقرير اليوم: ${preview.completed_tasks} مكتملة، ${preview.failed_tasks} فاشلة، نسبة النجاح ${preview.success_rate}%`);
-      const journalMgr = createJournalManager(this.db);
-      const journalEntries = await journalMgr.getEntriesForDate(today);
-      if (journalEntries.length > 0) {
-        const journalTexts = journalEntries.filter((e: any) => e.message_text).map((e: any) => e.message_text).join(' | ');
-        if (journalTexts) parts.push(`يوميات: ${journalTexts.slice(0, 400)}`);
-      }
+      const summary = await buildLightweightDailySummary(this.db, today);
+      const doneMain = summary.doneTasks.filter((t: any) => !t.origin_task).length;
+      const failedMain = summary.failedTasks.filter((t: any) => !t.origin_task).length;
+      const total = doneMain + failedMain;
+      const rate = total > 0 ? Math.round((doneMain / total) * 100) : 0;
+      return `تقرير اليوم: ${doneMain} مكتملة، ${failedMain} فاشلة، نسبة النجاح ${rate}%`;
     } catch (e) {
       console.error('Error building extra context:', e);
+      return '';
     }
-    return parts.join('\n');
   }
 
   private async logInteraction(
@@ -1175,44 +1248,6 @@ export class MetaCoach {
     }
   }
 
-  private async getYesterdayTasksCount(): Promise<number> {
-    try {
-      const yesterday = new Date();
-      yesterday.setDate(yesterday.getDate() - 1);
-      const yesterdayStr = yesterday.toISOString().split('T')[0];
-
-      const tasks = await this.db.select('tasks', {
-        filter: { status: op.eq('done') },
-      });
-
-      return tasks.filter((t: any) => {
-        const completedAt = t.completed_at?.split('T')[0];
-        return completedAt === yesterdayStr;
-      }).length;
-    } catch {
-      return 0;
-    }
-  }
-
-  private async getAvailableTasksCount(): Promise<number> {
-    try {
-      const todoistToken = await this.settings.get('todoist_api_token');
-      const projectId = await this.settings.get('todoist_project_id');
-      if (!todoistToken || !projectId) return 0;
-
-      const resp = await fetch(`https://api.todoist.com/api/v1/tasks?project_id=${projectId}`, {
-        headers: { Authorization: `Bearer ${todoistToken}` },
-      });
-      if (resp.ok) {
-        const json = await resp.json() as any;
-        const tasks: any[] = Array.isArray(json) ? json : (json.results || []);
-        return tasks.length;
-      }
-      return 0;
-    } catch {
-      return 0;
-    }
-  }
 
   // ============================================
   // Interactive Conversation Methods

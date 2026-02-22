@@ -252,6 +252,39 @@ ${context.coachingStyle === 'confrontational' ?
   }
 
   /**
+   * Update the most recent meta_coach interaction with the user's reply.
+   * Called when the user sends a text message or clicks a button in the check-in window.
+   * Appends to existing user_input for multi-turn replies (separator: " | ").
+   */
+  async updateLatestMetaCoachUserInput(chatId: string, userInput: string): Promise<void> {
+    try {
+      const today = getTodayInEgypt();
+      const recent = await this.db.select('coaching_interactions', {
+        filter: {
+          chat_id: op.eq(chatId),
+          interaction_date: op.eq(today),
+          interaction_type: op.eq('meta_coach'),
+        },
+        order: 'timestamp.desc',
+        limit: 1,
+      });
+      if (recent.length > 0 && recent[0]?.id) {
+        const existing = (recent[0] as any).user_input as string | undefined;
+        const combined = existing && existing.trim()
+          ? `${existing} | ${userInput}`.slice(0, 1000)
+          : userInput.slice(0, 1000);
+        await this.db.update(
+          'coaching_interactions',
+          { id: op.eq(recent[0].id as string) },
+          { user_input: combined }
+        );
+      }
+    } catch (error) {
+      console.error('Failed to update meta_coach user_input:', error);
+    }
+  }
+
+  /**
    * Summarize today's interactions and update long-term memory
    * Called at end of day
    */

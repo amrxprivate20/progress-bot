@@ -69,6 +69,145 @@ export interface ReportStatistics {
   duration_by_category: Record<string, number>; // minutes per category
 }
 
+/**
+ * Lightweight daily summary for meta-coach intervention context.
+ * Built with exactly 4 queries (no streaks, memory, journal, previous reports, or challenge UPDATE).
+ */
+export interface LightweightDailySummary {
+  doneTasks: Task[];
+  failedTasks: Task[];
+  partialTasks: Task[];
+  failures: FailedTask[];
+  weeklyGoals: WeeklyGoals | null;
+  dailyChallenge: DailyChallenge | null;
+}
+
+// ============================================
+// Lightweight daily summary (4 queries only)
+// ============================================
+
+/**
+ * Build a lightweight daily summary with exactly 4 Supabase queries.
+ * Used by meta-coach buildInterventionContext to stay under subrequest limit.
+ */
+export async function buildLightweightDailySummary(
+  db: SupabaseClient,
+  date: string
+): Promise<LightweightDailySummary> {
+  const { start, end } = getEgyptDayBoundaries(date);
+
+  // QUERY 1 — Combined tasks for the day (done + failed + partial)
+  const tasksForDate = await db.select<Task>('tasks', {
+    filter: {
+      completed_at: op.gte(start.toISOString()),
+    },
+    limit: 5000,
+  });
+  const dayTasks = tasksForDate.filter((t) => {
+    const completedAt = new Date(t.completed_at);
+    return completedAt <= end;
+  });
+  const doneTasks = dayTasks.filter((t) => t.status === 'done');
+  const failedTasks = dayTasks.filter((t) => t.status === 'failed');
+  const partialTasks = dayTasks.filter((t) => t.status === 'partial');
+
+  // QUERY 2 — Daily failures (JSON)
+  const dailyFailuresDoc = await getDailyFailures(db, date);
+  const failures = dailyFailuresDoc?.failed_tasks ?? [];
+
+  // QUERY 3 — Weekly goals (current week start)
+  const dateObj = new Date(date + 'T12:00:00Z');
+  const dayOfWeek = dateObj.getUTCDay();
+  const daysToSaturday = dayOfWeek === 6 ? 0 : (6 - dayOfWeek + 7) % 7;
+  const weekStartDate = new Date(dateObj);
+  weekStartDate.setUTCDate(dateObj.getUTCDate() - daysToSaturday);
+  const weekStartStr = weekStartDate.toISOString().split('T')[0];
+  const weeklyGoalsRows = await db.select<WeeklyGoals>('weekly_goals', {
+    filter: { week_start_date: op.eq(weekStartStr) },
+    limit: 1,
+  });
+  const weeklyGoals = weeklyGoalsRows.length > 0 ? weeklyGoalsRows[0]! : null;
+
+  // QUERY 4 — Daily challenge
+  const challengeRows = await db.select<DailyChallenge>('daily_challenges', {
+    filter: { challenge_date: op.eq(date) },
+    limit: 1,
+  });
+  const dailyChallenge = challengeRows.length > 0 ? challengeRows[0]! : null;
+
+  return {
+    doneTasks,
+    failedTasks,
+    partialTasks,
+    failures,
+    weeklyGoals,
+    dailyChallenge,
+  };
+}
+
+/**
+ * Format lightweight summary as intervention context text (no DB, no challenge UPDATE).
+ */
+export function formatLightweightSummaryForContext(
+  summary: LightweightDailySummary,
+  date: string
+): string {
+  const arabicDate = formatArabicDate(new Date(date + 'T12:00:00Z'));
+  const allTasks = [...summary.doneTasks, ...summary.failedTasks, ...summary.partialTasks];
+  const mainTasks = allTasks.filter((t) => !t.origin_task);
+  const totalMain = mainTasks.length;
+  const doneMain = summary.doneTasks.filter((t) => !t.origin_task).length;
+  const failedMain = summary.failedTasks.filter((t) => !t.origin_task).length;
+  const partialMain = summary.partialTasks.filter((t) => !t.origin_task).length;
+  const successRate = totalMain > 0 ? (doneMain / totalMain) * 100 : 0;
+  const totalTime = summary.doneTasks.reduce((s, t) => s + (t.duration_minutes || 0), 0);
+
+  let text = `📊 التقرير اليومي - ${arabicDate}\n\n`;
+  text += `📈 الإحصائيات:\n`;
+  text += `- إجمالي المهام الرئيسية: ${totalMain}\n`;
+  text += `- مكتملة بالكامل: ${doneMain}\n`;
+  if (partialMain > 0) text += `- مكتملة جزئياً: ${partialMain} ⚠️\n`;
+  text += `- فاشلة: ${failedMain}\n`;
+  text += `- معدل النجاح: ${successRate.toFixed(1)}%\n`;
+
+  if (totalTime > 0) {
+    text += `\n⏱ توزيع الوقت:\n`;
+    text += `- الإجمالي: ${formatArabicTime(totalTime)}\n`;
+    const byCategory: Record<string, number> = {};
+    for (const t of summary.doneTasks) {
+      if (t.duration_minutes && t.duration_minutes > 0) {
+        const cat = t.category || 'غير مصنف';
+        byCategory[cat] = (byCategory[cat] || 0) + t.duration_minutes;
+      }
+    }
+    const sorted = Object.entries(byCategory).sort(([, a], [, b]) => b - a);
+    for (const [cat, min] of sorted) {
+      const pct = ((min / totalTime) * 100).toFixed(0);
+      text += `- ${cat}: ${formatArabicTime(min)} (${pct}%)\n`;
+    }
+    text += '\n';
+  }
+
+  text += `🎯 مهام اليوم:\n`;
+  text += `ـــــــــــــــــــــــ\n`;
+  const doneNames = summary.doneTasks.filter((t) => !t.origin_task).map((t) => extractCleanTaskName(t.content));
+  const failedNames = summary.failedTasks.filter((t) => !t.origin_task).map((t) => extractCleanTaskName(t.content));
+  const jsonFailedNames = summary.failures.filter((f) => !f.is_subtask).map((f) => extractCleanTaskName(f.content));
+  const allFailedSet = new Set([...failedNames, ...jsonFailedNames]);
+  for (const name of doneNames) {
+    text += `✅ ${name}\n`;
+  }
+  for (const name of allFailedSet) {
+    if (!doneNames.includes(name)) text += `❌ ${name}\n`;
+  }
+  if (summary.dailyChallenge) {
+    text += `\n🎯 التحدي اليوم: ${summary.dailyChallenge.challenge_text} (لم يُقيّم)\n`;
+  } else {
+    text += `\n🎯 التحدي اليوم: لا يوجد تحدي\n`;
+  }
+  return text;
+}
+
 // ============================================
 // Report Generator
 // ============================================

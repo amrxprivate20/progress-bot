@@ -160,8 +160,8 @@ export default {
       if (decision.type !== 'none') {
         await debugLog(env, settings, `Meta-coach intervention: ${decision.type} (level ${decision.escalationLevel})`);
 
-        // Execute the intervention
-        let message = await metaCoach.executeIntervention(chatId, decision);
+        // Execute the intervention (pass state to avoid second analyzeUserState → saves subrequests)
+        let message = await metaCoach.executeIntervention(chatId, decision, userState);
 
         if (message) {
           // Check-in window from settings (minutes) for "متبقي X دقائق للرد"

@@ -264,16 +264,36 @@ export async function completeParentInTodoistIfAllDone(
       return;
     }
 
-    // ✅ DEDUPLICATION: Check if we already completed this parent recently (within 60 seconds)
+    // ✅ DEDUPLICATION + 20-MINUTE RULE: A task (parent or sub) cannot be completed again unless 20 minutes have passed
     const completionMarkerKey = `parent_autocomplete_${parentTodoistId}_${egyptDate}`;
-    const existingMarker = await db.select('conversation_state', {
+    const PARENT_COMPLETION_COOLDOWN_MS = 20 * 60 * 1000;
+
+    const existingMarker = await db.select<{ data?: unknown; created_at?: string }>('conversation_state', {
       filter: { chat_id: op.eq(completionMarkerKey) },
+      limit: 1,
     });
 
-    if (existingMarker.length > 0) {
-      console.log(`⏭️ Parent ${parentTodoistId} already autocompleted today - skipping duplicate`);
-      if (env) await debugLog(env, settings, 'Parent autocomplete: skipped (already completed)', { parentTodoistId });
-      return;
+    if (existingMarker.length > 0 && existingMarker[0]) {
+      const row = existingMarker[0];
+      const data = typeof row.data === 'string' ? (() => { try { return JSON.parse(row.data as string) as Record<string, unknown>; } catch { return {}; } })() : (row.data as Record<string, unknown> | undefined) || {};
+      const completedAt = data.completed_at as string | undefined;
+
+      if (completedAt) {
+        const completedTime = new Date(completedAt).getTime();
+        const elapsed = Date.now() - completedTime;
+        if (elapsed < PARENT_COMPLETION_COOLDOWN_MS) {
+          console.log(`⏭️ Parent ${parentTodoistId} already completed ${(elapsed / 60000).toFixed(1)} min ago - skipping (20 min rule)`);
+          if (env) await debugLog(env, settings, 'Parent autocomplete: skipped (20 min rule)', { parentTodoistId });
+          return;
+        }
+        // Completed more than 20 min ago — allow re-completion; delete marker so we can proceed
+        await db.delete('conversation_state', { chat_id: op.eq(completionMarkerKey) }).catch(() => {});
+      } else {
+        // Pending (another request is handling) — skip to avoid double completion
+        console.log(`⏭️ Parent ${parentTodoistId} autocomplete already in progress - skipping`);
+        if (env) await debugLog(env, settings, 'Parent autocomplete: skipped (in progress)', { parentTodoistId });
+        return;
+      }
     }
 
     // ✅ Check parent task status in Todoist - with timeout
@@ -374,6 +394,37 @@ export async function completeParentInTodoistIfAllDone(
 
     console.log(`✅ All priority subtasks completed for today!`);
 
+    // ✅ CLAIM: Create marker immediately so concurrent subtask completions don't all complete the parent (only first wins)
+    const completionMarkerKeyForClaim = `parent_autocomplete_${parentTodoistId}_${egyptDate}`;
+    const existingClaim = await db.select<{ data?: unknown }>('conversation_state', {
+      filter: { chat_id: op.eq(completionMarkerKeyForClaim) },
+      limit: 1,
+    });
+    if (existingClaim.length > 0) {
+      const claimData = typeof existingClaim[0]?.data === 'string'
+        ? (() => { try { return JSON.parse(existingClaim[0].data as string) as Record<string, unknown>; } catch { return {}; } })()
+        : (existingClaim[0]?.data as Record<string, unknown> | undefined) || {};
+      if (!claimData.completed_at) {
+        console.log(`⏭️ Parent ${parentTodoistId} autocomplete already claimed by another request - skipping`);
+        if (env) await debugLog(env, settings, 'Parent autocomplete: skipped (already claimed)', { parentTodoistId });
+        return;
+      }
+      // completed_at set and we passed the 20-min check earlier — marker was deleted, so we're the only one here; continue
+    }
+    try {
+      await db.delete('conversation_state', { chat_id: op.eq(completionMarkerKeyForClaim) }).catch(() => {});
+      await db.insert('conversation_state', {
+        chat_id: completionMarkerKeyForClaim,
+        conversation_type: 'parent_autocomplete_marker',
+        data: { parentId: parentTodoistId, date: egyptDate, status: 'pending' },
+        expires_at: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
+      });
+      console.log(`🔒 Claimed autocomplete for parent ${parentTodoistId}`);
+    } catch (markerErr) {
+      console.error('⚠️ Failed to claim autocomplete marker:', markerErr);
+      return;
+    }
+
     // All subtasks in Todoist are completed - check for failed subtasks in our JSON
     const dailyFailures = await getDailyFailures(db, egyptDate);
     const failedSubtasksForParent = dailyFailures?.failed_tasks.filter(f => {
@@ -451,20 +502,6 @@ export async function completeParentInTodoistIfAllDone(
 
     console.log(`🎯 Autocompleting parent ${parentTodoistId} in Todoist...`);
 
-    // ✅ Create deduplication marker BEFORE completing to prevent race conditions (reuse completionMarkerKey from above)
-    try {
-      await db.delete('conversation_state', { chat_id: op.eq(completionMarkerKey) }).catch(() => {});
-      await db.insert('conversation_state', {
-        chat_id: completionMarkerKey,
-        conversation_type: 'parent_autocomplete_marker',
-        data: { parentId: parentTodoistId, date: egyptDate },
-        expires_at: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
-      });
-      console.log(`🔒 Created autocomplete marker for parent ${parentTodoistId}`);
-    } catch (markerError) {
-      console.error('⚠️ Failed to create marker, but continuing:', markerError);
-    }
-
     const completeResponse = await fetch(
       `https://api.todoist.com/api/v1/tasks/${parentTodoistId}/close`,
       {
@@ -476,7 +513,18 @@ export async function completeParentInTodoistIfAllDone(
     if (completeResponse.ok) {
       console.log(`🎉 Parent ${parentTodoistId} autocompleted in Todoist!`);
       if (env) await debugLog(env, settings, 'Parent autocomplete: SUCCESS', { parentTodoistId, totalSubtasks: todoistSubtasks.length, completedCount });
-      // Do NOT update parent status here - updateParentTaskStatus is the single source of truth (DB only)
+      try {
+        await db.update(
+          'conversation_state',
+          { chat_id: op.eq(completionMarkerKey) },
+          {
+            data: { parentId: parentTodoistId, date: egyptDate, status: 'pending', completed_at: new Date().toISOString() },
+            expires_at: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
+          }
+        );
+      } catch (e) {
+        console.error('⚠️ Failed to set completed_at on marker:', e);
+      }
     } else {
       const errorText = await completeResponse.text();
       console.error(`❌ Autocomplete failed: ${completeResponse.status} ${errorText}`);
